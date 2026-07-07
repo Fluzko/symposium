@@ -90,6 +90,7 @@
   - [Accepted](./rfds/accepted.md) <!-- put accepted rfds in this section; the file goes in the rfds directory -->
     - [MCP meta-server](./rfds/mcp-meta-server/README.md)
     - [Registry-centric plugin distribution](./rfds/registry-centric-plugins/README.md)
+      - [Plugin model](./rfds/registry-centric-plugins/plugin-model/README.md)
     - [Predicate caching](./rfds/predicate-caching/README.md)
   - [Completed](./rfds/completed.md) <!-- move completed rfds to this section -->
     - [Configuration parsing and normalization](./rfds/config-normalization/README.md)

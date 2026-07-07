@@ -94,6 +94,7 @@
       - [PM interface](./rfds/registry-centric-plugins/pm-interface/README.md)
       - [Cargo PM](./rfds/registry-centric-plugins/cargo-pm/README.md)
       - [Discovery & sync](./rfds/registry-centric-plugins/discovery-sync/README.md)
+      - [User-managed plugins](./rfds/registry-centric-plugins/user-managed-plugins/README.md)
     - [Predicate caching](./rfds/predicate-caching/README.md)
   - [Completed](./rfds/completed.md) <!-- move completed rfds to this section -->
     - [Configuration parsing and normalization](./rfds/config-normalization/README.md)

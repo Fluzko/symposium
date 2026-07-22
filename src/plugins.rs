@@ -1013,13 +1013,6 @@ enum ManifestOrigin<'a> {
     Crate {
         crate_name: &'a str,
     },
-    /// An entry in a recommendations registry's `cargo/<name>/` directory:
-    /// the name defaults to the dependency's, and an implied
-    /// `depends-on(<name>)` gate is appended to the plugin predicates (which
-    /// is also what satisfies the must-reference-a-dependency rule).
-    Recommendations {
-        dep_name: &'a str,
-    },
 }
 
 /// Raw TOML manifest deserialized from a plugin `.toml` file.
@@ -1313,9 +1306,8 @@ fn registry_pm_cx(sym: &Symposium) -> crate::pm::PmContext<'static> {
 }
 
 /// One package offered by a PM instance, located on disk: the instance's
-/// display name (origin attribution), the source content root, the package's
-/// directory within it, and — for recommendations entries — the dependency
-/// it recommends a plugin for.
+/// display name (origin attribution), the source content root, and the
+/// package's directory within it.
 struct PluginOffer {
     registry_name: String,
     /// Registry content root. `ParsedPlugin::source_dir` — the base for a
@@ -1323,7 +1315,6 @@ struct PluginOffer {
     root: PathBuf,
     /// The package's directory relative to `root`.
     subpath: PathBuf,
-    recommends: Option<String>,
 }
 
 impl PluginOffer {
@@ -1379,7 +1370,6 @@ async fn list_plugin_offers(
                 registry_name: inst.name.clone(),
                 root,
                 subpath,
-                recommends: info.recommends,
             });
         }
     }
@@ -1392,24 +1382,22 @@ enum OfferItem {
     Skill(PathBuf),
 }
 
-/// Interpret one offer's package. A recommendations entry loads with the
-/// recommended dependency as its gate and default name; any other entry is
-/// an ordinary registry plugin or standalone skill. `None` when the
-/// directory is neither (e.g. it disappeared since it was listed).
+/// Interpret one offer's package as an ordinary registry plugin or standalone
+/// skill. `None` when the directory is neither (e.g. it disappeared since it
+/// was listed).
 fn load_offer(offer: &PluginOffer) -> Option<OfferItem> {
     let dir = offer.dir();
     match crate::pm::layout::classify(&dir)? {
-        crate::pm::layout::EntryKind::Plugin(toml_path) => {
-            let origin = match offer.recommends.as_deref() {
-                Some(dep_name) => ManifestOrigin::Recommendations { dep_name },
-                None => ManifestOrigin::Registry,
-            };
-            Some(OfferItem::Plugin(
-                load_plugin_as(&toml_path, &offer.registry_name, &offer.root, origin)
-                    .map(Box::new)
-                    .with_context(|| format!("loading plugin from `{}`", toml_path.display())),
-            ))
-        }
+        crate::pm::layout::EntryKind::Plugin(toml_path) => Some(OfferItem::Plugin(
+            load_plugin_as(
+                &toml_path,
+                &offer.registry_name,
+                &offer.root,
+                ManifestOrigin::Registry,
+            )
+            .map(Box::new)
+            .with_context(|| format!("loading plugin from `{}`", toml_path.display())),
+        )),
         crate::pm::layout::EntryKind::Skill(skill_md) => Some(OfferItem::Skill(skill_md)),
     }
 }
@@ -1917,11 +1905,10 @@ fn validate_manifest(
         (Some(n), _) => n,
         (None, ManifestOrigin::WorkspaceMember { dir_name, .. }) => dir_name.to_string(),
         (None, ManifestOrigin::Crate { crate_name }) => crate_name.to_string(),
-        (None, ManifestOrigin::Recommendations { dep_name }) => dep_name.to_string(),
         (None, ManifestOrigin::Registry) => bail!("plugin manifest is missing `name`"),
     };
     match &origin {
-        ManifestOrigin::Registry | ManifestOrigin::Recommendations { .. } => {
+        ManifestOrigin::Registry => {
             if manifest.defaults.is_some() {
                 bail!("`[defaults]` is only supported in workspace and crate plugin manifests");
             }
@@ -2029,19 +2016,8 @@ fn validate_manifest(
     }
 
     reject_crates_field(&manifest.crates)?;
-    let mut predicates =
+    let predicates =
         crate::predicate::PredicateSet::merged(Some(manifest.depends_on), manifest.predicates);
-    if let ManifestOrigin::Recommendations { dep_name } = &origin {
-        // The directory position implies the gate: a `cargo/<name>/` entry
-        // applies when the workspace depends on <name> (version ignored, per
-        // the recommendations convention).
-        predicates
-            .predicates
-            .push(crate::predicate::Predicate::DependsOn(
-                dep_name.to_string(),
-                None,
-            ));
-    }
     let mut skills = manifest
         .skills
         .into_iter()
@@ -2070,8 +2046,7 @@ fn validate_manifest(
     // has no gate to infer, so it loads dormant: known, but inactive until
     // a `[plugins] use` entry names it. The positional origins are exempt
     // because their gate comes from where they were found (workspace
-    // membership, the implied `depends-on` of a recommendations entry, the
-    // reference that reached a crate).
+    // membership, or the reference that reached a crate).
     let requires_use = matches!(origin, ManifestOrigin::Registry) && {
         let has_custom_predicate = predicates
             .predicates
@@ -2261,44 +2236,23 @@ mod tests {
         validate_manifest(manifest, origin)
     }
 
-    /// A recommendations `cargo/<name>/` entry needs neither `name` nor
-    /// `depends-on`: its directory position supplies both.
+    /// A flat registry plugin gates itself on its own `depends-on`, evaluated
+    /// when it is loaded — the layout supplies no implied gate.
     #[test]
-    fn recommendations_entry_infers_name_and_gate() {
-        let plugin = from_str_as(
-            indoc! {r#"
-                [[skills]]
-                source.path = "skills"
-            "#},
-            ManifestOrigin::Recommendations {
-                dep_name: "widget-lib",
-            },
-        )
-        .unwrap();
-        assert_eq!(plugin.name, "widget-lib");
-        assert!(plugin.applies(&mut ctx(&[PackageId::new("cargo", "widget-lib", "1.0.0")])));
-        assert!(!plugin.applies(&mut ctx(&[PackageId::new("cargo", "serde", "1.0.0")])));
-    }
-
-    /// The implied gate is ANDed with whatever the entry declares itself.
-    #[test]
-    fn recommendations_entry_keeps_its_own_name_and_predicates() {
+    fn registry_plugin_gates_on_its_own_depends_on() {
         let plugin = from_str_as(
             indoc! {r#"
                 name = "widget-tools"
-                depends-on = ["serde"]
+                depends-on = ["widget-lib"]
+                [[skills]]
+                source.path = "skills"
             "#},
-            ManifestOrigin::Recommendations {
-                dep_name: "widget-lib",
-            },
+            ManifestOrigin::Registry,
         )
         .unwrap();
         assert_eq!(plugin.name, "widget-tools");
-        assert!(!plugin.applies(&mut ctx(&[PackageId::new("cargo", "widget-lib", "1.0.0")])));
-        assert!(plugin.applies(&mut ctx(&[
-            PackageId::new("cargo", "widget-lib", "1.0.0"),
-            PackageId::new("cargo", "serde", "1.0.0"),
-        ])));
+        assert!(plugin.applies(&mut ctx(&[PackageId::new("cargo", "widget-lib", "1.0.0")])));
+        assert!(!plugin.applies(&mut ctx(&[PackageId::new("cargo", "serde", "1.0.0")])));
     }
 
     #[test]

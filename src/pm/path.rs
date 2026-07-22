@@ -46,7 +46,9 @@ impl PathPm {
                 id: PackageId::new(&self.name, layout::subpath_key(&entry.subpath), ANY_VERSION),
                 description: None,
                 subpath: Some(entry.subpath),
-                recommends: entry.recommends,
+                // A registry entry gates itself through its own manifest
+                // `depends-on`; the flat layout carries no recommendation.
+                recommends: None,
             })
             .collect())
     }
@@ -56,12 +58,6 @@ impl PathPm {
 impl PackageManager for PathPm {
     fn name(&self) -> &str {
         &self.name
-    }
-
-    /// A configured directory is a trust root: either the user pointed a
-    /// `[[registry]]` entry at it, or it is their own `~/.symposium/plugins/`.
-    fn trusted(&self) -> bool {
-        true
     }
 
     /// The registry's entries. `deps` is unused — a local registry's

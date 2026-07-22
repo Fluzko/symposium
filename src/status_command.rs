@@ -148,10 +148,6 @@ pub async fn workspace_status(
 fn entry_for(found: &DiscoveredPlugin) -> StatusEntry {
     let (state, root) = match found.enablement {
         Enablement::Used => (StatusState::Active, "`[plugins] use`".to_string()),
-        Enablement::Registry => (
-            StatusState::Active,
-            format!("registry `{}`", found.registry),
-        ),
         Enablement::AutoEnabled => (StatusState::Active, "`[plugins] auto-enable`".to_string()),
         Enablement::Declined => (
             StatusState::Declined,

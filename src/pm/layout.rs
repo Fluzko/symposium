@@ -9,10 +9,10 @@
 //!
 //! The flat layout defined here — every directory containing a
 //! [`MANIFEST_FILE`] or [`SKILL_FILE`] is an entry, discovered recursively,
-//! and a claimed directory is not recursed into — backs [`PathPm`](super::PathPm).
-//! The recommendations convention (pm-named namespace directories) is its own
-//! PM, [`RecommendationsPm`](super::RecommendationsPm), which reuses the
-//! classification and walk defined here.
+//! and a claimed directory is not recursed into — backs [`PathPm`](super::PathPm),
+//! the single registry-instance PM. An entry declares which dependencies
+//! activate it through its own manifest `depends-on`, evaluated when the
+//! plugin is loaded; the layout carries no dependency information itself.
 
 use std::path::{Path, PathBuf};
 
@@ -52,9 +52,6 @@ pub fn classify(dir: &Path) -> Option<EntryKind> {
 pub struct RegistryEntry {
     /// The entry directory, relative to the source root.
     pub subpath: PathBuf,
-    /// For recommendations `cargo/<name>/` entries: the dependency this
-    /// entry recommends a plugin for.
-    pub recommends: Option<String>,
 }
 
 /// Enumerate the entries in the flat-layout registry source rooted at `root`,
@@ -91,10 +88,7 @@ pub(crate) fn walk(dir: &Path, rel: &Path, entries: &mut Vec<RegistryEntry>) {
         }
         let sub = rel.join(entry.file_name());
         if classify(&path).is_some() {
-            entries.push(RegistryEntry {
-                subpath: sub,
-                recommends: None,
-            });
+            entries.push(RegistryEntry { subpath: sub });
         } else {
             walk(&path, &sub, entries);
         }
@@ -132,7 +126,6 @@ mod tests {
             subpaths,
             vec![PathBuf::from("group/deep/skill"), PathBuf::from("plug")]
         );
-        assert!(entries.iter().all(|e| e.recommends.is_none()));
 
         // Missing root: no entries, no error.
         assert!(enumerate(&tmp.path().join("nope")).unwrap().is_empty());

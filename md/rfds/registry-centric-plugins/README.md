@@ -226,6 +226,8 @@ See the [PM interface sub-RFD](./pm-interface/README.md) for full protocol detai
 
 #### Example: The recommendations manager
 
+> **Implementation note.** The shipped design does *not* build a dedicated recommendations PM or the `cargo/<name>/` namespace convention below. The actual `symposium-recommendations` repository is a flat registry read by the ordinary `PathPm`, and each entry declares which crates activate it with its own `depends-on` (evaluated when the plugin is loaded, like any registry plugin). A recommendations plugin is just "a plugin activated when certain deps are present," which the normal `depends-on` predicate already expresses — so the layout carries no dependency information and no separate PM is involved. The namespace convention could be re-added later as a thin lowering inside `PathPm` (a `cargo/<name>/` entry implying `depends-on(cargo:<name>)`) if it earns its keep. The proposal below is kept as the original design.
+
 The recommendations PM is provided by the `symposium-recommendations` crate. It operates over a repository of curated plugin directories, organized by the PM namespace they relate to:
 
 ```

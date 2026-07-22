@@ -402,12 +402,6 @@ pub struct ResolvedRegistry {
     /// For user sources this is the user config dir; for project sources
     /// this is the project root.
     pub base_dir: PathBuf,
-    /// The registry follows the recommendations convention: pm-named
-    /// namespace directories (`cargo/<name>/` entries implicitly gated on
-    /// `depends-on(<name>)`, `symposium/` entries unconditional) rather than
-    /// a flat tree of plugins. Only the built-in recommendations registry
-    /// sets this today; there is no config surface for it yet.
-    pub recommendations: bool,
 }
 
 impl ResolvedRegistry {
@@ -541,11 +535,8 @@ impl Symposium {
     }
 
     /// The active package-manager set: the fixed ecosystem transports plus one
-    /// instance per configured registry ([`registries`](Self::registries)).
-    ///
-    /// A recommendations registry gets a
-    /// [`RecommendationsPm`](crate::pm::RecommendationsPm); everything else
-    /// gets a [`PathPm`](crate::pm::PathPm) over its content directory —
+    /// [`PathPm`](crate::pm::PathPm) per configured registry
+    /// ([`registries`](Self::registries)) over its content directory —
     /// including git registries, whose repository is unpacked into the cache
     /// before it is read. Each instance is named for its registry, since that
     /// name is what its plugins are attributed to.
@@ -557,11 +548,7 @@ impl Symposium {
                 let dir = resolved.content_dir(self.cache_dir())?;
                 let name = resolved.registry.name;
                 let pm: Box<dyn crate::pm::PackageManager + Send + Sync> =
-                    if resolved.recommendations {
-                        Box::new(crate::pm::RecommendationsPm::new(name.clone(), dir))
-                    } else {
-                        Box::new(crate::pm::PathPm::new(name.clone(), dir))
-                    };
+                    Box::new(crate::pm::PathPm::new(name.clone(), dir));
                 Some(crate::pm::PmInstance { name, pm })
             })
             .collect();
@@ -651,7 +638,6 @@ impl Symposium {
                     auto_update: true,
                 },
                 base_dir: self.dirs.config_dir.clone(),
-                recommendations: true,
             });
         }
 
@@ -664,7 +650,6 @@ impl Symposium {
                     auto_update: true,
                 },
                 base_dir: self.dirs.config_dir.clone(),
-                recommendations: false,
             });
         }
 
@@ -672,7 +657,6 @@ impl Symposium {
             registries.push(ResolvedRegistry {
                 registry: registry.clone(),
                 base_dir: self.dirs.config_dir.clone(),
-                recommendations: false,
             });
         }
 

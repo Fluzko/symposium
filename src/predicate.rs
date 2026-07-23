@@ -25,10 +25,15 @@
 use std::path::Path;
 use std::process::Command;
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result, bail};
 use symposium_sdk::predicate::CustomPredicateEvent;
 
 use crate::pm::PackageId;
+use crate::predicate_cache::{
+    CacheEntry, CacheTtl, Fingerprints, PredicateCache, WatchSet, cache_key, now_ms,
+};
 
 /// Names reserved for builtin predicates. Custom predicates must not use
 /// these. `crate` is retired syntax but stays reserved so a custom predicate
@@ -66,6 +71,12 @@ pub struct PredicateContext<'a> {
     used_names: std::collections::HashSet<String>,
     custom_entries: std::collections::HashMap<String, ResolvedPredicateEntry>,
     custom_cache: std::collections::HashMap<(String, String), CustomPredicateResult>,
+    /// The current (possibly mutated) view of the on-disk cache.
+    disk_cache: Option<Arc<PredicateCache>>,
+    /// The load-time snapshot. `Arc::ptr_eq(&disk_cache, &disk_cache_original)`
+    /// stays true until the first mutation goes through `Arc::make_mut`, so
+    /// "was this modified?" is derived from the data, not a separate flag.
+    disk_cache_original: Option<Arc<PredicateCache>>,
 }
 
 impl<'a> PredicateContext<'a> {
@@ -76,6 +87,8 @@ impl<'a> PredicateContext<'a> {
             used_names: std::collections::HashSet::new(),
             custom_entries: std::collections::HashMap::new(),
             custom_cache: std::collections::HashMap::new(),
+            disk_cache: None,
+            disk_cache_original: None,
         }
     }
 
@@ -107,6 +120,30 @@ impl<'a> PredicateContext<'a> {
             .contains(&crate::crate_sources::normalize_crate_name(plugin_name))
     }
 
+    /// Load a persistent cache from disk and attach it to this context.
+    /// Missing / malformed cache files yield an empty cache (see
+    /// [`PredicateCache::load`]).
+    pub fn with_disk_cache(mut self, cache_path: &Path) -> Self {
+        let loaded = Arc::new(PredicateCache::load(cache_path));
+        self.disk_cache_original = Some(Arc::clone(&loaded));
+        self.disk_cache = Some(loaded);
+        self
+    }
+
+    /// Persist the disk cache back to `cache_path`. No-op if this context
+    /// was not built with `with_disk_cache` or the cache was not modified.
+    pub fn persist_disk_cache(&mut self, cache_path: &Path) -> Result<()> {
+        let (Some(current), Some(original)) = (&self.disk_cache, &self.disk_cache_original) else {
+            return Ok(());
+        };
+        if Arc::ptr_eq(current, original) {
+            return Ok(());
+        }
+        current.save(cache_path)?;
+        self.disk_cache_original = Some(Arc::clone(current));
+        Ok(())
+    }
+
     /// Stamp whether the plugin about to be evaluated arrived via workspace
     /// membership. Call before evaluating each plugin's predicate sets; the
     /// value applies to all of that plugin's nested components (groups,
@@ -116,16 +153,63 @@ impl<'a> PredicateContext<'a> {
     }
 
     /// Evaluate a custom predicate by name and argument, returning the cached
-    /// result if already computed.
+    /// result if already computed. Consults the in-memory cache first, then
+    /// the on-disk cache (when present). On miss, spawns the predicate and
+    /// updates both caches according to the emitted watch events.
     fn evaluate_custom(&mut self, name: &str, arg: &str) -> bool {
-        let key = (name.to_string(), arg.to_string());
-        if let Some(result) = self.custom_cache.get(&key) {
+        let mem_key = (name.to_string(), arg.to_string());
+        if let Some(result) = self.custom_cache.get(&mem_key) {
             return result.passed;
         }
+
+        let disk_key = cache_key(name, arg);
+        if let Some(cache) = &self.disk_cache {
+            if let Some(entry) = cache.get(&disk_key) {
+                if !entry.is_time_expired(now_ms())
+                    && Fingerprints::capture(&watch_set_from_entry(entry)) == entry.fingerprints
+                {
+                    // Disk hit. Populate the in-memory cache with a result
+                    // that has no events; the events belong to the run that
+                    // originally produced this entry.
+                    let passed = entry.result;
+                    self.custom_cache.insert(
+                        mem_key,
+                        CustomPredicateResult {
+                            passed,
+                            events: Vec::new(),
+                        },
+                    );
+                    return passed;
+                }
+            }
+        }
+
         let result = run_custom_predicate(&self.custom_entries, name, arg);
         let passed = result.passed;
-        self.custom_cache.insert(key, result);
+
+        if let Some(cache_arc) = self.disk_cache.as_mut() {
+            let cache = Arc::make_mut(cache_arc);
+            let set = WatchSet::from_events(&result.events);
+            if !matches!(set.cache_ttl, CacheTtl::Never) {
+                cache.put(disk_key, CacheEntry::from_result(passed, &set));
+            } else {
+                // Explicit no-cache: drop any stale entry we might have had.
+                cache.entries.remove(&cache_key(name, arg));
+            }
+        }
+
+        self.custom_cache.insert(mem_key, result);
         passed
+    }
+}
+
+/// Recompute the watch set from a stored cache entry so we can capture
+/// fresh fingerprints and compare them against the stored ones.
+fn watch_set_from_entry(entry: &CacheEntry) -> WatchSet {
+    WatchSet {
+        files: entry.fingerprints.files.keys().cloned().collect(),
+        env: entry.fingerprints.env.keys().cloned().collect(),
+        cache_ttl: CacheTtl::Forever,
     }
 }
 
@@ -1417,6 +1501,132 @@ mod tests {
                 arg: "hello".into()
             }
         );
+    }
+
+    // --- Disk cache integration tests ---
+
+    fn ctx_with_disk_cache<'a>(
+        deps: &'a [PackageId],
+        entries: std::collections::HashMap<String, ResolvedPredicateEntry>,
+        cache_path: &Path,
+    ) -> PredicateContext<'a> {
+        PredicateContext::with_custom_predicates(deps, entries).with_disk_cache(cache_path)
+    }
+
+    fn entries_for(
+        name: &str,
+        script_path: &Path,
+    ) -> std::collections::HashMap<String, ResolvedPredicateEntry> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            name.to_string(),
+            ResolvedPredicateEntry {
+                runnable: symposium_install::Runnable::Script(script_path.to_path_buf()),
+                args: vec![],
+            },
+        );
+        map
+    }
+
+    #[test]
+    fn disk_cache_hit_avoids_second_spawn() {
+        use std::io::Write;
+        // Script writes one line to counter_path on every run and emits no
+        // events → cached indefinitely.
+        let counter = tempfile::NamedTempFile::new().unwrap();
+        let counter_path = counter.path().to_path_buf();
+        let script = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
+        writeln!(
+            script.as_file(),
+            "#!/bin/sh\necho ran >> {}\nexit 0",
+            counter_path.display()
+        )
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let cache_path = crate::predicate_cache::PredicateCache::path_for_workspace(
+            dir.path(),
+            workspace.path(),
+        );
+
+        // First eval: fresh context populates the disk cache.
+        {
+            let mut ctx =
+                ctx_with_disk_cache(&[], entries_for("always", script.path()), &cache_path);
+            let pred = Predicate::Custom {
+                name: "always".into(),
+                arg: "x".into(),
+            };
+            assert!(pred.evaluate(&mut ctx));
+            ctx.persist_disk_cache(&cache_path).unwrap();
+        }
+
+        // Second eval: brand-new context (no in-memory carryover) reads the
+        // disk cache and must not spawn the script again.
+        {
+            let mut ctx =
+                ctx_with_disk_cache(&[], entries_for("always", script.path()), &cache_path);
+            let pred = Predicate::Custom {
+                name: "always".into(),
+                arg: "x".into(),
+            };
+            assert!(pred.evaluate(&mut ctx));
+        }
+
+        let runs = std::fs::read_to_string(&counter_path).unwrap();
+        assert_eq!(runs.lines().count(), 1, "predicate should spawn once");
+    }
+
+    #[test]
+    fn disk_cache_time_expired_entry_respawns() {
+        use std::io::Write;
+        // Script emits WatchTime(1) so any subsequent read after 1ms wall
+        // clock is stale and must respawn.
+        let counter = tempfile::NamedTempFile::new().unwrap();
+        let counter_path = counter.path().to_path_buf();
+        let script = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
+        writeln!(
+            script.as_file(),
+            "#!/bin/sh\necho ran >> {}\nprintf '{{\"watchTime\":1}}\\n'\nexit 0",
+            counter_path.display()
+        )
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let cache_path = crate::predicate_cache::PredicateCache::path_for_workspace(
+            dir.path(),
+            workspace.path(),
+        );
+
+        // First eval populates the cache with a 1ms TTL.
+        {
+            let mut ctx =
+                ctx_with_disk_cache(&[], entries_for("ticking", script.path()), &cache_path);
+            let pred = Predicate::Custom {
+                name: "ticking".into(),
+                arg: "x".into(),
+            };
+            assert!(pred.evaluate(&mut ctx));
+            ctx.persist_disk_cache(&cache_path).unwrap();
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Second eval: entry has expired, script must spawn again.
+        {
+            let mut ctx =
+                ctx_with_disk_cache(&[], entries_for("ticking", script.path()), &cache_path);
+            let pred = Predicate::Custom {
+                name: "ticking".into(),
+                arg: "x".into(),
+            };
+            assert!(pred.evaluate(&mut ctx));
+        }
+
+        let runs = std::fs::read_to_string(&counter_path).unwrap();
+        assert_eq!(runs.lines().count(), 2, "predicate should spawn twice");
     }
 
     // --- Predicate event parser tests ---

@@ -16,10 +16,9 @@
 //! typically expands to `~/.symposium/cache`. The cache is discarded on
 //! Symposium version upgrade via the `version` tag written into each file.
 //!
-//! Wiring this cache into `run_custom_predicate` is deferred to a follow-up
-//! commit; today the types are used only through their tests.
-
-#![allow(dead_code)] // consumed by the evaluator in the next commit
+//! The cache is consumed by [`crate::predicate::PredicateContext`] via
+//! [`PredicateContext::with_disk_cache`](crate::predicate::PredicateContext::with_disk_cache)
+//! and [`PredicateContext::persist_disk_cache`](crate::predicate::PredicateContext::persist_disk_cache).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -127,20 +126,17 @@ impl FileFingerprint {
         match fs::metadata(path) {
             Ok(meta) => Self {
                 size: Some(meta.len()),
-                mtime_ns: meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| {
-                        t.duration_since(std::time::UNIX_EPOCH)
-                            .ok()
-                            .map(|d| d.as_nanos() as i128)
-                            .or_else(|| {
-                                std::time::UNIX_EPOCH
-                                    .duration_since(t)
-                                    .ok()
-                                    .map(|d| -(d.as_nanos() as i128))
-                            })
-                    }),
+                mtime_ns: meta.modified().ok().and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_nanos() as i128)
+                        .or_else(|| {
+                            std::time::UNIX_EPOCH
+                                .duration_since(t)
+                                .ok()
+                                .map(|d| -(d.as_nanos() as i128))
+                        })
+                }),
             },
             Err(_) => Self::default(),
         }
@@ -241,7 +237,9 @@ impl PredicateCache {
         let mut hasher = Sha256::new();
         hasher.update(canonical.as_os_str().as_encoded_bytes());
         let digest = hex_encode(&hasher.finalize());
-        cache_dir.join(PREDICATES_SUBDIR).join(format!("{digest}.json"))
+        cache_dir
+            .join(PREDICATES_SUBDIR)
+            .join(format!("{digest}.json"))
     }
 
     /// Read the cache from disk. Missing files, malformed JSON, or a schema
@@ -292,13 +290,13 @@ impl PredicateCache {
             fs::create_dir_all(parent)
                 .with_context(|| format!("creating cache directory {}", parent.display()))?;
         }
-        let serialized = serde_json::to_vec_pretty(self)
-            .context("serializing predicate cache")?;
+        let serialized = serde_json::to_vec_pretty(self).context("serializing predicate cache")?;
         // Atomic replace: write to a sibling temp file, fsync, rename.
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         let mut tmp = tempfile::NamedTempFile::new_in(dir)
             .with_context(|| format!("creating temp file in {}", dir.display()))?;
-        tmp.write_all(&serialized).context("writing predicate cache")?;
+        tmp.write_all(&serialized)
+            .context("writing predicate cache")?;
         tmp.as_file_mut().sync_all().ok();
         tmp.persist(path)
             .map_err(|e| e.error)

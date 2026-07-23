@@ -156,29 +156,47 @@ pub async fn discover(
     discovery
 }
 
-/// The workspace dependencies whose embedded plugins the user has enabled —
-/// through `[plugins] auto-enable` or an applicable `use` entry — as crate
-/// names to load.
+/// The crate names whose embedded plugins the user has enabled, to load at
+/// sync time. Two sources:
 ///
-/// This reads the config rather than the offer list, so enabling a registry
-/// dependency works even though its source isn't on disk to be discovered
-/// yet (see [`CargoPm::list_plugins`](crate::pm::CargoPm)). Declined names
-/// are pruned.
-pub fn enabled_dependencies<'a>(
+/// 1. workspace **dependencies** covered by `[plugins] auto-enable` or an
+///    applicable `use` entry, and
+/// 2. crates named by a `use` entry that are **not** dependencies —
+///    `cargo agents use <crate>` pulls a plugin in from its registry
+///    (crates.io) whether or not the workspace depends on it.
+///
+/// `auto-enable` intentionally contributes only (1): it is consent for what a
+/// dependency you already have carries, not a way to add crates. Declined
+/// names are pruned. This reads the config rather than the offer list, so a
+/// name works even though its source isn't on disk to be discovered yet (see
+/// [`CargoPm::list_plugins`](crate::pm::CargoPm)).
+pub fn enabled_dependencies(
     sym: &Symposium,
-    dep_ids: &'a [PackageId],
+    dep_ids: &[PackageId],
     workspace_root: &Path,
-) -> Vec<&'a str> {
+) -> Vec<String> {
     let plugins = &sym.config.plugins;
-    dep_ids
+    let mut names: Vec<String> = dep_ids
         .iter()
         .filter(|id| id.pm == CARGO_PM)
         .filter(|id| !plugins.is_disabled(&id.name))
         .filter(|id| {
             plugins.is_auto_enabled(&id.name) || plugins.is_used_in(&id.name, workspace_root)
         })
-        .map(|id| id.name.as_str())
-        .collect()
+        .map(|id| id.name.clone())
+        .collect();
+
+    for used in plugins.used_names_in(workspace_root) {
+        let norm = normalize_crate_name(used);
+        let known = plugins.is_disabled(used)
+            || names.iter().any(|n| normalize_crate_name(n) == norm)
+            || dep_ids.iter().any(|id| normalize_crate_name(&id.name) == norm);
+        if !known {
+            names.push(used.to_string());
+        }
+    }
+
+    names
 }
 
 /// Run [`discover`] for the workspace `deps` points at, or an empty
@@ -481,7 +499,48 @@ mod tests {
 
         assert_eq!(
             enabled_dependencies(&sym, &deps, tmp.path()),
-            vec!["serde", "tokio"]
+            vec!["serde".to_string(), "tokio".to_string()]
+        );
+    }
+
+    /// `use`-ing a crate that isn't a workspace dependency still enables it, so
+    /// sync loads its plugin from the registry. `auto-enable` does not — it is
+    /// consent for dependencies you already have.
+    #[test]
+    fn use_enables_a_non_dependency_crate_but_auto_enable_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sym = sym_with(
+            tmp.path(),
+            indoc! {r#"
+                [plugins]
+                auto-enable = ["not-a-dep-autoenable"]
+                use = ["my-skills-crate", { name = "scoped-crate", workspace = "/elsewhere" }]
+            "#},
+        );
+        // Only `anyhow` is an actual dependency; the rest are not.
+        let deps = [PackageId::new(CARGO_PM, "anyhow", "1.0.0")];
+
+        let enabled = enabled_dependencies(&sym, &deps, tmp.path());
+        // The `use`d non-dependency crate is enabled; the workspace-scoped one
+        // (for /elsewhere) and the auto-enabled non-dependency are not.
+        assert_eq!(enabled, vec!["my-skills-crate".to_string()]);
+    }
+
+    /// A `use`d crate that *is* a dependency appears once, not twice.
+    #[test]
+    fn used_dependency_is_not_duplicated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sym = sym_with(
+            tmp.path(),
+            indoc! {r#"
+                [plugins]
+                use = ["serde"]
+            "#},
+        );
+        let deps = [PackageId::new(CARGO_PM, "serde", "1.0.210")];
+        assert_eq!(
+            enabled_dependencies(&sym, &deps, tmp.path()),
+            vec!["serde".to_string()]
         );
     }
 }

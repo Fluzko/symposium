@@ -127,6 +127,38 @@ pub async fn workspace_status(
         entries.push(entry_for(found));
     }
 
+    // Crates enabled by `use` that are *not* dependency-embedded offers — e.g.
+    // `cargo agents use <crate>` for a crate the workspace doesn't depend on.
+    // Discovery only sees dependencies, so these are invisible above; surface
+    // them from the config the same way sync loads them
+    // ([`enabled_dependencies`](crate::discovery::enabled_dependencies)).
+    let normalize = crate::crate_sources::normalize_crate_name;
+    let shown: std::collections::HashSet<String> = registry
+        .plugins
+        .iter()
+        .map(|p| normalize(&p.plugin.name))
+        .chain(
+            discovery
+                .active
+                .iter()
+                .chain(&discovery.auto_enabled)
+                .chain(&discovery.candidates)
+                .chain(&discovery.declined)
+                .map(|d| normalize(d.name())),
+        )
+        .collect();
+    for name in crate::discovery::enabled_dependencies(sym, &dep_ids, &ws.root) {
+        if shown.contains(&normalize(&name)) {
+            continue;
+        }
+        entries.push(StatusEntry {
+            name,
+            version: None,
+            root: "`[plugins] use` (not a dependency)".to_string(),
+            state: StatusState::Active,
+        });
+    }
+
     // Names declined without ever being discovered (a `disable` entry for a
     // dependency whose source isn't on disk, or one added by hand).
     for name in &sym.config.plugins.disable {

@@ -14,6 +14,10 @@ use super::{
     ANY_VERSION, CARGO_PM, FetchedPackage, PackageId, PackageManager, PluginInfo, PmContext,
 };
 
+/// How many crates.io hits a search returns — enough to surface the crate a
+/// user is looking for without flooding the report.
+const SEARCH_PAGE_SIZE: u64 = 10;
+
 pub struct CargoPm;
 
 impl CargoPm {
@@ -173,9 +177,33 @@ impl PackageManager for CargoPm {
             .collect())
     }
 
-    /// Searching crates.io lands with the `search` command.
-    async fn search(&self, _query: &str, _cx: &PmContext<'_>) -> Result<Vec<PluginInfo>> {
-        Ok(Vec::new())
+    /// Search crates.io for crates matching `query`.
+    ///
+    /// Name-based, like `cargo search`: the results are *candidate* crates —
+    /// whether one actually carries plugin content is only known once it is
+    /// fetched (any fetchable crate yields at least a default `skills/` plugin).
+    /// So this lets `cargo agents use <crate>` name a crate the workspace
+    /// doesn't depend on; the fetch/load step decides what it contributes.
+    async fn search(&self, query: &str, _cx: &PmContext<'_>) -> Result<Vec<PluginInfo>> {
+        let client = crates_io_api::AsyncClient::new(
+            "symposium (https://github.com/symposium-dev/symposium)",
+            std::time::Duration::from_millis(1000),
+        )?;
+        let cq = crates_io_api::CratesQuery::builder()
+            .search(query)
+            .page_size(SEARCH_PAGE_SIZE)
+            .build();
+        let page = client.crates(cq).await?;
+        Ok(page
+            .crates
+            .into_iter()
+            .map(|c| PluginInfo {
+                id: PackageId::new(CARGO_PM, c.name, c.max_version),
+                description: c.description,
+                subpath: None,
+                recommends: None,
+            })
+            .collect())
     }
 
     async fn fetch(

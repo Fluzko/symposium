@@ -180,17 +180,29 @@ pub async fn skills_applicable_to(
         .await;
     }
 
-    // Dependency-embedded plugins: a dependency the user enabled loads as a
-    // plugin in its own right, with no manifest anywhere pointing at it. The
-    // consent check lives here rather than in the cargo PM — the PM offers,
-    // the config enables.
+    // Crate-embedded plugins the user enabled: an enabled dependency, or a
+    // crate named by `use` that isn't a dependency, loads as a plugin in its
+    // own right with no manifest anywhere pointing at it. The consent check
+    // lives here rather than in the cargo PM — the PM offers, the config
+    // enables.
     if let Some(root) = workspace_root {
+        // A name a configured registry already provides as a plugin (including
+        // a dormant one that `use` wakes) was handled by the registry loop
+        // above; don't also try to fetch it as a crate from crates.io.
+        let registry_names: std::collections::HashSet<String> = registry
+            .plugins
+            .iter()
+            .map(|p| crate::crate_sources::normalize_crate_name(&p.plugin.name))
+            .collect();
         let enabled = crate::discovery::enabled_dependencies(sym, &for_crates, root);
         let mut visited = std::collections::HashSet::new();
         for name in enabled {
+            if registry_names.contains(&crate::crate_sources::normalize_crate_name(&name)) {
+                continue;
+            }
             expand_crate_plugin(
                 sym,
-                name,
+                &name,
                 workspace_crates,
                 &mut ctx,
                 update,

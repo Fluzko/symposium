@@ -26,6 +26,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use symposium_sdk::predicate::CustomPredicateEvent;
 
 use crate::pm::PackageId;
 
@@ -724,9 +725,15 @@ fn join(preds: &[Predicate]) -> String {
 
 /// Cached result of a custom predicate invocation. A custom predicate is a
 /// boolean gate: it passes iff the command exits 0.
+///
+/// `events` holds every well-formed [`CustomPredicateEvent`] the predicate
+/// emitted on stdout. Wiring these into cache invalidation is deferred to a
+/// follow-up PR; today the events are captured for observability only.
 #[derive(Debug, Clone)]
 pub struct CustomPredicateResult {
     pub passed: bool,
+    #[allow(dead_code)] // consumed by the cache in a follow-up PR
+    pub events: Vec<CustomPredicateEvent>,
 }
 
 /// A resolved custom predicate entry ready for invocation.
@@ -744,7 +751,10 @@ fn run_custom_predicate(
 ) -> CustomPredicateResult {
     let Some(entry) = entries.get(name) else {
         tracing::warn!(predicate = name, "custom predicate not found in registry");
-        return CustomPredicateResult { passed: false };
+        return CustomPredicateResult {
+            passed: false,
+            events: Vec::new(),
+        };
     };
 
     let mut full_args: Vec<&str> = entry.args.iter().map(|s| s.as_str()).collect();
@@ -767,11 +777,10 @@ fn run_custom_predicate(
                     "custom predicate stderr"
                 );
             }
-            // FIXME: custom predicates are a boolean gate today — stdout is
-            // ignored. Future: let a predicate set plugin/component fields via
-            // its output (see `symposium_sdk::predicate`).
+            let events = parse_predicate_events(name, &output.stdout);
             CustomPredicateResult {
                 passed: output.status.success(),
+                events,
             }
         }
         Err(e) => {
@@ -780,9 +789,48 @@ fn run_custom_predicate(
                 error = %e,
                 "failed to spawn custom predicate"
             );
-            CustomPredicateResult { passed: false }
+            CustomPredicateResult {
+                passed: false,
+                events: Vec::new(),
+            }
         }
     }
+}
+
+/// Parse a predicate's stdout as a JSON Lines stream of
+/// [`CustomPredicateEvent`]s. Blank lines are skipped. A line that is not
+/// valid UTF-8 or not a known event is logged and skipped so unknown record
+/// types do not break older Symposium versions.
+fn parse_predicate_events(predicate_name: &str, stdout: &[u8]) -> Vec<CustomPredicateEvent> {
+    let text = match std::str::from_utf8(stdout) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!(
+                predicate = predicate_name,
+                "custom predicate stdout is not valid UTF-8; discarding events"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut events = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<CustomPredicateEvent>(line) {
+            Ok(event) => events.push(event),
+            Err(e) => {
+                tracing::warn!(
+                    predicate = predicate_name,
+                    error = %e,
+                    line,
+                    "unknown custom predicate event; skipping"
+                );
+            }
+        }
+    }
+    events
 }
 
 #[cfg(test)]
@@ -1369,5 +1417,31 @@ mod tests {
                 arg: "hello".into()
             }
         );
+    }
+
+    // --- Predicate event parser tests ---
+
+    #[test]
+    fn parse_predicate_events_skips_blank_and_unknown_lines() {
+        let stdout = concat!(
+            "\n",
+            r#"{"watchFile":"a"}"#,
+            "\n",
+            r#"{"watchFuture":42}"#,
+            "\n",
+            "   \n",
+            r#"{"watchTime":0}"#,
+            "\n",
+        );
+        let events = parse_predicate_events("foo", stdout.as_bytes());
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], CustomPredicateEvent::WatchFile(_)));
+        assert!(matches!(&events[1], CustomPredicateEvent::WatchTime(0)));
+    }
+
+    #[test]
+    fn parse_predicate_events_invalid_utf8_returns_empty() {
+        let events = parse_predicate_events("foo", &[0xFF, 0xFE, 0xFD]);
+        assert!(events.is_empty());
     }
 }

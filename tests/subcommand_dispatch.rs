@@ -74,6 +74,48 @@ async fn help_shows_plugin_subcommand() {
     .unwrap();
 }
 
+/// A subcommand declared by a crate reached through a `[[plugins]]` chained
+/// reference is dispatchable — crate-sourced subcommands flow through the active
+/// plugin set, not just skills. `crate-f` vends `facet-tool` (→ `rustc`); the
+/// child's stdout must contain "rustc".
+#[tokio::test]
+async fn dispatches_subcommand_from_chained_crate() {
+    symposium_testlib::with_fixture(
+        TestMode::SimulationOnly,
+        &["crate-facets0"],
+        async |mut ctx| {
+            let out = ctx.symposium(&["facet-tool", "--version"]).await?;
+            assert!(
+                out.contains("rustc"),
+                "expected rustc version output from the chained crate's subcommand, got: {out}"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// The same crate-sourced subcommand appears in `--help`, under the agents
+/// section, proving help discovery walks the active plugin set.
+#[tokio::test]
+async fn help_shows_chained_crate_subcommand() {
+    symposium_testlib::with_fixture(
+        TestMode::SimulationOnly,
+        &["crate-facets0"],
+        async |mut ctx| {
+            let out = redact(ctx.symposium(&["--help"]).await?);
+            assert!(
+                out.contains("facet-tool"),
+                "chained crate's subcommand should be listed in help:\n{out}"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn unknown_subcommand_errors() {
     symposium_testlib::with_fixture(

@@ -11,7 +11,7 @@ use std::{ffi::OsString, path::Path, process::ExitStatus};
 use crate::{
     config::Symposium,
     installation::{acquire_installation, resolve_runnable},
-    plugins::{self, Plugin, PluginRegistry, Subcommand},
+    plugins::{self, ParsedPlugin, Plugin, Subcommand},
     pm::PackageId,
 };
 use anyhow::{Context, Result, bail};
@@ -22,14 +22,19 @@ use tokio::process::Command;
 /// apply to `deps`. `used` names the plugins the applicable `[plugins] use`
 /// entries enable, which is what wakes a dormant plugin. Shared between
 /// dispatch (name lookup) and help rendering (audience grouping).
+///
+/// `plugins` is the resolved active set from
+/// [`skills::active_plugins`](crate::skills::active_plugins) — registry plugins
+/// plus crate-sourced ones — so a crate plugin's subcommands are dispatchable
+/// exactly like a registry plugin's.
 pub fn applicable_subcommands<'a>(
-    registry: &'a PluginRegistry,
+    plugins: &'a [ParsedPlugin],
     deps: &[PackageId],
     used: &[&str],
 ) -> Vec<(&'a Plugin, &'a str, &'a Subcommand)> {
     let mut ctx = crate::predicate::PredicateContext::new(deps).with_used_names(used);
     let mut results = Vec::new();
-    for parsed in &registry.plugins {
+    for parsed in plugins {
         let plugin = &parsed.plugin;
         if !parsed.applies(&mut ctx) {
             continue;
@@ -43,19 +48,19 @@ pub fn applicable_subcommands<'a>(
     results
 }
 
-/// Look up a subcommand by name across all plugins, filtered by workspace crates at a plugin
-///  and subcommand levels.
+/// Look up a subcommand by name across the active plugin set, filtered by
+/// workspace crates at the plugin and subcommand levels.
 ///
 /// - `Ok(None)` - no plugin claims the name, or every claim was filtered out.
 /// - `Ok(Some(..))` - exactly one plugin claims the name and applies.
 /// - `Err(..)` - two or more plugins claim the name and all apply.
 pub fn find_subcommand<'a>(
-    registry: &'a PluginRegistry,
+    plugins: &'a [ParsedPlugin],
     name: &str,
     deps: &[PackageId],
     used: &[&str],
 ) -> Result<Option<(&'a Plugin, &'a Subcommand)>> {
-    let matches: Vec<_> = applicable_subcommands(registry, deps, used)
+    let matches: Vec<_> = applicable_subcommands(plugins, deps, used)
         .into_iter()
         .filter(|(_, n, _)| *n == name)
         .map(|(plugin, _, subcmd)| (plugin, subcmd))
@@ -105,7 +110,19 @@ pub async fn dispatch_external(
         .as_ref()
         .map(|ws| sym.config.plugins.used_names_in(&ws.root))
         .unwrap_or_default();
-    let (plugin, subcommand) = find_subcommand(&registry, name, &dep_ids, &used)?
+
+    // Resolve the active plugin set so crate-sourced subcommands are dispatchable.
+    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used);
+    let active = crate::skills::active_plugins(
+        sym,
+        &registry,
+        deps.crates(),
+        workspace.as_ref().map(|ws| ws.root.as_path()),
+        &mut ctx,
+    )
+    .await;
+
+    let (plugin, subcommand) = find_subcommand(&active, name, &dep_ids, &used)?
         .with_context(|| format!("no plugin defines subcommand `{name}`"))?;
 
     let installation = plugin
@@ -164,7 +181,7 @@ fn exit_byte_from(status: ExitStatus) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::ParsedPlugin;
+    use crate::plugins::PluginRegistry;
     use crate::pm::ANY_VERSION;
     use crate::{plugins::Audience, predicate::PredicateSet};
     use std::{collections::BTreeMap, path::PathBuf};
@@ -227,7 +244,7 @@ mod tests {
 
         let ws = [ws_crate("skill-tree", "1.0.0")];
 
-        let (plugin, sub) = find_subcommand(&reg, "greet", &ws, &[]).unwrap().unwrap();
+        let (plugin, sub) = find_subcommand(&reg.plugins, "greet", &ws, &[]).unwrap().unwrap();
         assert_eq!(plugin.name, "example-plugin");
         assert_eq!(sub.command, "greet-install");
     }
@@ -239,7 +256,7 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = [ws_crate("skill-tree", "1.0.0")];
 
-        assert!(find_subcommand(&reg, "nope", &ws, &[]).unwrap().is_none());
+        assert!(find_subcommand(&reg.plugins, "nope", &ws, &[]).unwrap().is_none());
     }
 
     #[test]
@@ -249,7 +266,7 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = [ws_crate("skill-tree", "1.0.0")];
 
-        assert!(find_subcommand(&reg, "greet", &ws, &[]).unwrap().is_none());
+        assert!(find_subcommand(&reg.plugins, "greet", &ws, &[]).unwrap().is_none());
     }
 
     #[test]
@@ -266,7 +283,7 @@ mod tests {
         ]);
         let ws = [ws_crate("skill-tree", "1.0.0")];
 
-        let err = find_subcommand(&reg, "greet", &ws, &[])
+        let err = find_subcommand(&reg.plugins, "greet", &ws, &[])
             .unwrap_err()
             .to_string();
 

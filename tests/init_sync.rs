@@ -709,6 +709,37 @@ async fn sync_installs_skill_via_crate_manifest() {
     .unwrap();
 }
 
+/// `sync` registers an MCP server declared by a crate reached through a
+/// `[[plugins]]` chained reference — a crate-sourced plugin's MCP servers flow
+/// through the active plugin set, not just its skills.
+///
+/// Fixture layout:
+/// - `facet-host` depends on `crate-f` (path dep)
+/// - `vouch-f` gates on `crate-f` and carries `[[plugins]] source.cargo =
+///   "crate-f"` but declares nothing of its own
+/// - `crate-f` ships a `SYMPOSIUM.toml` declaring the `facet-server` MCP server
+#[tokio::test]
+async fn sync_registers_mcp_server_from_chained_crate() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["crate-facets0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let workspace_root = ctx.workspace_root.as_ref().unwrap();
+            let settings = std::fs::read_to_string(workspace_root.join(".claude/settings.json"))?;
+            assert!(
+                settings.contains("facet-server"),
+                "chained crate's MCP server should be registered:\n{settings}"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// `crate-info` resolves a `[patch.crates-io]` crate to its local path.
 ///
 /// Fixture layout:

@@ -13,7 +13,7 @@ use clap::{Command, CommandFactory};
 use crate::{
     cli::{Cli, Commands, builtin_audience},
     config::Symposium,
-    plugins::{Audience, PluginRegistry, load_registry_with_workspace},
+    plugins::{Audience, ParsedPlugin, load_registry_with_workspace},
     pm::PackageId,
     subcommand_dispatch::applicable_subcommands,
 };
@@ -98,10 +98,22 @@ pub async fn render_help(sym: &Symposium, cwd: &Path) -> String {
         .as_ref()
         .map(|ws| sym.config.plugins.used_names_in(&ws.root))
         .unwrap_or_default();
-    render(&registry, &dep_ids, &used)
+
+    // Resolve the active plugin set so crate-sourced subcommands appear in help.
+    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used);
+    let active = crate::skills::active_plugins(
+        sym,
+        &registry,
+        deps.crates(),
+        workspace.as_ref().map(|ws| ws.root.as_path()),
+        &mut ctx,
+    )
+    .await;
+
+    render(&active, &dep_ids, &used)
 }
 
-fn render(registry: &PluginRegistry, deps: &[PackageId], used: &[&str]) -> String {
+fn render(plugins: &[ParsedPlugin], deps: &[PackageId], used: &[&str]) -> String {
     let mut cmd = Cli::command();
     let full = cmd.render_help().to_string();
 
@@ -114,8 +126,8 @@ fn render(registry: &PluginRegistry, deps: &[PackageId], used: &[&str]) -> Strin
     let header = &full[..commands_idx];
     let options = &full[options_idx..];
 
-    let humans = collect_section(&cmd, registry, deps, used, Audience::Humans);
-    let agents = collect_section(&cmd, registry, deps, used, Audience::Agents);
+    let humans = collect_section(&cmd, plugins, deps, used, Audience::Humans);
+    let agents = collect_section(&cmd, plugins, deps, used, Audience::Agents);
 
     let col_width = humans
         .iter()
@@ -149,7 +161,7 @@ fn render(registry: &PluginRegistry, deps: &[PackageId], used: &[&str]) -> Strin
 /// Collect entries for one audience section: clap's builtins first (sorted), then plugin-vended subs whose predicates apply (sorted).
 fn collect_section(
     cmd: &Command,
-    registry: &PluginRegistry,
+    plugins: &[ParsedPlugin],
     deps: &[PackageId],
     used: &[&str],
     target: Audience,
@@ -167,15 +179,15 @@ fn collect_section(
 
     builtins.sort();
 
-    let mut plugins = applicable_subcommands(registry, deps, used)
+    let mut plugin_subs = applicable_subcommands(plugins, deps, used)
         .into_iter()
         .filter(|(_, _, subcommand)| subcommand.audience == target)
         .map(|(_, name, subcommand)| (name.to_string(), subcommand.description.clone()))
         .collect::<Vec<_>>();
 
-    plugins.sort();
+    plugin_subs.sort();
 
-    builtins.extend(plugins);
+    builtins.extend(plugin_subs);
 
     builtins
 }
@@ -187,7 +199,7 @@ mod tests {
     use expect_test::expect;
 
     use crate::{
-        plugins::{ParsedPlugin, Plugin, Subcommand},
+        plugins::{Plugin, PluginRegistry, Subcommand},
         pm::ANY_VERSION,
         predicate::PredicateSet,
     };
@@ -291,7 +303,7 @@ mod tests {
               -h, --help             Print help
               -V, --version          Print version
         "#]]
-             .assert_eq(&redact(render(&reg, &ws, &[])));
+             .assert_eq(&redact(render(&reg.plugins, &ws, &[])));
     }
 
     #[test]
@@ -304,7 +316,7 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = vec![workspace_crate("example-crate", "1.0.0")];
 
-        let out = render(&reg, &ws, &[]);
+        let out = render(&reg.plugins, &ws, &[]);
         let humans = extract_section(&out, "Commands for humans:");
         assert!(
             humans.contains("example-tool"),
@@ -329,7 +341,7 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = vec![workspace_crate("example-crate", "1.0.0")];
 
-        let out = render(&reg, &ws, &[]);
+        let out = render(&reg.plugins, &ws, &[]);
         let agents = extract_section(&out, "Commands for agents:");
         assert!(
             agents.contains("example-tool"),
@@ -358,7 +370,7 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = vec![workspace_crate("other-crate-sources", "1.0.0")];
 
-        let out = render(&reg, &ws, &[]);
+        let out = render(&reg.plugins, &ws, &[]);
         assert!(
             !out.contains("example-tool"),
             "example-tool should be filtered when workspace lacks example-crate:\n{out}"
@@ -380,7 +392,7 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = vec![workspace_crate("example-crate", "1.0.0")];
 
-        let out = render(&reg, &ws, &[]);
+        let out = render(&reg.plugins, &ws, &[]);
         let agents = extract_section(&out, "Commands for agents:");
         let bar_pos = agents.find("bar-tool").expect("bar-tool present");
         let foo_pos = agents.find("foo-tool").expect("foo-tool present");

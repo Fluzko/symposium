@@ -302,16 +302,22 @@ pub async fn sync(sym: &Symposium, deps: &mut WorkspaceDeps, update: UpdateLevel
     // Resolve custom predicate installations.
     let custom_entries = resolve_custom_predicate_entries(sym, &registry, update).await;
 
-    // Find all applicable skills
-    let applicable = skills::skills_applicable_to(
-        sym,
-        &registry,
-        &workspace,
-        Some(&project_root),
-        custom_entries,
-        update,
-    )
-    .await;
+    // Resolve the workspace once and build the predicate context shared by
+    // skill resolution and MCP-server filtering.
+    let dep_ids = crate::pm::workspace_dep_ids(sym, &workspace).await;
+    let used_names = sym.config.plugins.used_names_in(&project_root);
+    let mut ctx = crate::predicate::PredicateContext::with_custom_predicates(&dep_ids, custom_entries)
+        .with_used_names(&used_names);
+
+    // The active plugin set: registry plugins plus the crate-sourced plugins
+    // reached through `[[plugins]]` chained references and dependency
+    // enablement. Every facet resolves over this one set, so a crate plugin's
+    // skills and MCP servers install exactly like a registry plugin's.
+    let active =
+        skills::active_plugins(sym, &registry, &workspace, Some(&project_root), &mut ctx).await;
+
+    // Find all applicable skills.
+    let applicable = skills::collect_skills(sym, &active, &mut ctx, update).await;
 
     // Dedup by `(skill_name, origin_hash)`: two crate origins with the same
     // (name, version, skill-path-within-crate) collapse (the same skill bytes
@@ -333,12 +339,9 @@ pub async fn sync(sym: &Symposium, deps: &mut WorkspaceDeps, update: UpdateLevel
         }
     }
 
-    // Collect MCP servers from applicable plugins, filtered by workspace deps
-    let dep_ids = crate::pm::workspace_dep_ids(sym, &workspace).await;
-    let used_names = sym.config.plugins.used_names_in(&project_root);
-    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used_names);
+    // Collect MCP servers from the same active plugin set.
     let mut mcp_servers: Vec<sacp::schema::McpServer> = Vec::new();
-    for p in &registry.plugins {
+    for p in &active {
         if p.applies(&mut ctx) {
             mcp_servers.extend(p.plugin.applicable_mcp_servers(&mut ctx));
         }

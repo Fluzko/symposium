@@ -1166,18 +1166,6 @@ pub async fn ensure_registries(sym: &Symposium, update: UpdateLevel) {
     }
 }
 
-/// Load all plugins from all configured registries plus the active
-/// workspace, discarding load errors with warnings.
-///
-/// Use `load_registry_with_workspace()` instead if you also need standalone
-/// skills.
-pub async fn load_all_plugins(
-    sym: &Symposium,
-    workspace: Option<&symposium_sdk::workspace::LoadedWorkspace>,
-) -> Vec<ParsedPlugin> {
-    load_registry_impl(sym, workspace).await.plugins
-}
-
 /// Refresh registry content.
 ///
 /// If `provider` is Some, sync only that registry (ignores auto-update).

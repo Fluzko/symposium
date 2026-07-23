@@ -36,6 +36,38 @@ async fn inline_shell_hook_emits_context() {
     .unwrap();
 }
 
+/// A hook declared by a crate reached through a `[[plugins]]` chained
+/// reference fires — crate-sourced hooks dispatch through the active plugin
+/// set, not just skills. `crate-f`'s `facet-hook` emits `facet-hook-output`.
+#[tokio::test(flavor = "multi_thread")]
+async fn hook_fires_from_chained_crate() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["crate-facets0"],
+        async |mut ctx| {
+            let result = ctx
+                .prompt_or_hook(
+                    "ignored",
+                    &[HookStep::PreToolUse {
+                        tool_name: "Task".to_string(),
+                        tool_input: json!({}),
+                    }],
+                    HookAgent::Claude,
+                )
+                .await?;
+
+            assert!(
+                result.has_context_containing("facet-hook-output"),
+                "expected `facet-hook-output` from the chained crate's hook, got: {:#?}",
+                result.outputs_for(HookEvent::PreToolUse),
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// `command = "named-shell"` resolves the named installation at dispatch time.
 #[tokio::test(flavor = "multi_thread")]
 async fn named_installation_resolves_at_dispatch() {

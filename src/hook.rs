@@ -396,6 +396,20 @@ async fn run_auto_sync(sym: &Symposium, deps: &mut WorkspaceDeps, session_start:
     }
 }
 
+/// Whether the hook pipeline must resolve the workspace crate graph before
+/// building the active plugin set. True when some plugin's hook gating names a
+/// concrete crate, or when there is any crate-plugin expansion to perform — a
+/// chained `[[plugins]]` edge, or an enablement entry that could pull a crate
+/// plugin in — since expansion evaluates edge and plugin predicates against the
+/// crate graph too. Registry plugins reached without any of these dispatch on a
+/// crate-free context (the fast path for `PreToolUse`).
+fn hook_dispatch_needs_deps(sym: &Symposium, registry_plugins: &[ParsedPlugin]) -> bool {
+    registry_plugins
+        .iter()
+        .any(|p| p.plugin.hooks_need_dep_resolution() || !p.plugin.chained.is_empty())
+        || sym.config.plugins.has_enablement_entries()
+}
+
 /// Refresh the source cache for every hook the workspace could fire this
 /// session. Run once on `SessionStart` (where the per-session cost is
 /// acceptable) so later events dispatch fresh binaries from cache — dispatch
@@ -408,11 +422,12 @@ async fn run_auto_sync(sym: &Symposium, deps: &mut WorkspaceDeps, session_start:
 /// but never installs eagerly. Best-effort: failures are logged and skipped.
 async fn prewarm_hook_sources(sym: &Symposium, deps: &mut WorkspaceDeps) {
     let workspace = deps.load().cloned();
-    let plugins = crate::plugins::load_all_plugins(sym, workspace.as_deref()).await;
+    let registry = crate::plugins::load_registry_with_workspace(sym, workspace.as_deref()).await;
 
     // Resolving the workspace runs cargo, so only do it when some hook's
-    // gating references a concrete crate (mirrors dispatch).
-    let dep_ids = if plugins.iter().any(|p| p.plugin.hooks_need_dep_resolution()) {
+    // gating references a concrete crate, or there is crate-plugin expansion to
+    // perform (mirrors dispatch).
+    let dep_ids = if hook_dispatch_needs_deps(sym, &registry.plugins) {
         crate::pm::workspace_dep_ids(sym, deps.crates()).await
     } else {
         Vec::new()
@@ -422,6 +437,14 @@ async fn prewarm_hook_sources(sym: &Symposium, deps: &mut WorkspaceDeps) {
         .map(|ws| sym.config.plugins.used_names_in(&ws.root))
         .unwrap_or_default();
     let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used_names);
+    let plugins = crate::skills::active_plugins(
+        sym,
+        &registry,
+        deps.crates(),
+        workspace.as_ref().map(|ws| ws.root.as_path()),
+        &mut ctx,
+    )
+    .await;
 
     for parsed in &plugins {
         if !parsed.applies(&mut ctx) {
@@ -512,7 +535,16 @@ async fn discovery_hint(sym: &Symposium, deps: &mut WorkspaceDeps) -> Option<Str
         .as_ref()
         .map(|ws| sym.config.plugins.used_names_in(&ws.root))
         .unwrap_or_default();
-    let any_subcommand = !applicable_subcommands(&registry, &dep_ids, &used).is_empty();
+    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used);
+    let active = crate::skills::active_plugins(
+        sym,
+        &registry,
+        deps.crates(),
+        workspace.as_ref().map(|ws| ws.root.as_path()),
+        &mut ctx,
+    )
+    .await;
+    let any_subcommand = !applicable_subcommands(&active, &dep_ids, &used).is_empty();
 
     any_subcommand.then(|| {
         format!(
@@ -603,12 +635,14 @@ pub async fn dispatch_plugin_hooks(
     deps: &mut WorkspaceDeps,
 ) -> Result<serde_json::Value, Vec<u8>> {
     let workspace = deps.load().cloned();
-    let plugins = crate::plugins::load_all_plugins(sym, workspace.as_deref()).await;
+    let registry = crate::plugins::load_registry_with_workspace(sym, workspace.as_deref()).await;
 
     // Resolving the workspace means running cargo, so only do it when some
-    // plugin's hook gating actually references a concrete crate (a `depends-on(*)`
-    // wildcard or env/shell/path predicate never needs the crate graph).
-    let dep_ids = if plugins.iter().any(|p| p.plugin.hooks_need_dep_resolution()) {
+    // plugin's hook gating references a concrete crate (a `depends-on(*)`
+    // wildcard or env/shell/path predicate never needs the crate graph), or
+    // when there is crate-plugin expansion to perform — that too evaluates
+    // predicates against the crate graph.
+    let dep_ids = if hook_dispatch_needs_deps(sym, &registry.plugins) {
         crate::pm::workspace_dep_ids(sym, deps.crates()).await
     } else {
         Vec::new()
@@ -618,6 +652,16 @@ pub async fn dispatch_plugin_hooks(
         .map(|ws| sym.config.plugins.used_names_in(&ws.root))
         .unwrap_or_default();
     let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used_names);
+    // Dispatch over the active set — registry plugins plus crate-sourced ones —
+    // so a crate plugin's hooks fire exactly like a registry plugin's.
+    let plugins = crate::skills::active_plugins(
+        sym,
+        &registry,
+        deps.crates(),
+        workspace.as_ref().map(|ws| ws.root.as_path()),
+        &mut ctx,
+    )
+    .await;
     let hooks = dispatched_hooks_for_payload(&plugins, sym_input, host_agent, &mut ctx);
 
     let mut output = prior_output;

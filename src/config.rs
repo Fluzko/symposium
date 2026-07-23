@@ -177,6 +177,15 @@ impl PluginsConfig {
             .iter()
             .any(|entry| name_matches(entry, name))
     }
+
+    /// Whether any enablement entry could pull in a crate plugin. With neither
+    /// `auto-enable` nor `use` naming anything,
+    /// [`enabled_dependencies`](crate::discovery::enabled_dependencies) is empty
+    /// regardless of the dependency graph — so a caller can skip resolving the
+    /// workspace crates on that basis.
+    pub fn has_enablement_entries(&self) -> bool {
+        !self.auto_enable.is_empty() || !self.used.is_empty()
+    }
 }
 
 /// Does a configured entry name `name`? `"*"` matches everything; otherwise

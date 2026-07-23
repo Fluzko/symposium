@@ -42,11 +42,7 @@ pub async fn use_plugin(
         .iter()
         .find(|p| normalize_crate_name(&p.plugin.name) == normalized);
     let dormant = registry_plugin.is_some_and(|p| p.plugin.requires_use);
-    let already_trusted = (registry_plugin.is_some() && !dormant)
-        || registry
-            .standalone_skills
-            .iter()
-            .any(|s| s.skill.name() == name);
+    let already_trusted = registry_plugin.is_some() && !dormant;
     if already_trusted {
         tracing::info!(
             report = %ReportEvent::Info {

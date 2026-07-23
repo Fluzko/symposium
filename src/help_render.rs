@@ -239,7 +239,6 @@ mod tests {
     fn registry(plugins: Vec<ParsedPlugin>) -> PluginRegistry {
         PluginRegistry {
             plugins,
-            standalone_skills: vec![],
             warnings: vec![],
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),
         }

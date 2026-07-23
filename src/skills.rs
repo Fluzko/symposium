@@ -29,8 +29,6 @@ pub struct Skill {
     /// `any(depends-on(...))`) merged with `predicates`. ANDed with the plugin- and
     /// group-level sets.
     pub predicates: PredicateSet,
-    /// The body content (everything after frontmatter).
-    pub body: String,
     /// Path to the SKILL.md file on disk.
     pub path: PathBuf,
 }
@@ -202,30 +200,6 @@ pub async fn skills_applicable_to(
             )
             .await;
         }
-    }
-
-    // Standalone skills already carry their own origin hash (computed
-    // from the SKILL.md's on-disk path, like every other skill).
-    if !registry.standalone_skills.is_empty() {
-        tracing::debug!(
-            report = %crate::report::ReportEvent::PluginConsidered {
-                plugin: "(standalone skills)".into(),
-                matched: true,
-                reason: None,
-            },
-        );
-    }
-    // Standalone skills have no defining plugin; they never count as
-    // workspace members (clear any stamp left by the plugin loop).
-    ctx.set_workspace_member(false);
-    for entry in &registry.standalone_skills {
-        collect_skill_applicable_to(
-            entry.skill.clone(),
-            entry.origin_hash.clone(),
-            "(standalone skills)",
-            &mut ctx,
-            &mut results,
-        );
     }
 
     results
@@ -639,22 +613,42 @@ pub(crate) fn prune_nested_skills(paths: &mut Vec<PathBuf>) {
     *paths = kept;
 }
 
-/// Load a standalone skill from a SKILL.md file (no plugin group context).
-///
-/// Standalone skills must be self-contained: all metadata (`depends-on`)
-/// comes from the SKILL.md frontmatter.
-/// Returns an error if `depends-on` is missing (standalone skills have
-/// no group to inherit from).
-pub fn load_standalone_skill(skill_md_path: &Path) -> Result<Skill> {
-    let skill = load_skill(skill_md_path, false, &PredicateSet::default())?;
-    if !skill.predicates.mentions_dep() {
-        bail!(
-            "standalone skill `{}` is missing `depends-on` in frontmatter \
-             (standalone skills have no plugin group to inherit from)",
-            skill.name()
-        );
-    }
-    Ok(skill)
+/// Merge a SKILL.md's frontmatter `depends-on` (dependency atoms) and
+/// `predicates` (function-call syntax) into one predicate set.
+fn frontmatter_predicates(
+    depends_on: Option<&str>,
+    predicates: Option<&str>,
+) -> Result<PredicateSet> {
+    let depends_on = match depends_on {
+        Some(s) => Some(crate::predicate::DependsOnList::parse(s)?),
+        None => None,
+    };
+    let extra = match predicates {
+        Some(s) => PredicateSet::parse(s)?,
+        None => PredicateSet::default(),
+    };
+    Ok(PredicateSet::merged(depends_on, extra))
+}
+
+/// The frontmatter a synthesized plugin needs from a bare `SKILL.md` entry:
+/// its declared `name` (the skill's identity, used as the plugin name) and
+/// its `depends-on`/`predicates` hoisted into one set (so the plugin is gated
+/// by them and the ordinary dormancy rule applies — a bare skill with no
+/// dependency is dormant until `use`d). See
+/// [`plugins::load_standalone_skill_plugin`](crate::plugins).
+pub(crate) fn standalone_skill_meta(skill_md: &Path) -> Result<(Option<String>, PredicateSet)> {
+    let content = std::fs::read_to_string(skill_md)
+        .with_context(|| format!("failed to read {}", skill_md.display()))?;
+    let fm = parse_frontmatter(&content)
+        .with_context(|| format!("failed to parse frontmatter in {}", skill_md.display()))?;
+    let name = fm.fields.get("name").map(|n| {
+        n.strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(n)
+            .to_string()
+    });
+    let predicates = frontmatter_predicates(fm.depends_on.as_deref(), fm.predicates.as_deref())?;
+    Ok((name, predicates))
 }
 
 /// Load a single skill from a SKILL.md file.
@@ -680,7 +674,6 @@ fn load_skill(
             fields: BTreeMap::new(),
             depends_on: None,
             predicates: None,
-            body: content,
         }
     } else {
         parse_frontmatter(&content).with_context(|| {
@@ -733,15 +726,7 @@ fn load_skill(
     // Merge the skill-level `depends-on` (dependency atoms, OR-combined) with
     // the frontmatter `predicates` (function-call syntax) into one set, ANDed
     // with the plugin- and group-level sets at match time.
-    let depends_on = match fm.depends_on.as_deref() {
-        Some(s) => Some(crate::predicate::DependsOnList::parse(s)?),
-        None => None,
-    };
-    let extra = match fm.predicates.as_deref() {
-        Some(s) => PredicateSet::parse(s)?,
-        None => PredicateSet::default(),
-    };
-    let predicates = PredicateSet::merged(depends_on, extra);
+    let predicates = frontmatter_predicates(fm.depends_on.as_deref(), fm.predicates.as_deref())?;
 
     // Warn if no dependency is referenced at either level — the skill won't
     // match any dependency query, but we don't fail so a misconfigured plugin
@@ -756,7 +741,6 @@ fn load_skill(
     let skill = Skill {
         frontmatter,
         predicates,
-        body: fm.body,
         path: skill_md_path.to_path_buf(),
     };
     tracing::debug!(name = %skill.name(), path = %skill_md_path.display(), "skill loaded");
@@ -806,10 +790,11 @@ struct RawFrontmatter {
     depends_on: Option<String>,
     /// Raw `predicates` value (comma-separated predicate expressions).
     predicates: Option<String>,
-    body: String,
 }
 
-/// Parse SKILL.md content: extract `---`-fenced frontmatter and body.
+/// Parse SKILL.md content: extract the `---`-fenced frontmatter. The body
+/// after the frontmatter is not retained — skills install by copying the
+/// file, not by re-emitting parsed content.
 fn parse_frontmatter(content: &str) -> Result<RawFrontmatter> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
@@ -826,12 +811,6 @@ fn parse_frontmatter(content: &str) -> Result<RawFrontmatter> {
         .context("no closing --- fence in frontmatter")?;
 
     let frontmatter_text = &after_first_fence[..end];
-    let body_start = end + 4; // "\n---".len()
-    let body = after_first_fence
-        .get(body_start..)
-        .unwrap_or("")
-        .strip_prefix('\n')
-        .unwrap_or(after_first_fence.get(body_start..).unwrap_or(""));
 
     let yaml: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(frontmatter_text).context("frontmatter is not valid YAML")?;
@@ -868,7 +847,6 @@ fn parse_frontmatter(content: &str) -> Result<RawFrontmatter> {
         fields,
         depends_on,
         predicates,
-        body: body.to_string(),
     })
 }
 
@@ -943,8 +921,6 @@ mod tests {
         assert_eq!(fm.fields.get("name").unwrap(), "my-skill");
         assert_eq!(fm.fields.get("description").unwrap(), "A test skill");
         assert_eq!(fm.depends_on.as_deref(), Some("serde"));
-        assert!(fm.body.contains("# Body content"));
-        assert!(fm.body.contains("Some instructions here."));
     }
 
     #[test]
@@ -1055,7 +1031,6 @@ mod tests {
 
         assert_eq!(skill.frontmatter.get("name").unwrap(), "test-skill");
         assert!(skill.predicates.references_dep("serde"));
-        assert!(skill.body.contains("Use serde like this."));
     }
 
     #[test]
@@ -1175,10 +1150,11 @@ mod tests {
         assert_eq!(skill.frontmatter.get("name").unwrap(), "no-own-crates");
     }
 
-    // --- Standalone skills ---
+    // --- Bare SKILL.md loading (see plugins::load_standalone_skill_plugin
+    // for how a bare skill becomes a plugin) ---
 
     #[test]
-    fn load_standalone_skill_self_contained() {
+    fn bare_skill_is_self_contained() {
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join("my-skill");
         fs::create_dir_all(&skill_dir).unwrap();
@@ -1196,10 +1172,10 @@ mod tests {
         )
         .unwrap();
 
-        let skill = load_standalone_skill(&skill_dir.join("SKILL.md")).unwrap();
+        let skill =
+            load_skill(&skill_dir.join("SKILL.md"), false, &PredicateSet::default()).unwrap();
         assert_eq!(skill.name(), "my-standalone");
         assert!(skill.predicates.references_dep("serde"));
-        assert!(skill.body.contains("Standalone body."));
     }
 
     #[test]
@@ -1213,7 +1189,6 @@ mod tests {
             load_skill(&skill_dir.join("SKILL.md"), true, &PredicateSet::default()).unwrap();
         assert_eq!(skill.name(), "release-notes");
         assert!(!skill.frontmatter.contains_key("description"));
-        assert_eq!(skill.body, "Plain maintainer notes.\n");
 
         // Registry groups keep the agentskills.io contract.
         let err =
@@ -1281,7 +1256,8 @@ mod tests {
         )
         .unwrap();
 
-        let err = load_standalone_skill(&skill_dir.join("SKILL.md")).unwrap_err();
+        let err =
+            load_skill(&skill_dir.join("SKILL.md"), false, &PredicateSet::default()).unwrap_err();
         assert!(
             err.to_string().contains("depends-on predicate"),
             "expected parse error, got: {err}"
@@ -1324,7 +1300,6 @@ mod tests {
                 source_dir: tmp.path().to_path_buf(),
                 workspace_member: false,
             }],
-            standalone_skills: vec![],
             warnings: vec![],
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),
         };
@@ -1385,7 +1360,6 @@ mod tests {
                 source_dir: tmp.path().to_path_buf(),
                 workspace_member: false,
             }],
-            standalone_skills: vec![],
             warnings: vec![],
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),
         };
@@ -1464,7 +1438,6 @@ mod tests {
                 source_dir: tmp.path().to_path_buf(),
                 workspace_member: false,
             }],
-            standalone_skills: vec![],
             warnings: vec![],
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),
         };
@@ -1548,7 +1521,6 @@ mod tests {
                 source_dir: PathBuf::from(".".to_string()),
                 workspace_member: false,
             }],
-            standalone_skills: vec![],
             warnings: vec![],
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),
         };
@@ -1633,7 +1605,6 @@ mod tests {
                 source_dir: PathBuf::from(".".to_string()),
                 workspace_member: false,
             }],
-            standalone_skills: vec![],
             warnings: vec![],
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),
         };
@@ -1704,41 +1675,21 @@ mod tests {
         )
         .unwrap();
 
-        let err = load_standalone_skill(&skill_dir.join("SKILL.md")).unwrap_err();
+        let err =
+            load_skill(&skill_dir.join("SKILL.md"), false, &PredicateSet::default()).unwrap_err();
         assert!(
             err.to_string().contains("missing required `name` field"),
             "expected missing name error, got: {err}"
         );
     }
 
-    #[test]
-    fn standalone_skill_requires_depends_on() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("no-depends-on");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            indoc! {"
-                ---
-                name: no-depends-on
-                description: Missing depends-on
-                ---
-
-                Body.
-            "},
-        )
-        .unwrap();
-
-        let err = load_standalone_skill(&skill_dir.join("SKILL.md")).unwrap_err();
-        assert!(
-            err.to_string().contains("missing `depends-on`"),
-            "expected depends-on error, got: {err}"
-        );
-    }
-
+    /// A bare `SKILL.md` directory, modelled as its synthesized plugin would be
+    /// (name from the directory, one `source.path = "."` group gated on the
+    /// skill's own `depends-on`), contributes its skill through the ordinary
+    /// plugin path.
     #[tokio::test]
-    async fn list_includes_standalone_skills() {
-        use crate::plugins::PluginRegistry;
+    async fn bare_skill_plugin_contributes_its_skill() {
+        use crate::plugins::{ParsedPlugin, Plugin, PluginRegistry, PluginSource, SkillGroup};
 
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join("my-skill");
@@ -1757,12 +1708,29 @@ mod tests {
         )
         .unwrap();
 
-        let skill = load_standalone_skill(&skill_dir.join("SKILL.md")).unwrap();
+        let plugin = Plugin {
+            name: "my-skill".to_string(),
+            predicates: pred_set("serde"),
+            installations: vec![],
+            hooks: vec![],
+            skills: vec![SkillGroup {
+                predicates: PredicateSet::default(),
+                source: PluginSource::Path(".".into()),
+                workspace_member: false,
+            }],
+            mcp_servers: vec![],
+            subcommands: Default::default(),
+            custom_predicates: vec![],
+            chained: vec![],
+            requires_use: false,
+        };
         let registry = PluginRegistry {
-            plugins: Vec::new(),
-            standalone_skills: vec![crate::plugins::StandaloneSkill {
-                skill,
-                origin_hash: "test-myskill".to_string(),
+            plugins: vec![ParsedPlugin {
+                canonical: crate::pm::PackageId::any_version("recs", "my-skill"),
+                path: skill_dir.join("SKILL.md"),
+                plugin,
+                source_dir: tmp.path().to_path_buf(),
+                workspace_member: false,
             }],
             warnings: vec![],
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),

@@ -315,12 +315,15 @@ async fn search_renders_grouped_by_origin() {
             "a group heading plus at least one hit: {events:?}"
         );
 
+        // The bare skill is searched as the plugin it now is: matched by its
+        // name, tagged with its registry origin. Plugins carry no per-skill
+        // description in search (only a dormancy hint, and this one is active).
         let hit = events
             .iter()
             .find(|e| e["kind"] == "search_match")
             .expect("a search_match event");
         assert_eq!(hit["name"], "serde-guidance");
-        assert_eq!(hit["description"], "Guidance for using serde");
+        assert_eq!(hit["origin"], "user-plugins");
 
         let events = with_report(async || {
             symposium::search_command::search(&ctx.sym, "zzz-nothing")

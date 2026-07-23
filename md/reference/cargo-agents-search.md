@@ -20,9 +20,10 @@ The query is a case-insensitive substring match — the same looseness
 `cargo search` has. Results come from two arms and are printed grouped by the
 instance each hit came from:
 
-1. **Already loaded** — plugin and standalone-skill names in the plugin
-   registry. A configured registry is a trust root, so a hit here is available
-   now, with no `use` needed (unless the plugin is dormant, which is noted).
+1. **Already loaded** — plugin names in the plugin registry (a bare `SKILL.md`
+   is loaded as a plugin, so it appears here too). A configured registry is a
+   trust root, so a hit here is available now, with no `use` needed (unless the
+   plugin is dormant, which is noted).
 2. **Offered by a package manager** — each configured
    [registry's](./plugin-source.md) package manager is searched in turn.
 

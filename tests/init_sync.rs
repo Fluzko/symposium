@@ -224,12 +224,16 @@ async fn sync_skips_invalid_skill_frontmatter() {
         async |mut ctx| {
             ctx.symposium(&["init", "--add-agent", "codex"]).await?;
             let registry = symposium::plugins::load_registry(&ctx.sym).await;
+            // The bad skill is synthesized into a plugin, so the failure is a
+            // plugin-load warning whose message carries the SKILL.md path and
+            // the parse error.
             assert!(
                 registry.warnings.iter().any(|warning| {
-                    warning.path.ends_with("bad-skill/SKILL.md")
+                    warning.message.contains("bad-skill/SKILL.md")
                         && warning.message.contains("failed to parse frontmatter")
                 }),
-                "registry should record a warning for skipped invalid skill"
+                "registry should record a warning for skipped invalid skill: {:?}",
+                registry.warnings
             );
 
             ctx.symposium(&["sync"]).await?;
@@ -2510,15 +2514,17 @@ async fn report_json_shows_skipped_skills() {
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
             let events = ctx.sync_with_report(tracing::Level::DEBUG).await?;
 
-            // The plugins0 fixture has a serde-guidance skill that requires `serde`.
-            // workspace-empty0 has no deps, so it should be skipped.
+            // The plugins0 fixture's serde-guidance is a bare skill, now a
+            // plugin gated on `serde`. workspace-empty0 has no deps, so the
+            // plugin is skipped at the plugin level (before its skills are
+            // even considered).
             let skipped: Vec<&Value> = events
                 .iter()
-                .filter(|e| e["kind"] == "skill_considered" && e["matched"] == false)
+                .filter(|e| e["kind"] == "plugin_considered" && e["matched"] == false)
                 .collect();
             assert!(
                 !skipped.is_empty(),
-                "expected at least one skill to be skipped when workspace has no deps"
+                "expected the serde-guidance plugin to be skipped when workspace has no deps"
             );
 
             // No skill_installed events should appear

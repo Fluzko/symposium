@@ -55,17 +55,6 @@ pub async fn find_matches(sym: &Symposium, query: &str) -> Vec<SearchMatch> {
             });
         }
     }
-    for entry in &registry.standalone_skills {
-        if name_matches(entry.skill.name(), query) {
-            matches.push(SearchMatch {
-                origin: "(standalone skills)".to_string(),
-                name: entry.skill.name().to_string(),
-                version: None,
-                description: entry.skill.frontmatter.get("description").cloned(),
-            });
-        }
-    }
-
     let cx = PmContext::new(sym, &[]);
     for (instance, info) in sym.package_managers().search(query, &cx).await {
         matches.push(SearchMatch {

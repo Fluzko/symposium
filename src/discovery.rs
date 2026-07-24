@@ -39,11 +39,12 @@ use std::path::Path;
 
 use crate::pm::WorkspaceDeps;
 use anyhow::{Context, Result};
+use std::sync::Arc;
 
 use crate::config::Symposium;
 use crate::crate_sources::normalize_crate_name;
 use crate::output::Output;
-use crate::pm::{CARGO_PM, PackageId, PluginInfo, PmContext};
+use crate::pm::{CARGO_PM, PackageId, PluginInfo};
 use crate::report::ReportEvent;
 
 /// Why a discovered offer is (or is not) enabled.
@@ -116,17 +117,16 @@ impl Discovery {
 /// cache-only — for a workspace dependency, into the source `cargo metadata`
 /// already extracted (no probe, no network) — so every dependency-embedded
 /// plugin is discoverable, registry crates included.
-pub async fn discover(sym: &Symposium, deps: &WorkspaceDeps) -> Discovery {
+pub async fn discover(sym: &Symposium, deps: &Arc<WorkspaceDeps>) -> Discovery {
     let Some(workspace_root) = deps.workspace_root().map(Path::to_path_buf) else {
         return Discovery::default();
     };
     let dep_ids = crate::pm::workspace_dep_ids(sym, deps).await;
-    let pms = sym.package_managers();
-    let cx = PmContext::new(sym, deps);
+    let pms = sym.package_managers(deps);
 
     let mut discovery = Discovery::default();
     for inst in pms.instances() {
-        let offers = match inst.pm.list_plugins(&dep_ids, &cx).await {
+        let offers = match inst.pm.list_plugins(&dep_ids).await {
             Ok(offers) => offers,
             Err(e) => {
                 tracing::debug!(instance = %inst.name, error = %e, "cannot list plugins");
@@ -203,14 +203,14 @@ pub fn enabled_dependencies(
 
 /// Run [`discover`] for the workspace `deps` points at, or an empty
 /// [`Discovery`] when there is no workspace.
-pub async fn discover_for(sym: &Symposium, deps: &WorkspaceDeps) -> Discovery {
+pub async fn discover_for(sym: &Symposium, deps: &Arc<WorkspaceDeps>) -> Discovery {
     discover(sym, deps).await
 }
 
 /// The names of the discovered offers still awaiting consent, deduplicated
 /// and sorted — what a consent prompt would ask about, and what the
 /// non-interactive hint names.
-pub async fn pending_candidates(sym: &Symposium, deps: &WorkspaceDeps) -> Vec<String> {
+pub async fn pending_candidates(sym: &Symposium, deps: &Arc<WorkspaceDeps>) -> Vec<String> {
     let mut names: Vec<String> = discover_for(sym, deps)
         .await
         .candidates
@@ -277,7 +277,7 @@ pub fn apply_consent(sym: &mut Symposium, approved: &[String], declined: &[Strin
 /// declines anything, and Escape leaves the remaining offers undecided too.
 pub async fn prompt_for_consent(
     sym: &mut Symposium,
-    deps: &WorkspaceDeps,
+    deps: &Arc<WorkspaceDeps>,
     out: &Output,
 ) -> Result<()> {
     if !out.is_interactive() {
@@ -364,7 +364,7 @@ mod tests {
     /// A workspace with `widget-lib` as a path dependency carrying skills,
     /// plus a plain registry dependency (an extracted source with no plugin
     /// content, as `cargo metadata` always yields a `source_dir`).
-    fn workspace(root: &Path) -> WorkspaceDeps {
+    fn workspace(root: &Path) -> Arc<WorkspaceDeps> {
         let widget = root.join("widget-lib");
         std::fs::create_dir_all(widget.join("skills/guidance")).unwrap();
         std::fs::write(widget.join("skills/guidance/SKILL.md"), "").unwrap();

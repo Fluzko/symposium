@@ -1207,12 +1207,11 @@ pub async fn sync_registries(sym: &Symposium, provider: Option<&str>) -> Result<
 /// managers as registry loading, so what `plugin list` shows can't diverge
 /// from what `sync` sees.
 pub async fn list_plugins(sym: &Symposium) -> Vec<ProviderInfo> {
-    let pms = sym.package_managers();
-    let pm_cx = registry_pm_cx(sym);
+    let pms = sym.detached_managers();
     let mut by_registry: std::collections::HashMap<String, Vec<PluginInfo>> =
         std::collections::HashMap::new();
 
-    let (offers, _warnings) = list_plugin_offers(&pms, &pm_cx).await;
+    let (offers, _warnings) = list_plugin_offers(&pms).await;
     for offer in offers {
         let Some(Ok(p)) = load_offer(&offer) else {
             continue;
@@ -1248,9 +1247,8 @@ pub async fn list_plugins(sym: &Symposium) -> Vec<ProviderInfo> {
 
 /// Find a plugin by name across all registries. First match wins.
 pub async fn find_plugin(sym: &Symposium, name: &str) -> Option<ParsedPlugin> {
-    let pms = sym.package_managers();
-    let pm_cx = registry_pm_cx(sym);
-    let (offers, _warnings) = list_plugin_offers(&pms, &pm_cx).await;
+    let pms = sym.detached_managers();
+    let (offers, _warnings) = list_plugin_offers(&pms).await;
     for offer in offers {
         if let Some(Ok(parsed_plugin)) = load_offer(&offer)
             && parsed_plugin.plugin.name == name
@@ -1268,17 +1266,6 @@ async fn fetch_registry(sym: &Symposium, git_url: &str, update: UpdateLevel) -> 
         crate::config::REGISTRY_CACHE_SUBDIR,
     );
     cache_mgr.fetch_url(git_url, update).await
-}
-
-/// PM context for registry operations: these are workspace independent, so a
-/// shared detached resolver (no `cargo metadata`) stands in for the workspace.
-fn registry_pm_cx(sym: &Symposium) -> crate::pm::PmContext<'static> {
-    use std::sync::OnceLock;
-    static DETACHED: OnceLock<crate::pm::WorkspaceDeps> = OnceLock::new();
-    crate::pm::PmContext {
-        install: sym.install_context(),
-        deps: DETACHED.get_or_init(crate::pm::WorkspaceDeps::detached),
-    }
 }
 
 /// One package offered by a PM instance, located on disk: the instance's
@@ -1311,14 +1298,11 @@ impl PluginOffer {
 /// Does no network I/O — `list_plugins` and `cached_root` both serve from
 /// what is already on disk; a git registry that was never fetched offers
 /// nothing.
-async fn list_plugin_offers(
-    pms: &crate::pm::PmRegistry,
-    pm_cx: &crate::pm::PmContext<'_>,
-) -> (Vec<PluginOffer>, Vec<LoadWarning>) {
+async fn list_plugin_offers(pms: &crate::pm::PmRegistry) -> (Vec<PluginOffer>, Vec<LoadWarning>) {
     let mut offers = Vec::new();
     let mut warnings = Vec::new();
     for inst in pms.registries() {
-        let infos = match inst.pm.list_plugins(&[], pm_cx).await {
+        let infos = match inst.pm.list_plugins(&[]).await {
             Ok(infos) => infos,
             Err(e) => {
                 tracing::warn!(registry = %inst.name, error = %e, "cannot list registry");
@@ -1336,7 +1320,7 @@ async fn list_plugin_offers(
             let Some(subpath) = info.subpath else {
                 continue;
             };
-            let Some(entry_dir) = inst.pm.cached_root(&info.id, pm_cx) else {
+            let Some(entry_dir) = inst.pm.cached_root(&info.id) else {
                 tracing::warn!(registry = %inst.name, id = %info.id, "cannot locate plugin package");
                 continue;
             };
@@ -1467,11 +1451,10 @@ async fn load_registry_impl(
     sym: &Symposium,
     workspace: Option<&crate::pm::LoadedWorkspace>,
 ) -> PluginRegistry {
-    let pms = sym.package_managers();
-    let pm_cx = registry_pm_cx(sym);
+    let pms = sym.detached_managers();
     let mut plugins = Vec::new();
 
-    let (offers, mut warnings) = list_plugin_offers(&pms, &pm_cx).await;
+    let (offers, mut warnings) = list_plugin_offers(&pms).await;
     for offer in offers {
         match load_offer(&offer) {
             Some(Ok(p)) => plugins.push(*p),

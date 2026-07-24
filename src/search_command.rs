@@ -18,7 +18,6 @@
 use anyhow::Result;
 
 use crate::config::Symposium;
-use crate::pm::PmContext;
 use crate::report::ReportEvent;
 
 /// One search hit, in display form.
@@ -56,9 +55,7 @@ pub async fn find_matches(sym: &Symposium, query: &str) -> Vec<SearchMatch> {
         }
     }
     // Search is workspace-independent; a detached resolver stands in.
-    let ws = crate::pm::WorkspaceDeps::detached();
-    let cx = PmContext::new(sym, &ws);
-    for (instance, info) in sym.package_managers().search(query, &cx).await {
+    for (instance, info) in sym.detached_managers().search(query).await {
         matches.push(SearchMatch {
             origin: instance,
             name: info.id.name.clone(),

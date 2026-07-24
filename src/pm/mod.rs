@@ -22,9 +22,10 @@
 //! the seam that spawns and talks to them.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
-use symposium_install::{InstallContext, UpdateLevel};
+use symposium_install::UpdateLevel;
 
 mod cargo;
 pub mod layout;
@@ -117,30 +118,14 @@ pub struct FetchedPackage {
     pub root: PathBuf,
 }
 
-/// Everything a PM operation may need from the surrounding invocation.
-pub struct PmContext<'a> {
-    /// Cache root and cargo override for acquisition.
-    pub install: InstallContext,
-    /// The workspace resolver. The cargo transport drives it — running
-    /// `cargo metadata` lazily, cached — for `list_deps` / `fetch` /
-    /// `list_plugins` (path-dep overrides, version pinning, source location).
-    /// Non-cargo PMs ignore it. It is a resolver, not pre-resolved data, so the
-    /// cargo PM owns the metadata call rather than receiving injected crates.
-    pub deps: &'a WorkspaceDeps,
-}
-
-impl<'a> PmContext<'a> {
-    /// The context for a given invocation and workspace.
-    pub fn new(sym: &crate::config::Symposium, deps: &'a WorkspaceDeps) -> Self {
-        Self {
-            install: sym.install_context(),
-            deps,
-        }
-    }
-}
-
 /// The operations every package manager implements (per the registry-centric
 /// plugin distribution RFD).
+///
+/// A PM is self-contained: it holds whatever it needs to resolve its own
+/// ecosystem ([`CargoPm`] owns an [`Arc<WorkspaceDeps>`], [`PathPm`] owns its
+/// directory), so operations take no ambient context. This mirrors the
+/// out-of-process shape — a PM spawned for a workspace answers RPC calls from
+/// its own state, with nothing workspace-shaped threaded per call.
 #[async_trait::async_trait]
 pub trait PackageManager {
     /// The PM's registry name — the `pm` component of every id it owns. For
@@ -155,31 +140,25 @@ pub trait PackageManager {
     ///
     /// Must not fetch or touch the network — read-only callers (help
     /// rendering, hook dispatch) rely on this serving from cache.
-    async fn list_plugins(&self, deps: &[PackageId], cx: &PmContext<'_>)
-    -> Result<Vec<PluginInfo>>;
+    async fn list_plugins(&self, deps: &[PackageId]) -> Result<Vec<PluginInfo>>;
 
     /// Find packages matching a partial query. PMs without a searchable
     /// registry return an empty list.
-    async fn search(&self, query: &str, cx: &PmContext<'_>) -> Result<Vec<PluginInfo>>;
+    async fn search(&self, query: &str) -> Result<Vec<PluginInfo>>;
 
     /// Acquire the package's content into a local directory, canonicalizing
     /// the id's version component. `update` controls how aggressively an
     /// already-cached package is refreshed.
-    async fn fetch(
-        &self,
-        id: &PackageId,
-        cx: &PmContext<'_>,
-        update: UpdateLevel,
-    ) -> Result<FetchedPackage>;
+    async fn fetch(&self, id: &PackageId, update: UpdateLevel) -> Result<FetchedPackage>;
 
     /// The package ids the current workspace depends on. PMs with no
     /// workspace notion return an empty list.
-    async fn list_deps(&self, cx: &PmContext<'_>) -> Result<Vec<PackageId>>;
+    async fn list_deps(&self) -> Result<Vec<PackageId>>;
 
     /// Where a previously fetched package's content lives on disk, computed
     /// without fetching or touching the network. `None` when the PM can't
     /// answer from the id alone.
-    fn cached_root(&self, id: &PackageId, cx: &PmContext<'_>) -> Option<PathBuf>;
+    fn cached_root(&self, id: &PackageId) -> Option<PathBuf>;
 }
 
 /// A package-manager instance paired with its attribution name: the config
@@ -200,14 +179,14 @@ pub struct PmRegistry {
 }
 
 impl PmRegistry {
-    /// The fixed transports plus the given registry instances.
-    /// `new(Vec::new())` is a transport-only set for callers that just need
-    /// `fetch` or `list_deps`.
-    pub fn new(registries: Vec<PmInstance>) -> Self {
+    /// The fixed transports (built over `workspace`) plus the given registry
+    /// instances. `new(vec![], workspace)` is a transport-only set for callers
+    /// that just need `fetch` or `list_deps`.
+    pub fn new(registries: Vec<PmInstance>, workspace: Arc<WorkspaceDeps>) -> Self {
         Self {
             transports: vec![PmInstance {
                 name: CARGO_PM.to_string(),
-                pm: Box::new(CargoPm),
+                pm: Box::new(CargoPm::new(workspace)),
             }],
             registries,
         }
@@ -240,38 +219,33 @@ impl PmRegistry {
     }
 
     /// Fetch a package via the transport named in its id.
-    pub async fn fetch(
-        &self,
-        id: &PackageId,
-        cx: &PmContext<'_>,
-        update: UpdateLevel,
-    ) -> Result<FetchedPackage> {
-        self.transport_for(&id.pm, id)?.fetch(id, cx, update).await
+    pub async fn fetch(&self, id: &PackageId, update: UpdateLevel) -> Result<FetchedPackage> {
+        self.transport_for(&id.pm, id)?.fetch(id, update).await
     }
 
     /// Union of `list_deps` across the ecosystems — the workspace's full
     /// dependency set for discovery and `depends-on` predicate evaluation.
-    pub async fn list_deps(&self, cx: &PmContext<'_>) -> Result<Vec<PackageId>> {
+    pub async fn list_deps(&self) -> Result<Vec<PackageId>> {
         let mut deps = Vec::new();
         for inst in &self.transports {
-            deps.extend(inst.pm.list_deps(cx).await?);
+            deps.extend(inst.pm.list_deps().await?);
         }
         Ok(deps)
     }
 
     /// Where a fetched package's content lives, via the transport named in its
     /// id. No fetching, no network.
-    pub fn cached_root(&self, id: &PackageId, cx: &PmContext<'_>) -> Result<Option<PathBuf>> {
-        Ok(self.transport_for(&id.pm, id)?.cached_root(id, cx))
+    pub fn cached_root(&self, id: &PackageId) -> Result<Option<PathBuf>> {
+        Ok(self.transport_for(&id.pm, id)?.cached_root(id))
     }
 
     /// Search every instance for packages matching `query`, tagged with the
     /// instance's display name. A failing instance is skipped with a debug log
     /// rather than failing the union.
-    pub async fn search(&self, query: &str, cx: &PmContext<'_>) -> Vec<(String, PluginInfo)> {
+    pub async fn search(&self, query: &str) -> Vec<(String, PluginInfo)> {
         let mut out = Vec::new();
         for inst in self.instances() {
-            match inst.pm.search(query, cx).await {
+            match inst.pm.search(query).await {
                 Ok(infos) => out.extend(infos.into_iter().map(|i| (inst.name.clone(), i))),
                 Err(e) => {
                     tracing::debug!(instance = %inst.name, error = %e, "search failed, skipping");
@@ -289,10 +263,9 @@ impl PmRegistry {
 /// aborting the caller.
 pub async fn workspace_dep_ids(
     sym: &crate::config::Symposium,
-    deps: &WorkspaceDeps,
+    deps: &Arc<WorkspaceDeps>,
 ) -> Vec<PackageId> {
-    let cx = PmContext::new(sym, deps);
-    match sym.package_managers().list_deps(&cx).await {
+    match sym.package_managers(deps).list_deps().await {
         Ok(deps) => deps,
         Err(e) => {
             tracing::warn!(error = %e, "failed to list workspace dependencies");
@@ -315,13 +288,9 @@ mod tests {
     async fn registry_rejects_unknown_pm() {
         let tmp = tempfile::tempdir().unwrap();
         let deps = WorkspaceDeps::fixture(tmp.path().to_path_buf(), vec![]);
-        let cx = PmContext {
-            install: InstallContext::new(tmp.path().to_path_buf()),
-            deps: &deps,
-        };
         let id = PackageId::any_version("npm", "leftpad");
-        let err = PmRegistry::new(vec![])
-            .fetch(&id, &cx, UpdateLevel::None)
+        let err = PmRegistry::new(vec![], deps)
+            .fetch(&id, UpdateLevel::None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown package manager `npm`"));

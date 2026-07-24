@@ -150,7 +150,11 @@ pub async fn remove_plugin(
 
 /// Check that `name` resolves to something before recording it: a workspace
 /// dependency (offline-friendly) or a registry search hit.
-async fn resolve_name(sym: &Symposium, deps: &crate::pm::WorkspaceDeps, name: &str) -> Result<()> {
+async fn resolve_name(
+    sym: &Symposium,
+    deps: &std::sync::Arc<crate::pm::WorkspaceDeps>,
+    name: &str,
+) -> Result<()> {
     let normalized = normalize_crate_name(name);
     let is_workspace_dep = deps.load().is_some_and(|ws| {
         ws.crates
@@ -161,10 +165,9 @@ async fn resolve_name(sym: &Symposium, deps: &crate::pm::WorkspaceDeps, name: &s
         return Ok(());
     }
 
-    let cx = crate::pm::PmContext::new(sym, deps);
     let found = sym
-        .package_managers()
-        .search(name, &cx)
+        .package_managers(deps)
+        .search(name)
         .await
         .iter()
         .any(|(_, info)| normalize_crate_name(&info.id.name) == normalized);

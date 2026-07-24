@@ -23,6 +23,7 @@ use std::path::Path;
 
 use crate::pm::WorkspaceDeps;
 use anyhow::Result;
+use std::sync::Arc;
 
 use crate::config::Symposium;
 use crate::discovery::{DiscoveredPlugin, Enablement};
@@ -67,7 +68,10 @@ pub struct StatusEntry {
 }
 
 /// Compute the enablement report for the workspace `deps` points at.
-pub async fn workspace_status(sym: &Symposium, deps: &WorkspaceDeps) -> Result<Vec<StatusEntry>> {
+pub async fn workspace_status(
+    sym: &Symposium,
+    deps: &Arc<WorkspaceDeps>,
+) -> Result<Vec<StatusEntry>> {
     let ws = deps
         .load()
         .cloned()

@@ -5,10 +5,12 @@
 //! The [`workspace`] submodule owns the cargo-workspace resolution — the
 //! `cargo metadata` invocation, its cache, and the [`WorkspaceCrate`] /
 //! [`WorkspaceDeps`] types — since that is cargo's ecosystem, not a generic
-//! concern. A [`WorkspaceDeps`] resolver is threaded through [`PmContext`] and
-//! driven by this PM (`cx.deps.crates()`).
+//! concern. A [`CargoPm`] *holds* its [`WorkspaceDeps`] resolver (as an
+//! [`Arc`], so several instances share one lazily-run, cached `cargo metadata`)
+//! and drives it (`self.workspace.crates()`).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use symposium_install::UpdateLevel;
@@ -21,17 +23,27 @@ pub use workspace::{
     LoadedWorkspace, WorkspaceCrate, WorkspaceDeps, file_mtime, workspace_dir_name,
 };
 
-use super::{
-    ANY_VERSION, CARGO_PM, FetchedPackage, PackageId, PackageManager, PluginInfo, PmContext,
-};
+use super::{ANY_VERSION, CARGO_PM, FetchedPackage, PackageId, PackageManager, PluginInfo};
 
 /// How many crates.io hits a search returns — enough to surface the crate a
 /// user is looking for without flooding the report.
 const SEARCH_PAGE_SIZE: u64 = 10;
 
-pub struct CargoPm;
+/// The cargo transport, bound to one workspace's [`WorkspaceDeps`] resolver.
+///
+/// Holds the resolver as an [`Arc`] so the transport in a [`PmRegistry`] and any
+/// ad-hoc [`CargoPm`] built for crate loading share one lazily-run, cached
+/// `cargo metadata` — the in-process stand-in for a per-workspace PM process.
+pub struct CargoPm {
+    workspace: Arc<WorkspaceDeps>,
+}
 
 impl CargoPm {
+    /// A transport resolving against `workspace`.
+    pub fn new(workspace: Arc<WorkspaceDeps>) -> Self {
+        Self { workspace }
+    }
+
     /// Cargo id for a crate name and optional version requirement.
     pub fn id_for(name: &str, version: Option<&str>) -> PackageId {
         PackageId::new(CARGO_PM, name, version.unwrap_or(ANY_VERSION))
@@ -51,9 +63,9 @@ impl CargoPm {
     /// Returns `None` only when the crate can't be fetched or the merged
     /// manifest fails validation (both logged); the caller then contributes no
     /// skills for this reference.
-    pub async fn load_plugin(&self, name: &str, cx: &PmContext<'_>) -> Option<ParsedPlugin> {
+    pub async fn load_plugin(&self, name: &str) -> Option<ParsedPlugin> {
         let id = Self::id_for(name, None);
-        let fetched = match self.fetch(&id, cx, UpdateLevel::None).await {
+        let fetched = match self.fetch(&id, UpdateLevel::None).await {
             Ok(f) => f,
             Err(e) => {
                 tracing::warn!(crate_name = %name, error = %e, "failed to fetch crate for plugin");
@@ -168,11 +180,7 @@ impl PackageManager for CargoPm {
     ///
     /// Offers are consent-gated by the caller: the PM offers, the
     /// `[plugins]` config enables.
-    async fn list_plugins(
-        &self,
-        deps: &[PackageId],
-        cx: &PmContext<'_>,
-    ) -> Result<Vec<PluginInfo>> {
+    async fn list_plugins(&self, deps: &[PackageId]) -> Result<Vec<PluginInfo>> {
         let mut offers = Vec::new();
         for id in deps.iter().filter(|id| id.pm == CARGO_PM) {
             // Fetch by name only: the concrete version in `id` would make
@@ -180,7 +188,7 @@ impl PackageManager for CargoPm {
             // the workspace-source shortcut. The resolved version is recovered
             // from the fetched id.
             let fetched = match self
-                .fetch(&Self::id_for(&id.name, None), cx, UpdateLevel::None)
+                .fetch(&Self::id_for(&id.name, None), UpdateLevel::None)
                 .await
             {
                 Ok(f) => f,
@@ -208,7 +216,7 @@ impl PackageManager for CargoPm {
     /// fetched (any fetchable crate yields at least a default `skills/` plugin).
     /// So this lets `cargo agents use <crate>` name a crate the workspace
     /// doesn't depend on; the fetch/load step decides what it contributes.
-    async fn search(&self, query: &str, _cx: &PmContext<'_>) -> Result<Vec<PluginInfo>> {
+    async fn search(&self, query: &str) -> Result<Vec<PluginInfo>> {
         let client = crates_io_api::AsyncClient::new(
             "symposium (https://github.com/symposium-dev/symposium)",
             std::time::Duration::from_millis(1000),
@@ -230,16 +238,11 @@ impl PackageManager for CargoPm {
             .collect())
     }
 
-    async fn fetch(
-        &self,
-        id: &PackageId,
-        cx: &PmContext<'_>,
-        _update: UpdateLevel,
-    ) -> Result<FetchedPackage> {
+    async fn fetch(&self, id: &PackageId, _update: UpdateLevel) -> Result<FetchedPackage> {
         debug_assert_eq!(id.pm, CARGO_PM);
         // `crates()` drives the lazy `cargo metadata` resolution — the cargo PM
-        // owns the call rather than receiving injected crates.
-        let mut fetch = RustCrateFetch::new(&id.name, cx.deps.crates());
+        // owns the call, resolving against its own workspace.
+        let mut fetch = RustCrateFetch::new(&id.name, self.workspace.crates());
         if id.version != ANY_VERSION {
             fetch = fetch.version(&id.version);
         }
@@ -250,9 +253,9 @@ impl PackageManager for CargoPm {
         })
     }
 
-    async fn list_deps(&self, cx: &PmContext<'_>) -> Result<Vec<PackageId>> {
-        Ok(cx
-            .deps
+    async fn list_deps(&self) -> Result<Vec<PackageId>> {
+        Ok(self
+            .workspace
             .crates()
             .iter()
             .map(|c| PackageId::new(CARGO_PM, c.name.clone(), c.version.to_string()))
@@ -261,7 +264,7 @@ impl PackageManager for CargoPm {
 
     /// A crate's cache location depends on how it resolved (path override,
     /// registry cache, download), so it can't be answered from the id alone.
-    fn cached_root(&self, _id: &PackageId, _cx: &PmContext<'_>) -> Option<PathBuf> {
+    fn cached_root(&self, _id: &PackageId) -> Option<PathBuf> {
         None
     }
 }
@@ -270,7 +273,6 @@ impl PackageManager for CargoPm {
 mod tests {
     use super::*;
     use crate::pm::WorkspaceCrate;
-    use symposium_install::InstallContext;
 
     /// A path dependency: `source_dir` defaults to its local path.
     fn path_dep(name: &str, dir: PathBuf) -> WorkspaceCrate {
@@ -310,13 +312,12 @@ mod tests {
             .iter()
             .map(|c| PackageId::new(CARGO_PM, &c.name, c.version.to_string()))
             .collect();
-        let workspace = crate::pm::WorkspaceDeps::fixture(tmp.path().to_path_buf(), crates);
-        let cx = PmContext {
-            install: InstallContext::new(tmp.path().to_path_buf()),
-            deps: &workspace,
-        };
+        let pm = CargoPm::new(crate::pm::WorkspaceDeps::fixture(
+            tmp.path().to_path_buf(),
+            crates,
+        ));
 
-        let offers = CargoPm.list_plugins(&deps, &cx).await.unwrap();
+        let offers = pm.list_plugins(&deps).await.unwrap();
         let got: Vec<(&str, Option<&str>)> = offers
             .iter()
             .map(|o| (o.id.name.as_str(), o.recommends.as_deref()))

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::Level;
 
 // ---------------------------------------------------------------------------
@@ -519,9 +520,10 @@ impl Symposium {
         self.dirs.cargo_override.as_deref()
     }
 
-    /// Create a `WorkspaceDeps` with disk caching enabled.
-    pub fn workspace_deps(&self, cwd: &Path) -> crate::pm::WorkspaceDeps {
-        self.dirs.workspace_deps(cwd)
+    /// Create a `WorkspaceDeps` with disk caching enabled, shareable as an
+    /// [`Arc`] (a [`CargoPm`](crate::pm::CargoPm) holds one).
+    pub fn workspace_deps(&self, cwd: &Path) -> Arc<crate::pm::WorkspaceDeps> {
+        Arc::new(self.dirs.workspace_deps(cwd))
     }
 
     /// Build a `Command` for the cargo binary.
@@ -549,7 +551,10 @@ impl Symposium {
     /// including git registries, whose repository is unpacked into the cache
     /// before it is read. Each instance is named for its registry, since that
     /// name is what its plugins are attributed to.
-    pub fn package_managers(&self) -> crate::pm::PmRegistry {
+    pub fn package_managers(
+        &self,
+        workspace: &Arc<crate::pm::WorkspaceDeps>,
+    ) -> crate::pm::PmRegistry {
         let instances = self
             .registries()
             .into_iter()
@@ -561,7 +566,14 @@ impl Symposium {
                 Some(crate::pm::PmInstance { name, pm })
             })
             .collect();
-        crate::pm::PmRegistry::new(instances)
+        crate::pm::PmRegistry::new(instances, Arc::clone(workspace))
+    }
+
+    /// The package managers for a workspace-independent operation (registry
+    /// listing, crates.io search): the cargo transport is built over a detached
+    /// resolver that never runs `cargo metadata`.
+    pub fn detached_managers(&self) -> crate::pm::PmRegistry {
+        self.package_managers(&Arc::new(crate::pm::WorkspaceDeps::detached()))
     }
 
     /// Override the cargo binary path (test-only).

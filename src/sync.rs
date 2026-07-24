@@ -18,6 +18,7 @@ use crate::output::{Output, display_path};
 use crate::plugins;
 use crate::pm::WorkspaceDeps;
 use crate::skills;
+use std::sync::Arc;
 
 /// Marker file written into every skill directory symposium installs.
 ///
@@ -271,7 +272,7 @@ async fn resolve_custom_predicate_entries(
 
 /// Run the full sync: discover applicable skills, install into agent dirs,
 /// clean up stale installations.
-pub async fn sync(sym: &Symposium, deps: &WorkspaceDeps, update: UpdateLevel) -> Result<()> {
+pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLevel) -> Result<()> {
     let out = &Output::quiet();
     let loaded = deps
         .load()

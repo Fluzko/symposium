@@ -83,8 +83,9 @@ struct DiskCache {
 /// miss it runs `cargo metadata` (expensive) and writes through to disk. The
 /// result is memoized in a [`OnceLock`], so resolution happens at most once per
 /// instance and every method reads through a shared `&self` — which lets a
-/// single resolver be shared (e.g. threaded into a [`PmContext`] so the cargo
-/// PM drives resolution) rather than each caller resolving its own.
+/// single resolver be shared (held as an [`Arc`] by a
+/// [`CargoPm`](crate::pm::CargoPm), and read directly by core code that needs
+/// the workspace root or members) rather than each caller resolving its own.
 pub struct WorkspaceDeps {
     cwd: PathBuf,
     dirs: crate::dirs::SymposiumDirs,
@@ -103,7 +104,7 @@ impl WorkspaceDeps {
     /// A pre-resolved resolver for tests: skips `cargo metadata` and returns
     /// exactly `crates` (rooted at `root`, no members).
     #[cfg(test)]
-    pub(crate) fn fixture(root: impl Into<PathBuf>, crates: Vec<WorkspaceCrate>) -> Self {
+    pub(crate) fn fixture(root: impl Into<PathBuf>, crates: Vec<WorkspaceCrate>) -> Arc<Self> {
         let root = root.into();
         let cached = OnceLock::new();
         let _ = cached.set(Some(Arc::new(LoadedWorkspace {
@@ -111,16 +112,17 @@ impl WorkspaceDeps {
             crates,
             members: Vec::new(),
         })));
-        Self {
+        Arc::new(Self {
             cwd: root,
             dirs: crate::dirs::SymposiumDirs::new(PathBuf::new(), PathBuf::new(), None),
             cached,
-        }
+        })
     }
 
     /// A resolver pre-set to "no workspace" — it never runs `cargo metadata`.
-    /// For workspace-independent operations (e.g. registry listing) that still
-    /// need a [`PmContext`](crate::pm::PmContext).
+    /// Backs [`detached_managers`](crate::config::Symposium::detached_managers)
+    /// for workspace-independent operations (registry listing, crates.io
+    /// search).
     pub fn detached() -> Self {
         let cached = OnceLock::new();
         let _ = cached.set(None);

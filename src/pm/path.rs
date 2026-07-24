@@ -18,9 +18,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use symposium_install::UpdateLevel;
 
-use super::{
-    ANY_VERSION, FetchedPackage, PackageId, PackageManager, PluginInfo, PmContext, layout,
-};
+use super::{ANY_VERSION, FetchedPackage, PackageId, PackageManager, PluginInfo, layout};
 
 /// A configured path registry: one local directory whose tree is a
 /// collection of plugin entries.
@@ -62,17 +60,13 @@ impl PackageManager for PathPm {
 
     /// The registry's entries. `deps` is unused — a local registry's
     /// contents don't vary with the workspace.
-    async fn list_plugins(
-        &self,
-        _deps: &[PackageId],
-        _cx: &PmContext<'_>,
-    ) -> Result<Vec<PluginInfo>> {
+    async fn list_plugins(&self, _deps: &[PackageId]) -> Result<Vec<PluginInfo>> {
         self.offers()
     }
 
     /// Substring match over the entries' names. Manifest names are the
     /// plugin layer's to interpret, so this only sees directory names.
-    async fn search(&self, query: &str, _cx: &PmContext<'_>) -> Result<Vec<PluginInfo>> {
+    async fn search(&self, query: &str) -> Result<Vec<PluginInfo>> {
         Ok(self
             .offers()?
             .into_iter()
@@ -83,14 +77,9 @@ impl PackageManager for PathPm {
     /// Nothing to acquire — the content already lives in the registry
     /// directory. A missing entry directory is not an error here; discovery
     /// over the returned root decides what an empty entry means.
-    async fn fetch(
-        &self,
-        id: &PackageId,
-        cx: &PmContext<'_>,
-        _update: UpdateLevel,
-    ) -> Result<FetchedPackage> {
+    async fn fetch(&self, id: &PackageId, _update: UpdateLevel) -> Result<FetchedPackage> {
         let root = self
-            .cached_root(id, cx)
+            .cached_root(id)
             .ok_or_else(|| anyhow::anyhow!("registry `{}` cannot locate `{id}`", self.name))?;
         Ok(FetchedPackage {
             id: id.clone(),
@@ -99,13 +88,13 @@ impl PackageManager for PathPm {
     }
 
     /// A local directory contributes no workspace dependencies.
-    async fn list_deps(&self, _cx: &PmContext<'_>) -> Result<Vec<PackageId>> {
+    async fn list_deps(&self) -> Result<Vec<PackageId>> {
         Ok(Vec::new())
     }
 
     /// The entry's directory within the registry directory — path entries
     /// are their own cache.
-    fn cached_root(&self, id: &PackageId, _cx: &PmContext<'_>) -> Option<PathBuf> {
+    fn cached_root(&self, id: &PackageId) -> Option<PathBuf> {
         Some(self.dir.join(&id.name))
     }
 }
@@ -113,24 +102,10 @@ impl PackageManager for PathPm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use symposium_install::InstallContext;
-
-    fn cx(cache: &std::path::Path) -> PmContext<'static> {
-        // PathPm ignores `deps`; a leaked empty resolver keeps the `'static`
-        // signature without threading a workspace through every test.
-        let deps: &'static crate::pm::WorkspaceDeps = Box::leak(Box::new(
-            crate::pm::WorkspaceDeps::fixture(std::path::PathBuf::new(), vec![]),
-        ));
-        PmContext {
-            install: InstallContext::new(cache.to_path_buf()),
-            deps,
-        }
-    }
 
     #[tokio::test]
     async fn offers_one_package_per_entry() {
         let tmp = tempfile::tempdir().unwrap();
-        let cx = cx(tmp.path());
         let source = tmp.path().join("registry");
         std::fs::create_dir_all(source.join("tools")).unwrap();
         std::fs::write(source.join("tools/SYMPOSIUM.toml"), "name = \"tools\"").unwrap();
@@ -138,7 +113,7 @@ mod tests {
         std::fs::write(source.join("nested/style/SKILL.md"), "# style").unwrap();
 
         let pm = PathPm::new("user-plugins", &source);
-        let offers = pm.list_plugins(&[], &cx).await.unwrap();
+        let offers = pm.list_plugins(&[]).await.unwrap();
         let names: Vec<&str> = offers.iter().map(|o| o.id.name.as_str()).collect();
         assert_eq!(names, vec!["nested/style", "tools"]);
         assert!(offers.iter().all(|o| o.id.pm == "user-plugins"));
@@ -147,12 +122,9 @@ mod tests {
             offers[0].subpath.as_deref(),
             Some(std::path::Path::new("nested/style"))
         );
-        assert_eq!(
-            pm.cached_root(&offers[1].id, &cx),
-            Some(source.join("tools"))
-        );
+        assert_eq!(pm.cached_root(&offers[1].id), Some(source.join("tools")));
 
-        let hits = pm.search("too", &cx).await.unwrap();
+        let hits = pm.search("too").await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id.name, "tools");
     }
@@ -160,10 +132,9 @@ mod tests {
     #[tokio::test]
     async fn fetch_returns_the_local_entry_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let cx = cx(tmp.path());
         let pm = PathPm::new("local", tmp.path().join("registry"));
         let id = PackageId::new("local", "tools", ANY_VERSION);
-        let fetched = pm.fetch(&id, &cx, UpdateLevel::None).await.unwrap();
+        let fetched = pm.fetch(&id, UpdateLevel::None).await.unwrap();
         assert_eq!(fetched.root, tmp.path().join("registry/tools"));
         assert_eq!(fetched.id, id);
     }

@@ -111,7 +111,7 @@ pub struct SkillWithGroupContext {
 pub async fn skills_applicable_to(
     sym: &Symposium,
     registry: &PluginRegistry,
-    deps: &crate::pm::WorkspaceDeps,
+    deps: &std::sync::Arc<crate::pm::WorkspaceDeps>,
     workspace_root: Option<&Path>,
     custom_predicate_entries: std::collections::HashMap<
         String,
@@ -148,11 +148,15 @@ pub async fn skills_applicable_to(
 pub async fn active_plugins(
     sym: &Symposium,
     registry: &PluginRegistry,
-    deps: &crate::pm::WorkspaceDeps,
+    deps: &std::sync::Arc<crate::pm::WorkspaceDeps>,
     workspace_root: Option<&Path>,
     ctx: &mut PredicateContext<'_>,
 ) -> Vec<ParsedPlugin> {
     let mut plugins = Vec::new();
+
+    // The cargo transport that loads each referenced crate, sharing this
+    // workspace's resolver so crate fetches reuse one cached `cargo metadata`.
+    let cargo = crate::pm::CargoPm::new(std::sync::Arc::clone(deps));
 
     // A crate reached through more than one active plugin's chain — or through
     // both a chain and dependency enablement — must load once, or its hooks
@@ -192,10 +196,9 @@ pub async fn active_plugins(
         // chained edges — a crate that names another crate (the reschema'd
         // `[package.metadata.symposium]` redirect) is followed transitively.
         expand_edges(
-            sym,
             &parsed.plugin.chained,
             parsed.workspace_member,
-            deps,
+            &cargo,
             ctx,
             &mut visited,
             0,
@@ -222,7 +225,7 @@ pub async fn active_plugins(
             if registry_names.contains(&crate::crate_sources::normalize_crate_name(&name)) {
                 continue;
             }
-            expand_crate_plugin(sym, &name, deps, ctx, &mut visited, 0, &mut plugins).await;
+            expand_crate_plugin(&name, &cargo, ctx, &mut visited, 0, &mut plugins).await;
         }
     }
 
@@ -414,12 +417,10 @@ fn warn_undispatched_crate_features(parsed: &ParsedPlugin) {
 /// cycles. `depth`/[`MAX_CHAIN_DEPTH`] is a backstop. Taking the edge slice and
 /// provenance directly — rather than an owning `&ParsedPlugin` — lets the caller
 /// append the owner to `collected` first without aliasing it.
-#[allow(clippy::too_many_arguments)]
 async fn expand_edges(
-    sym: &Symposium,
     edges: &[crate::plugins::ChainedPlugin],
     owner_workspace_member: bool,
-    deps: &crate::pm::WorkspaceDeps,
+    pm: &crate::pm::CargoPm,
     ctx: &mut PredicateContext<'_>,
     visited: &mut std::collections::HashSet<String>,
     depth: usize,
@@ -441,7 +442,7 @@ async fn expand_edges(
             continue;
         }
 
-        expand_crate_plugin(sym, &edge.name, deps, ctx, visited, depth, collected).await;
+        expand_crate_plugin(&edge.name, pm, ctx, visited, depth, collected).await;
     }
 }
 
@@ -454,16 +455,14 @@ async fn expand_edges(
 /// seen it (a cycle or a diamond), or when its own plugin-level predicates
 /// don't hold.
 async fn expand_crate_plugin(
-    sym: &Symposium,
     crate_name: &str,
-    deps: &crate::pm::WorkspaceDeps,
+    pm: &crate::pm::CargoPm,
     ctx: &mut PredicateContext<'_>,
     visited: &mut std::collections::HashSet<String>,
     depth: usize,
     collected: &mut Vec<ParsedPlugin>,
 ) {
-    let pm_cx = crate::pm::PmContext::new(sym, deps);
-    let Some(crate_plugin) = crate::pm::CargoPm.load_plugin(crate_name, &pm_cx).await else {
+    let Some(crate_plugin) = pm.load_plugin(crate_name).await else {
         return;
     };
 
@@ -493,10 +492,9 @@ async fn expand_crate_plugin(
     collected.push(crate_plugin);
 
     Box::pin(expand_edges(
-        sym,
         &edges,
         workspace_member,
-        deps,
+        pm,
         ctx,
         visited,
         depth + 1,

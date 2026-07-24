@@ -21,19 +21,36 @@ pub struct WorkspaceCrate {
     pub name: String,
     /// The resolved version.
     pub version: semver::Version,
-    /// Local source path for path dependencies.
-    /// `None` for registry crates.
+    /// Local source path for path dependencies (unpublished, so `fetch` must
+    /// resolve them locally). `None` for registry crates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
+    /// The crate's extracted source directory, from `cargo metadata`'s
+    /// `manifest_path`. Populated for *every* resolved dependency — registry
+    /// crates included, since `cargo metadata` already extracted them — so the
+    /// source can be inspected or fetched without a fresh cargo probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_dir: Option<PathBuf>,
 }
 
 impl WorkspaceCrate {
+    /// A crate whose source lives at `path` (a path dependency), or a registry
+    /// crate when `path` is `None`. `source_dir` defaults to `path`; use
+    /// [`with_source_dir`](Self::with_source_dir) for a registry crate whose
+    /// extracted source is known.
     pub fn new(name: String, version: semver::Version, path: Option<PathBuf>) -> Self {
         Self {
             name,
             version,
+            source_dir: path.clone(),
             path,
         }
+    }
+
+    /// Set the extracted source directory (from `cargo metadata`).
+    pub fn with_source_dir(mut self, source_dir: Option<PathBuf>) -> Self {
+        self.source_dir = source_dir;
+        self
     }
 }
 
@@ -287,6 +304,7 @@ fn load_workspace(cwd: &Path, cargo_path: Option<&Path>) -> Option<LoadedWorkspa
                 .ok()
                 .map(|v| WorkspaceCrate {
                     path: path_overrides.get(&p.name).cloned(),
+                    source_dir: p.manifest_path.parent().map(|dir| dir.into()),
                     name: p.name.to_string(),
                     version: v,
                 })

@@ -214,6 +214,14 @@ impl PmRegistry {
         self.transports.iter().chain(self.registries.iter())
     }
 
+    /// The configured registry instances only (no ecosystem transports). Used
+    /// by registry loading, which consumes only positional registry entries —
+    /// transports never offer those, and their `list_plugins` may now fetch, so
+    /// they must stay off the per-event load path.
+    pub fn registries(&self) -> impl Iterator<Item = &PmInstance> {
+        self.registries.iter()
+    }
+
     /// The transport owning the named ecosystem.
     fn transport_for(
         &self,

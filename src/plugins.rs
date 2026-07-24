@@ -1298,9 +1298,13 @@ impl PluginOffer {
     }
 }
 
-/// Every package offered by the active PM instances, located on disk, plus
-/// warnings for instances that could not be listed (e.g. a misconfigured
-/// registry whose root is itself a plugin).
+/// Every positional package offered by the configured **registry** instances,
+/// located on disk, plus warnings for instances that could not be listed (e.g.
+/// a misconfigured registry whose root is itself a plugin). Ecosystem
+/// transports (cargo) are intentionally excluded: registry loading consumes
+/// only positional entries (which transports never offer), and a transport's
+/// `list_plugins` may fetch, so it must not run on this per-event path —
+/// dependency-embedded crates load through discovery / chained references.
 ///
 /// Does no network I/O — `list_plugins` and `cached_root` both serve from
 /// what is already on disk; a git registry that was never fetched offers
@@ -1311,7 +1315,7 @@ async fn list_plugin_offers(
 ) -> (Vec<PluginOffer>, Vec<LoadWarning>) {
     let mut offers = Vec::new();
     let mut warnings = Vec::new();
-    for inst in pms.instances() {
+    for inst in pms.registries() {
         let infos = match inst.pm.list_plugins(&[], pm_cx).await {
             Ok(infos) => infos,
             Err(e) => {

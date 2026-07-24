@@ -222,8 +222,16 @@ pub async fn active_plugins(
             if registry_names.contains(&crate::crate_sources::normalize_crate_name(&name)) {
                 continue;
             }
-            expand_crate_plugin(sym, &name, workspace_crates, ctx, &mut visited, 0, &mut plugins)
-                .await;
+            expand_crate_plugin(
+                sym,
+                &name,
+                workspace_crates,
+                ctx,
+                &mut visited,
+                0,
+                &mut plugins,
+            )
+            .await;
         }
     }
 
@@ -248,7 +256,13 @@ pub(crate) async fn collect_skills(
         for group in &parsed.plugin.skills {
             let skills = load_skills_for_group(sym, parsed, group, ctx, update).await;
             for (skill, origin_hash) in skills {
-                collect_skill_applicable_to(skill, origin_hash, &parsed.plugin.name, ctx, &mut results);
+                collect_skill_applicable_to(
+                    skill,
+                    origin_hash,
+                    &parsed.plugin.name,
+                    ctx,
+                    &mut results,
+                );
             }
         }
     }
@@ -421,7 +435,9 @@ async fn expand_edges(
     collected: &mut Vec<ParsedPlugin>,
 ) {
     if depth >= MAX_CHAIN_DEPTH {
-        tracing::warn!("chained plugin expansion exceeded depth limit ({MAX_CHAIN_DEPTH}); stopping");
+        tracing::warn!(
+            "chained plugin expansion exceeded depth limit ({MAX_CHAIN_DEPTH}); stopping"
+        );
         return;
     }
 
@@ -434,7 +450,16 @@ async fn expand_edges(
             continue;
         }
 
-        expand_crate_plugin(sym, &edge.name, workspace_crates, ctx, visited, depth, collected).await;
+        expand_crate_plugin(
+            sym,
+            &edge.name,
+            workspace_crates,
+            ctx,
+            visited,
+            depth,
+            collected,
+        )
+        .await;
     }
 }
 

@@ -112,9 +112,10 @@ impl Discovery {
 /// Discover the plugins offered for this workspace's dependencies.
 ///
 /// `workspace_root` scopes the `use` entries that count (an entry can be
-/// recorded for one workspace only). Does no network I/O: `list_plugins` is
-/// cache-only by contract, so an offer only appears once its content is
-/// already on disk.
+/// recorded for one workspace only). `list_plugins` fetches each dependency
+/// cache-only — for a workspace dependency, into the source `cargo metadata`
+/// already extracted (no probe, no network) — so every dependency-embedded
+/// plugin is discoverable, registry crates included.
 pub async fn discover(
     sym: &Symposium,
     workspace_crates: &[WorkspaceCrate],
@@ -168,8 +169,8 @@ pub async fn discover(
 /// `auto-enable` intentionally contributes only (1): it is consent for what a
 /// dependency you already have carries, not a way to add crates. Declined
 /// names are pruned. This reads the config rather than the offer list, so a
-/// name works even though its source isn't on disk to be discovered yet (see
-/// [`CargoPm::list_plugins`](crate::pm::CargoPm)).
+/// `use`d crate that isn't a dependency at all (source not resolved yet) still
+/// works.
 pub fn enabled_dependencies(
     sym: &Symposium,
     dep_ids: &[PackageId],
@@ -190,7 +191,9 @@ pub fn enabled_dependencies(
         let norm = normalize_crate_name(used);
         let known = plugins.is_disabled(used)
             || names.iter().any(|n| normalize_crate_name(n) == norm)
-            || dep_ids.iter().any(|id| normalize_crate_name(&id.name) == norm);
+            || dep_ids
+                .iter()
+                .any(|id| normalize_crate_name(&id.name) == norm);
         if !known {
             names.push(used.to_string());
         }
@@ -362,18 +365,22 @@ mod tests {
     use indoc::indoc;
 
     /// A workspace with `widget-lib` as a path dependency carrying skills,
-    /// plus a plain registry dependency.
+    /// plus a plain registry dependency (an extracted source with no plugin
+    /// content, as `cargo metadata` always yields a `source_dir`).
     fn workspace(root: &Path) -> Vec<WorkspaceCrate> {
         let widget = root.join("widget-lib");
         std::fs::create_dir_all(widget.join("skills/guidance")).unwrap();
         std::fs::write(widget.join("skills/guidance/SKILL.md"), "").unwrap();
+        let serde = root.join("serde-src");
+        std::fs::create_dir_all(&serde).unwrap();
         vec![
             WorkspaceCrate::new(
                 "widget-lib".to_string(),
                 semver::Version::new(1, 0, 0),
                 Some(widget),
             ),
-            WorkspaceCrate::new("serde".to_string(), semver::Version::new(1, 0, 210), None),
+            WorkspaceCrate::new("serde".to_string(), semver::Version::new(1, 0, 210), None)
+                .with_source_dir(Some(serde)),
         ]
     }
 

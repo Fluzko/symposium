@@ -244,7 +244,9 @@ mod tests {
 
         let ws = [ws_crate("skill-tree", "1.0.0")];
 
-        let (plugin, sub) = find_subcommand(&reg.plugins, "greet", &ws, &[]).unwrap().unwrap();
+        let (plugin, sub) = find_subcommand(&reg.plugins, "greet", &ws, &[])
+            .unwrap()
+            .unwrap();
         assert_eq!(plugin.name, "example-plugin");
         assert_eq!(sub.command, "greet-install");
     }
@@ -256,7 +258,11 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = [ws_crate("skill-tree", "1.0.0")];
 
-        assert!(find_subcommand(&reg.plugins, "nope", &ws, &[]).unwrap().is_none());
+        assert!(
+            find_subcommand(&reg.plugins, "nope", &ws, &[])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -266,7 +272,11 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = [ws_crate("skill-tree", "1.0.0")];
 
-        assert!(find_subcommand(&reg.plugins, "greet", &ws, &[]).unwrap().is_none());
+        assert!(
+            find_subcommand(&reg.plugins, "greet", &ws, &[])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

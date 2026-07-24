@@ -142,39 +142,52 @@ impl PackageManager for CargoPm {
         CARGO_PM
     }
 
-    /// Offer every workspace dependency whose source tree on disk embeds
-    /// plugin content. Each offer `recommends` the dependency itself — a
+    /// Offer every dependency in `deps` whose source tree embeds plugin
+    /// content. Each offer `recommends` the dependency itself — a
     /// dependency-embedded plugin is a plugin *for* the crate carrying it —
     /// which is what [`discovery`](crate::discovery) matches against the
     /// workspace.
     ///
-    /// Read-only by construction: only dependencies whose sources are already
-    /// on disk (path dependencies) can be inspected without a fetch, so a
-    /// registry dependency is never offered here. Enabling one still works —
-    /// [`discovery::enabled_dependencies`](crate::discovery::enabled_dependencies)
-    /// consults the config, not this list — it just isn't *discoverable*
-    /// until its source has been fetched.
+    /// Each dependency is fetched cache-only ([`UpdateLevel::None`]) to locate
+    /// its source, then inspected. For a workspace dependency that is a
+    /// [`fetch`](Self::fetch) into the source `cargo metadata` already
+    /// extracted — no probe, no network — so registry dependencies are
+    /// discoverable exactly like path ones. A dependency whose source can't be
+    /// served from cache is skipped.
     ///
     /// Offers are consent-gated by the caller: the PM offers, the
     /// `[plugins]` config enables.
     async fn list_plugins(
         &self,
-        _deps: &[PackageId],
+        deps: &[PackageId],
         cx: &PmContext<'_>,
     ) -> Result<Vec<PluginInfo>> {
-        Ok(cx
-            .workspace_crates
-            .iter()
-            .filter_map(|wc| {
-                let kind = embedded_plugin_kind(wc.path.as_deref()?)?;
-                Some(PluginInfo {
-                    id: PackageId::new(CARGO_PM, &wc.name, wc.version.to_string()),
+        let mut offers = Vec::new();
+        for id in deps.iter().filter(|id| id.pm == CARGO_PM) {
+            // Fetch by name only: the concrete version in `id` would make
+            // `fetch` treat it as an explicit `--version` and probe, bypassing
+            // the workspace-source shortcut. The resolved version is recovered
+            // from the fetched id.
+            let fetched = match self
+                .fetch(&Self::id_for(&id.name, None), cx, UpdateLevel::None)
+                .await
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::debug!(id = %id, error = %e, "cannot serve dependency source from cache; skipping");
+                    continue;
+                }
+            };
+            if let Some(kind) = embedded_plugin_kind(&fetched.root) {
+                offers.push(PluginInfo {
+                    id: fetched.id,
                     description: Some(kind.to_string()),
                     subpath: None,
-                    recommends: Some(wc.name.clone()),
-                })
-            })
-            .collect())
+                    recommends: Some(id.name.clone()),
+                });
+            }
+        }
+        Ok(offers)
     }
 
     /// Search crates.io for crates matching `query`.
@@ -245,8 +258,16 @@ mod tests {
     use symposium_install::InstallContext;
     use symposium_sdk::workspace::WorkspaceCrate;
 
-    fn dep(name: &str, path: Option<PathBuf>) -> WorkspaceCrate {
-        WorkspaceCrate::new(name.to_string(), semver::Version::new(1, 0, 0), path)
+    /// A path dependency: `source_dir` defaults to its local path.
+    fn path_dep(name: &str, dir: PathBuf) -> WorkspaceCrate {
+        WorkspaceCrate::new(name.to_string(), semver::Version::new(1, 0, 0), Some(dir))
+    }
+
+    /// A registry dependency whose extracted source `cargo metadata` located —
+    /// no local `path`, but a known `source_dir` (as populated in production).
+    fn registry_dep(name: &str, source_dir: PathBuf) -> WorkspaceCrate {
+        WorkspaceCrate::new(name.to_string(), semver::Version::new(1, 0, 0), None)
+            .with_source_dir(Some(source_dir))
     }
 
     #[tokio::test]
@@ -257,26 +278,30 @@ mod tests {
         std::fs::create_dir_all(with_skills.join("skills/guidance")).unwrap();
         std::fs::write(with_skills.join("skills/guidance/SKILL.md"), "").unwrap();
 
-        let with_manifest = tmp.path().join("with-manifest");
-        std::fs::create_dir_all(&with_manifest).unwrap();
-        std::fs::write(with_manifest.join("SYMPOSIUM.toml"), "").unwrap();
+        // A *registry* dependency (no path) with an extracted source that
+        // embeds a manifest — discoverable now that `list_plugins` fetches.
+        let registry_embedded = tmp.path().join("registry-embedded");
+        std::fs::create_dir_all(&registry_embedded).unwrap();
+        std::fs::write(registry_embedded.join("SYMPOSIUM.toml"), "").unwrap();
 
         let plain = tmp.path().join("plain");
         std::fs::create_dir_all(plain.join("src")).unwrap();
 
         let crates = vec![
-            dep("with-skills", Some(with_skills)),
-            dep("with-manifest", Some(with_manifest)),
-            dep("plain", Some(plain)),
-            // A registry dependency: no source on disk to inspect.
-            dep("serde", None),
+            path_dep("with-skills", with_skills),
+            registry_dep("registry-embedded", registry_embedded),
+            path_dep("plain", plain),
         ];
+        let deps: Vec<PackageId> = crates
+            .iter()
+            .map(|c| PackageId::new(CARGO_PM, &c.name, c.version.to_string()))
+            .collect();
         let cx = PmContext {
             install: InstallContext::new(tmp.path().to_path_buf()),
             workspace_crates: &crates,
         };
 
-        let offers = CargoPm.list_plugins(&[], &cx).await.unwrap();
+        let offers = CargoPm.list_plugins(&deps, &cx).await.unwrap();
         let got: Vec<(&str, Option<&str>)> = offers
             .iter()
             .map(|o| (o.id.name.as_str(), o.recommends.as_deref()))
@@ -285,7 +310,7 @@ mod tests {
             got,
             vec![
                 ("with-skills", Some("with-skills")),
-                ("with-manifest", Some("with-manifest")),
+                ("registry-embedded", Some("registry-embedded")),
             ]
         );
         assert!(offers.iter().all(|o| o.id.pm == CARGO_PM));

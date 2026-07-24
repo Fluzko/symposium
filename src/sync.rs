@@ -306,8 +306,9 @@ pub async fn sync(sym: &Symposium, deps: &mut WorkspaceDeps, update: UpdateLevel
     // skill resolution and MCP-server filtering.
     let dep_ids = crate::pm::workspace_dep_ids(sym, &workspace).await;
     let used_names = sym.config.plugins.used_names_in(&project_root);
-    let mut ctx = crate::predicate::PredicateContext::with_custom_predicates(&dep_ids, custom_entries)
-        .with_used_names(&used_names);
+    let mut ctx =
+        crate::predicate::PredicateContext::with_custom_predicates(&dep_ids, custom_entries)
+            .with_used_names(&used_names);
 
     // The active plugin set: registry plugins plus the crate-sourced plugins
     // reached through `[[plugins]]` chained references and dependency

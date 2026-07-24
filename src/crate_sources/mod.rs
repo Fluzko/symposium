@@ -58,26 +58,27 @@ impl<'a> RustCrateFetch<'a> {
     /// Fetch the crate sources, returning a path to the source directory.
     ///
     /// Resolution order:
-    /// 1. If the crate is a local path dependency in the workspace (and no
-    ///    explicit `--version` was requested), return the path directly.
+    /// 1. If the crate is a workspace dependency with a known extracted source
+    ///    (and no explicit `--version` was requested), return that directory
+    ///    directly — the workspace's own `cargo metadata` already located it,
+    ///    for both path *and* registry crates, so no probe is needed.
     /// 2. Otherwise, run `cargo fetch` in a temporary dummy package to
     ///    populate cargo's registry cache, then read `cargo metadata` to get
     ///    the extracted source path under `~/.cargo/registry/src/`.
     pub async fn fetch(self) -> Result<FetchResult> {
-        // Check path overrides first (local path dependencies).
+        // Serve a workspace dependency from its already-extracted source.
         if self.version_spec.is_none() {
             let normalized = normalize_crate_name(&self.crate_name);
-            if let Some(wc) = self
-                .workspace
-                .iter()
-                .find(|wc| wc.path.is_some() && normalize_crate_name(&wc.name) == normalized)
-            {
-                let path = wc.path.as_ref().unwrap();
-                tracing::debug!(crate_name = %wc.name, path = %path.display(), "resolved from path override");
+            if let Some((wc, dir)) = self.workspace.iter().find_map(|wc| {
+                (normalize_crate_name(&wc.name) == normalized)
+                    .then(|| wc.source_dir.as_ref().map(|d| (wc, d)))
+                    .flatten()
+            }) {
+                tracing::debug!(crate_name = %wc.name, path = %dir.display(), "resolved from workspace source");
                 return Ok(FetchResult {
                     name: wc.name.clone(),
                     version: wc.version.to_string(),
-                    path: path.clone(),
+                    path: dir.clone(),
                 });
             }
         }

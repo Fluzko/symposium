@@ -54,14 +54,14 @@ pub async fn use_plugin(
         return Ok(());
     }
 
-    let mut deps = sym.workspace_deps(cwd);
+    let deps = sym.workspace_deps(cwd);
     let workspace_root = deps.load().map(|ws| ws.root.clone());
     if !global && workspace_root.is_none() {
         bail!("not in a Rust workspace; pass --global to enable `{name}` everywhere");
     }
 
     if !dormant {
-        resolve_name(sym, &mut deps, name).await?;
+        resolve_name(sym, &deps, name).await?;
     }
 
     let entry = match &workspace_root {
@@ -92,7 +92,7 @@ pub async fn use_plugin(
 
     // Install now rather than waiting for the next sync.
     if workspace_root.is_some() {
-        crate::sync::sync(sym, &mut deps, update).await?;
+        crate::sync::sync(sym, &deps, update).await?;
     }
     Ok(())
 }
@@ -110,7 +110,7 @@ pub async fn remove_plugin(
     global: bool,
     update: UpdateLevel,
 ) -> Result<()> {
-    let mut deps = sym.workspace_deps(cwd);
+    let deps = sym.workspace_deps(cwd);
     let workspace_root = deps.load().map(|ws| ws.root.clone());
 
     let used = &mut sym.config.plugins.used;
@@ -143,7 +143,7 @@ pub async fn remove_plugin(
     );
 
     if workspace_root.is_some() {
-        crate::sync::sync(sym, &mut deps, update).await?;
+        crate::sync::sync(sym, &deps, update).await?;
     }
     Ok(())
 }
@@ -152,7 +152,7 @@ pub async fn remove_plugin(
 /// dependency (offline-friendly) or a registry search hit.
 async fn resolve_name(
     sym: &Symposium,
-    deps: &mut symposium_sdk::workspace::WorkspaceDeps,
+    deps: &crate::workspace::WorkspaceDeps,
     name: &str,
 ) -> Result<()> {
     let normalized = normalize_crate_name(name);
@@ -165,7 +165,7 @@ async fn resolve_name(
         return Ok(());
     }
 
-    let cx = crate::pm::PmContext::new(sym, deps.crates());
+    let cx = crate::pm::PmContext::new(sym, deps);
     let found = sym
         .package_managers()
         .search(name, &cx)

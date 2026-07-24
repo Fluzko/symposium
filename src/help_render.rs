@@ -90,10 +90,10 @@ pub fn subcommand_help(args: &[String]) -> Option<String> {
 }
 
 pub async fn render_help(sym: &Symposium, cwd: &Path) -> String {
-    let mut deps = sym.workspace_deps(cwd);
+    let deps = sym.workspace_deps(cwd);
     let workspace = deps.load().cloned();
     let registry = load_registry_with_workspace(sym, workspace.as_deref()).await;
-    let dep_ids = crate::pm::workspace_dep_ids(sym, deps.crates()).await;
+    let dep_ids = crate::pm::workspace_dep_ids(sym, &deps).await;
     let used = workspace
         .as_ref()
         .map(|ws| sym.config.plugins.used_names_in(&ws.root))
@@ -104,7 +104,7 @@ pub async fn render_help(sym: &Symposium, cwd: &Path) -> String {
     let active = crate::skills::active_plugins(
         sym,
         &registry,
-        deps.crates(),
+        &deps,
         workspace.as_ref().map(|ws| ws.root.as_path()),
         &mut ctx,
     )

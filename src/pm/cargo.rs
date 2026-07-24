@@ -226,7 +226,9 @@ impl PackageManager for CargoPm {
         _update: UpdateLevel,
     ) -> Result<FetchedPackage> {
         debug_assert_eq!(id.pm, CARGO_PM);
-        let mut fetch = RustCrateFetch::new(&id.name, cx.workspace_crates);
+        // `crates()` drives the lazy `cargo metadata` resolution — the cargo PM
+        // owns the call rather than receiving injected crates.
+        let mut fetch = RustCrateFetch::new(&id.name, cx.deps.crates());
         if id.version != ANY_VERSION {
             fetch = fetch.version(&id.version);
         }
@@ -239,7 +241,8 @@ impl PackageManager for CargoPm {
 
     async fn list_deps(&self, cx: &PmContext<'_>) -> Result<Vec<PackageId>> {
         Ok(cx
-            .workspace_crates
+            .deps
+            .crates()
             .iter()
             .map(|c| PackageId::new(CARGO_PM, c.name.clone(), c.version.to_string()))
             .collect())
@@ -255,8 +258,8 @@ impl PackageManager for CargoPm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::WorkspaceCrate;
     use symposium_install::InstallContext;
-    use symposium_sdk::workspace::WorkspaceCrate;
 
     /// A path dependency: `source_dir` defaults to its local path.
     fn path_dep(name: &str, dir: PathBuf) -> WorkspaceCrate {
@@ -296,9 +299,10 @@ mod tests {
             .iter()
             .map(|c| PackageId::new(CARGO_PM, &c.name, c.version.to_string()))
             .collect();
+        let workspace = crate::workspace::WorkspaceDeps::fixture(tmp.path().to_path_buf(), crates);
         let cx = PmContext {
             install: InstallContext::new(tmp.path().to_path_buf()),
-            workspace_crates: &crates,
+            deps: &workspace,
         };
 
         let offers = CargoPm.list_plugins(&deps, &cx).await.unwrap();

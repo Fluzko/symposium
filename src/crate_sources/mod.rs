@@ -7,8 +7,8 @@
 
 use std::path::PathBuf;
 
+use crate::workspace::WorkspaceCrate;
 use anyhow::Result;
-use symposium_sdk::workspace::WorkspaceCrate;
 
 mod probe;
 

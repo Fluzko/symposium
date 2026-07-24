@@ -17,7 +17,7 @@ use crate::config::Symposium;
 use crate::output::{Output, display_path};
 use crate::plugins;
 use crate::skills;
-use symposium_sdk::workspace::WorkspaceDeps;
+use crate::workspace::WorkspaceDeps;
 
 /// Marker file written into every skill directory symposium installs.
 ///
@@ -271,7 +271,7 @@ async fn resolve_custom_predicate_entries(
 
 /// Run the full sync: discover applicable skills, install into agent dirs,
 /// clean up stale installations.
-pub async fn sync(sym: &Symposium, deps: &mut WorkspaceDeps, update: UpdateLevel) -> Result<()> {
+pub async fn sync(sym: &Symposium, deps: &WorkspaceDeps, update: UpdateLevel) -> Result<()> {
     let out = &Output::quiet();
     let loaded = deps
         .load()
@@ -304,7 +304,7 @@ pub async fn sync(sym: &Symposium, deps: &mut WorkspaceDeps, update: UpdateLevel
 
     // Resolve the workspace once and build the predicate context shared by
     // skill resolution and MCP-server filtering.
-    let dep_ids = crate::pm::workspace_dep_ids(sym, &workspace).await;
+    let dep_ids = crate::pm::workspace_dep_ids(sym, deps).await;
     let used_names = sym.config.plugins.used_names_in(&project_root);
     let mut ctx =
         crate::predicate::PredicateContext::with_custom_predicates(&dep_ids, custom_entries)
@@ -314,8 +314,7 @@ pub async fn sync(sym: &Symposium, deps: &mut WorkspaceDeps, update: UpdateLevel
     // reached through `[[plugins]]` chained references and dependency
     // enablement. Every facet resolves over this one set, so a crate plugin's
     // skills and MCP servers install exactly like a registry plugin's.
-    let active =
-        skills::active_plugins(sym, &registry, &workspace, Some(&project_root), &mut ctx).await;
+    let active = skills::active_plugins(sym, &registry, deps, Some(&project_root), &mut ctx).await;
 
     // Find all applicable skills.
     let applicable = skills::collect_skills(sym, &active, &mut ctx, update).await;

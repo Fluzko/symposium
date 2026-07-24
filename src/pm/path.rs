@@ -116,9 +116,14 @@ mod tests {
     use symposium_install::InstallContext;
 
     fn cx(cache: &std::path::Path) -> PmContext<'static> {
+        // PathPm ignores `deps`; a leaked empty resolver keeps the `'static`
+        // signature without threading a workspace through every test.
+        let deps: &'static crate::workspace::WorkspaceDeps = Box::leak(Box::new(
+            crate::workspace::WorkspaceDeps::fixture(std::path::PathBuf::new(), vec![]),
+        ));
         PmContext {
             install: InstallContext::new(cache.to_path_buf()),
-            workspace_crates: &[],
+            deps,
         }
     }
 

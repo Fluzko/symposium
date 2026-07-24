@@ -20,10 +20,9 @@ pub async fn dispatch_crate(
     cwd: &Path,
 ) -> DispatchResult {
     tracing::debug!(%name, ?version, "crate-info dispatched");
-    let mut deps = sym.workspace_deps(cwd);
-    let workspace = deps.crates();
+    let deps = sym.workspace_deps(cwd);
     let id = CargoPm::id_for(name, version);
-    let cx = crate::pm::PmContext::new(sym, workspace);
+    let cx = crate::pm::PmContext::new(sym, &deps);
     match sym
         .package_managers()
         .fetch(&id, &cx, symposium_install::UpdateLevel::None)

@@ -111,7 +111,7 @@ pub struct SkillWithGroupContext {
 pub async fn skills_applicable_to(
     sym: &Symposium,
     registry: &PluginRegistry,
-    workspace_crates: &[symposium_sdk::workspace::WorkspaceCrate],
+    deps: &crate::workspace::WorkspaceDeps,
     workspace_root: Option<&Path>,
     custom_predicate_entries: std::collections::HashMap<
         String,
@@ -119,14 +119,14 @@ pub async fn skills_applicable_to(
     >,
     update: UpdateLevel,
 ) -> Vec<SkillWithGroupContext> {
-    let for_crates = crate::pm::workspace_dep_ids(sym, workspace_crates).await;
+    let for_crates = crate::pm::workspace_dep_ids(sym, deps).await;
     let used_names = workspace_root
         .map(|root| sym.config.plugins.used_names_in(root))
         .unwrap_or_default();
     let mut ctx = PredicateContext::with_custom_predicates(&for_crates, custom_predicate_entries)
         .with_used_names(&used_names);
 
-    let active = active_plugins(sym, registry, workspace_crates, workspace_root, &mut ctx).await;
+    let active = active_plugins(sym, registry, deps, workspace_root, &mut ctx).await;
     collect_skills(sym, &active, &mut ctx, update).await
 }
 
@@ -148,7 +148,7 @@ pub async fn skills_applicable_to(
 pub async fn active_plugins(
     sym: &Symposium,
     registry: &PluginRegistry,
-    workspace_crates: &[symposium_sdk::workspace::WorkspaceCrate],
+    deps: &crate::workspace::WorkspaceDeps,
     workspace_root: Option<&Path>,
     ctx: &mut PredicateContext<'_>,
 ) -> Vec<ParsedPlugin> {
@@ -195,7 +195,7 @@ pub async fn active_plugins(
             sym,
             &parsed.plugin.chained,
             parsed.workspace_member,
-            workspace_crates,
+            deps,
             ctx,
             &mut visited,
             0,
@@ -222,16 +222,7 @@ pub async fn active_plugins(
             if registry_names.contains(&crate::crate_sources::normalize_crate_name(&name)) {
                 continue;
             }
-            expand_crate_plugin(
-                sym,
-                &name,
-                workspace_crates,
-                ctx,
-                &mut visited,
-                0,
-                &mut plugins,
-            )
-            .await;
+            expand_crate_plugin(sym, &name, deps, ctx, &mut visited, 0, &mut plugins).await;
         }
     }
 
@@ -428,7 +419,7 @@ async fn expand_edges(
     sym: &Symposium,
     edges: &[crate::plugins::ChainedPlugin],
     owner_workspace_member: bool,
-    workspace_crates: &[symposium_sdk::workspace::WorkspaceCrate],
+    deps: &crate::workspace::WorkspaceDeps,
     ctx: &mut PredicateContext<'_>,
     visited: &mut std::collections::HashSet<String>,
     depth: usize,
@@ -450,16 +441,7 @@ async fn expand_edges(
             continue;
         }
 
-        expand_crate_plugin(
-            sym,
-            &edge.name,
-            workspace_crates,
-            ctx,
-            visited,
-            depth,
-            collected,
-        )
-        .await;
+        expand_crate_plugin(sym, &edge.name, deps, ctx, visited, depth, collected).await;
     }
 }
 
@@ -474,13 +456,13 @@ async fn expand_edges(
 async fn expand_crate_plugin(
     sym: &Symposium,
     crate_name: &str,
-    workspace_crates: &[symposium_sdk::workspace::WorkspaceCrate],
+    deps: &crate::workspace::WorkspaceDeps,
     ctx: &mut PredicateContext<'_>,
     visited: &mut std::collections::HashSet<String>,
     depth: usize,
     collected: &mut Vec<ParsedPlugin>,
 ) {
-    let pm_cx = crate::pm::PmContext::new(sym, workspace_crates);
+    let pm_cx = crate::pm::PmContext::new(sym, deps);
     let Some(crate_plugin) = crate::pm::CargoPm.load_plugin(crate_name, &pm_cx).await else {
         return;
     };
@@ -514,7 +496,7 @@ async fn expand_crate_plugin(
         sym,
         &edges,
         workspace_member,
-        workspace_crates,
+        deps,
         ctx,
         visited,
         depth + 1,
@@ -1343,7 +1325,7 @@ mod tests {
         };
 
         // Query for serde - should find no skills because plugin doesn't apply
-        let workspace_crates = vec![symposium_sdk::workspace::WorkspaceCrate::new(
+        let workspace_crates = vec![crate::workspace::WorkspaceCrate::new(
             "serde".to_string(),
             semver::Version::new(1, 0, 0),
             None,
@@ -1351,7 +1333,7 @@ mod tests {
         let skills = skills_applicable_to(
             &sym,
             &registry,
-            &workspace_crates,
+            &crate::workspace::WorkspaceDeps::fixture(std::path::PathBuf::new(), workspace_crates),
             None,
             std::collections::HashMap::new(),
             UpdateLevel::None,
@@ -1403,7 +1385,7 @@ mod tests {
         };
 
         // Query for serde - should find no skills because group doesn't match
-        let workspace_crates = vec![symposium_sdk::workspace::WorkspaceCrate::new(
+        let workspace_crates = vec![crate::workspace::WorkspaceCrate::new(
             "serde".to_string(),
             semver::Version::new(1, 0, 0),
             None,
@@ -1411,7 +1393,7 @@ mod tests {
         let skills = skills_applicable_to(
             &sym,
             &registry,
-            &workspace_crates,
+            &crate::workspace::WorkspaceDeps::fixture(std::path::PathBuf::new(), workspace_crates),
             None,
             std::collections::HashMap::new(),
             UpdateLevel::None,
@@ -1480,7 +1462,7 @@ mod tests {
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),
         };
 
-        let workspace_crates = vec![symposium_sdk::workspace::WorkspaceCrate::new(
+        let workspace_crates = vec![crate::workspace::WorkspaceCrate::new(
             "serde".to_string(),
             semver::Version::new(1, 0, 0),
             None,
@@ -1488,7 +1470,7 @@ mod tests {
         let skills = skills_applicable_to(
             &sym,
             &registry,
-            &workspace_crates,
+            &crate::workspace::WorkspaceDeps::fixture(std::path::PathBuf::new(), workspace_crates),
             None,
             std::collections::HashMap::new(),
             UpdateLevel::None,
@@ -1563,7 +1545,7 @@ mod tests {
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),
         };
 
-        let workspace = vec![symposium_sdk::workspace::WorkspaceCrate::new(
+        let workspace = vec![crate::workspace::WorkspaceCrate::new(
             "serde".into(),
             semver::Version::new(1, 0, 0),
             None,
@@ -1571,7 +1553,7 @@ mod tests {
         let skills = skills_applicable_to(
             &sym,
             &registry,
-            &workspace,
+            &crate::workspace::WorkspaceDeps::fixture(std::path::PathBuf::new(), workspace),
             None,
             std::collections::HashMap::new(),
             UpdateLevel::None,
@@ -1647,7 +1629,7 @@ mod tests {
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),
         };
 
-        let workspace = vec![symposium_sdk::workspace::WorkspaceCrate::new(
+        let workspace = vec![crate::workspace::WorkspaceCrate::new(
             "serde".into(),
             semver::Version::new(1, 0, 0),
             None,
@@ -1655,7 +1637,7 @@ mod tests {
         let skills = skills_applicable_to(
             &sym,
             &registry,
-            &workspace,
+            &crate::workspace::WorkspaceDeps::fixture(std::path::PathBuf::new(), workspace),
             None,
             std::collections::HashMap::new(),
             UpdateLevel::None,
@@ -1775,7 +1757,7 @@ mod tests {
         };
 
         let sym = crate::config::Symposium::from_dir(tmp.path());
-        let workspace = vec![symposium_sdk::workspace::WorkspaceCrate::new(
+        let workspace = vec![crate::workspace::WorkspaceCrate::new(
             "serde".to_string(),
             semver::Version::new(1, 0, 0),
             None,
@@ -1783,7 +1765,7 @@ mod tests {
         let results = skills_applicable_to(
             &sym,
             &registry,
-            &workspace,
+            &crate::workspace::WorkspaceDeps::fixture(std::path::PathBuf::new(), workspace),
             None,
             std::collections::HashMap::new(),
             UpdateLevel::None,

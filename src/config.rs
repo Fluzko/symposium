@@ -455,7 +455,7 @@ const BUILTIN_RECOMMENDATIONS_URL: &str = "https://github.com/symposium-dev/reco
 #[derive(Clone)]
 pub struct Symposium {
     pub config: Config,
-    dirs: symposium_sdk::dirs::SymposiumDirs,
+    dirs: crate::dirs::SymposiumDirs,
     home_dir: PathBuf,
 }
 
@@ -468,7 +468,7 @@ impl Symposium {
     /// 3. `~/.symposium`
     pub fn from_environment() -> Self {
         let home_dir = dirs::home_dir().expect("could not determine home directory");
-        let dirs = symposium_sdk::dirs::SymposiumDirs::from_environment();
+        let dirs = crate::dirs::SymposiumDirs::from_environment();
         let _ = fs::create_dir_all(&dirs.config_dir);
         let _ = fs::create_dir_all(&dirs.cache_dir);
 
@@ -500,7 +500,7 @@ impl Symposium {
         // global hook registration writes into the tempdir.
         let home_dir = root.to_path_buf();
 
-        let dirs = symposium_sdk::dirs::SymposiumDirs::new(config_dir, cache_dir, None);
+        let dirs = crate::dirs::SymposiumDirs::new(config_dir, cache_dir, None);
 
         Self {
             config,
@@ -510,7 +510,7 @@ impl Symposium {
     }
 
     /// The resolved directory paths.
-    pub fn dirs(&self) -> &symposium_sdk::dirs::SymposiumDirs {
+    pub fn dirs(&self) -> &crate::dirs::SymposiumDirs {
         &self.dirs
     }
 
@@ -520,7 +520,7 @@ impl Symposium {
     }
 
     /// Create a `WorkspaceDeps` with disk caching enabled.
-    pub fn workspace_deps(&self, cwd: &Path) -> symposium_sdk::workspace::WorkspaceDeps {
+    pub fn workspace_deps(&self, cwd: &Path) -> crate::workspace::WorkspaceDeps {
         self.dirs.workspace_deps(cwd)
     }
 

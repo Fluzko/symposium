@@ -25,7 +25,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use symposium_install::{InstallContext, UpdateLevel};
-use symposium_sdk::workspace::WorkspaceCrate;
+
+use crate::workspace::WorkspaceDeps;
 
 mod cargo;
 pub mod layout;
@@ -120,17 +121,20 @@ pub struct FetchedPackage {
 pub struct PmContext<'a> {
     /// Cache root and cargo override for acquisition.
     pub install: InstallContext,
-    /// The resolved workspace dependency list. Cargo uses it for path-dep
-    /// overrides, version pinning, and `list_deps`.
-    pub workspace_crates: &'a [WorkspaceCrate],
+    /// The workspace resolver. The cargo transport drives it — running
+    /// `cargo metadata` lazily, cached — for `list_deps` / `fetch` /
+    /// `list_plugins` (path-dep overrides, version pinning, source location).
+    /// Non-cargo PMs ignore it. It is a resolver, not pre-resolved data, so the
+    /// cargo PM owns the metadata call rather than receiving injected crates.
+    pub deps: &'a WorkspaceDeps,
 }
 
 impl<'a> PmContext<'a> {
     /// The context for a given invocation and workspace.
-    pub fn new(sym: &crate::config::Symposium, workspace_crates: &'a [WorkspaceCrate]) -> Self {
+    pub fn new(sym: &crate::config::Symposium, deps: &'a WorkspaceDeps) -> Self {
         Self {
             install: sym.install_context(),
-            workspace_crates,
+            deps,
         }
     }
 }
@@ -285,9 +289,9 @@ impl PmRegistry {
 /// aborting the caller.
 pub async fn workspace_dep_ids(
     sym: &crate::config::Symposium,
-    workspace_crates: &[WorkspaceCrate],
+    deps: &WorkspaceDeps,
 ) -> Vec<PackageId> {
-    let cx = PmContext::new(sym, workspace_crates);
+    let cx = PmContext::new(sym, deps);
     match sym.package_managers().list_deps(&cx).await {
         Ok(deps) => deps,
         Err(e) => {
@@ -310,9 +314,10 @@ mod tests {
     #[tokio::test]
     async fn registry_rejects_unknown_pm() {
         let tmp = tempfile::tempdir().unwrap();
+        let deps = WorkspaceDeps::fixture(tmp.path().to_path_buf(), vec![]);
         let cx = PmContext {
             install: InstallContext::new(tmp.path().to_path_buf()),
-            workspace_crates: &[],
+            deps: &deps,
         };
         let id = PackageId::any_version("npm", "leftpad");
         let err = PmRegistry::new(vec![])

@@ -276,7 +276,7 @@ impl TestContext {
 
         symposium::sync::sync(
             &self.sym,
-            &mut self.sym.workspace_deps(&cwd),
+            &self.sym.workspace_deps(&cwd),
             symposium::UpdateLevel::None,
         )
         .await?;

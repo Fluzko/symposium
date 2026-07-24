@@ -101,11 +101,11 @@ pub async fn dispatch_external(
         .context("subcommand name must be valid UTF-8")?;
     let forwarded = argv.collect::<Vec<_>>();
 
-    let mut deps = sym.workspace_deps(cwd);
+    let deps = sym.workspace_deps(cwd);
     let workspace = deps.load().cloned();
     let registry = plugins::load_registry_with_workspace(sym, workspace.as_deref()).await;
 
-    let dep_ids = crate::pm::workspace_dep_ids(sym, deps.crates()).await;
+    let dep_ids = crate::pm::workspace_dep_ids(sym, &deps).await;
     let used = workspace
         .as_ref()
         .map(|ws| sym.config.plugins.used_names_in(&ws.root))
@@ -116,7 +116,7 @@ pub async fn dispatch_external(
     let active = crate::skills::active_plugins(
         sym,
         &registry,
-        deps.crates(),
+        &deps,
         workspace.as_ref().map(|ws| ws.root.as_path()),
         &mut ctx,
     )

@@ -1270,12 +1270,14 @@ async fn fetch_registry(sym: &Symposium, git_url: &str, update: UpdateLevel) -> 
     cache_mgr.fetch_url(git_url, update).await
 }
 
-/// PM context for registry operations: these are workspace independent, so
-/// the dependency list is empty.
+/// PM context for registry operations: these are workspace independent, so a
+/// shared detached resolver (no `cargo metadata`) stands in for the workspace.
 fn registry_pm_cx(sym: &Symposium) -> crate::pm::PmContext<'static> {
+    use std::sync::OnceLock;
+    static DETACHED: OnceLock<crate::workspace::WorkspaceDeps> = OnceLock::new();
     crate::pm::PmContext {
         install: sym.install_context(),
-        workspace_crates: &[],
+        deps: DETACHED.get_or_init(crate::workspace::WorkspaceDeps::detached),
     }
 }
 
@@ -1456,14 +1458,14 @@ pub async fn load_registry(sym: &Symposium) -> PluginRegistry {
 /// members. `None` (not in a workspace) degrades to registries only.
 pub async fn load_registry_with_workspace(
     sym: &Symposium,
-    workspace: Option<&symposium_sdk::workspace::LoadedWorkspace>,
+    workspace: Option<&crate::workspace::LoadedWorkspace>,
 ) -> PluginRegistry {
     load_registry_impl(sym, workspace).await
 }
 
 async fn load_registry_impl(
     sym: &Symposium,
-    workspace: Option<&symposium_sdk::workspace::LoadedWorkspace>,
+    workspace: Option<&crate::workspace::LoadedWorkspace>,
 ) -> PluginRegistry {
     let pms = sym.package_managers();
     let pm_cx = registry_pm_cx(sym);

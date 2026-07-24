@@ -2484,14 +2484,11 @@ name = "symposium-sdk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "cargo_metadata",
  "clap",
- "dirs",
  "regex",
  "semver",
  "serde",
  "serde_json",
- "sha2",
  "tokio",
 ]
 

@@ -241,13 +241,13 @@ pub async fn run(
         }
 
         Commands::Sync => {
-            let mut deps = sym.workspace_deps(cwd);
+            let deps = sym.workspace_deps(cwd);
             // The consent prompt belongs to a human running `cargo agents
             // sync`; it is inert unless `out` is interactive, and the
             // hook-triggered auto-sync path calls `sync::sync` directly and
             // never reaches here at all.
-            discovery::prompt_for_consent(sym, &mut deps, out).await?;
-            sync::sync(sym, &mut deps, update).await
+            discovery::prompt_for_consent(sym, &deps, out).await?;
+            sync::sync(sym, &deps, update).await
         }
 
         Commands::Search { query } => search_command::search(sym, &query).await,

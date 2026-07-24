@@ -37,8 +37,8 @@
 
 use std::path::Path;
 
+use crate::workspace::WorkspaceDeps;
 use anyhow::{Context, Result};
-use symposium_sdk::workspace::{WorkspaceCrate, WorkspaceDeps};
 
 use crate::config::Symposium;
 use crate::crate_sources::normalize_crate_name;
@@ -116,14 +116,13 @@ impl Discovery {
 /// cache-only — for a workspace dependency, into the source `cargo metadata`
 /// already extracted (no probe, no network) — so every dependency-embedded
 /// plugin is discoverable, registry crates included.
-pub async fn discover(
-    sym: &Symposium,
-    workspace_crates: &[WorkspaceCrate],
-    workspace_root: &Path,
-) -> Discovery {
-    let dep_ids = crate::pm::workspace_dep_ids(sym, workspace_crates).await;
+pub async fn discover(sym: &Symposium, deps: &WorkspaceDeps) -> Discovery {
+    let Some(workspace_root) = deps.workspace_root().map(Path::to_path_buf) else {
+        return Discovery::default();
+    };
+    let dep_ids = crate::pm::workspace_dep_ids(sym, deps).await;
     let pms = sym.package_managers();
-    let cx = PmContext::new(sym, workspace_crates);
+    let cx = PmContext::new(sym, deps);
 
     let mut discovery = Discovery::default();
     for inst in pms.instances() {
@@ -138,7 +137,7 @@ pub async fn discover(
             let Some(recommends) = matched_dependency(&offer, &dep_ids) else {
                 continue;
             };
-            let enablement = decide(sym, consent_name(&offer), workspace_root);
+            let enablement = decide(sym, consent_name(&offer), &workspace_root);
             let discovered = DiscoveredPlugin {
                 registry: inst.name.clone(),
                 id: offer.id,
@@ -204,17 +203,14 @@ pub fn enabled_dependencies(
 
 /// Run [`discover`] for the workspace `deps` points at, or an empty
 /// [`Discovery`] when there is no workspace.
-pub async fn discover_for(sym: &Symposium, deps: &mut WorkspaceDeps) -> Discovery {
-    let Some(ws) = deps.load().cloned() else {
-        return Discovery::default();
-    };
-    discover(sym, &ws.crates, &ws.root).await
+pub async fn discover_for(sym: &Symposium, deps: &WorkspaceDeps) -> Discovery {
+    discover(sym, deps).await
 }
 
 /// The names of the discovered offers still awaiting consent, deduplicated
 /// and sorted — what a consent prompt would ask about, and what the
 /// non-interactive hint names.
-pub async fn pending_candidates(sym: &Symposium, deps: &mut WorkspaceDeps) -> Vec<String> {
+pub async fn pending_candidates(sym: &Symposium, deps: &WorkspaceDeps) -> Vec<String> {
     let mut names: Vec<String> = discover_for(sym, deps)
         .await
         .candidates
@@ -281,7 +277,7 @@ pub fn apply_consent(sym: &mut Symposium, approved: &[String], declined: &[Strin
 /// declines anything, and Escape leaves the remaining offers undecided too.
 pub async fn prompt_for_consent(
     sym: &mut Symposium,
-    deps: &mut WorkspaceDeps,
+    deps: &WorkspaceDeps,
     out: &Output,
 ) -> Result<()> {
     if !out.is_interactive() {
@@ -362,26 +358,30 @@ fn consent_name(offer: &PluginInfo) -> &str {
 mod tests {
     use super::*;
     use crate::pm::ANY_VERSION;
+    use crate::workspace::WorkspaceCrate;
     use indoc::indoc;
 
     /// A workspace with `widget-lib` as a path dependency carrying skills,
     /// plus a plain registry dependency (an extracted source with no plugin
     /// content, as `cargo metadata` always yields a `source_dir`).
-    fn workspace(root: &Path) -> Vec<WorkspaceCrate> {
+    fn workspace(root: &Path) -> WorkspaceDeps {
         let widget = root.join("widget-lib");
         std::fs::create_dir_all(widget.join("skills/guidance")).unwrap();
         std::fs::write(widget.join("skills/guidance/SKILL.md"), "").unwrap();
         let serde = root.join("serde-src");
         std::fs::create_dir_all(&serde).unwrap();
-        vec![
-            WorkspaceCrate::new(
-                "widget-lib".to_string(),
-                semver::Version::new(1, 0, 0),
-                Some(widget),
-            ),
-            WorkspaceCrate::new("serde".to_string(), semver::Version::new(1, 0, 210), None)
-                .with_source_dir(Some(serde)),
-        ]
+        WorkspaceDeps::fixture(
+            root.to_path_buf(),
+            vec![
+                WorkspaceCrate::new(
+                    "widget-lib".to_string(),
+                    semver::Version::new(1, 0, 0),
+                    Some(widget),
+                ),
+                WorkspaceCrate::new("serde".to_string(), semver::Version::new(1, 0, 210), None)
+                    .with_source_dir(Some(serde)),
+            ],
+        )
     }
 
     /// A `Symposium` over a fresh config dir with only the given config, and
@@ -403,10 +403,10 @@ mod tests {
     #[tokio::test]
     async fn undecided_dependency_plugin_is_a_candidate() {
         let tmp = tempfile::tempdir().unwrap();
-        let crates = workspace(tmp.path());
+        let ws = workspace(tmp.path());
         let sym = sym_with(tmp.path(), "");
 
-        let found = discover(&sym, &crates, tmp.path()).await;
+        let found = discover(&sym, &ws).await;
         assert!(found.active.is_empty());
         assert!(found.auto_enabled.is_empty());
         let names: Vec<&str> = found.candidates.iter().map(|c| c.name()).collect();
@@ -417,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn auto_enable_moves_a_candidate_to_enabled() {
         let tmp = tempfile::tempdir().unwrap();
-        let crates = workspace(tmp.path());
+        let ws = workspace(tmp.path());
         let sym = sym_with(
             tmp.path(),
             indoc! {r#"
@@ -426,7 +426,7 @@ mod tests {
             "#},
         );
 
-        let found = discover(&sym, &crates, tmp.path()).await;
+        let found = discover(&sym, &ws).await;
         assert!(found.candidates.is_empty());
         let names: Vec<&str> = found.auto_enabled.iter().map(|c| c.name()).collect();
         assert_eq!(names, vec!["widget-lib"]);
@@ -436,7 +436,7 @@ mod tests {
     #[tokio::test]
     async fn use_entry_and_disable_outrank_the_standing_decisions() {
         let tmp = tempfile::tempdir().unwrap();
-        let crates = workspace(tmp.path());
+        let ws = workspace(tmp.path());
 
         let sym = sym_with(
             tmp.path(),
@@ -445,7 +445,7 @@ mod tests {
                 use = ["widget-lib"]
             "#},
         );
-        let found = discover(&sym, &crates, tmp.path()).await;
+        let found = discover(&sym, &ws).await;
         assert_eq!(found.active.len(), 1);
         assert_eq!(found.active[0].enablement, Enablement::Used);
 
@@ -457,7 +457,7 @@ mod tests {
                 disable = ["widget-lib"]
             "#},
         );
-        let found = discover(&sym, &crates, tmp.path()).await;
+        let found = discover(&sym, &ws).await;
         assert!(found.auto_enabled.is_empty());
         assert_eq!(found.declined.len(), 1);
     }
@@ -467,7 +467,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_scoped_use_entries_only_count_in_their_workspace() {
         let tmp = tempfile::tempdir().unwrap();
-        let crates = workspace(tmp.path());
+        let ws = workspace(tmp.path());
         let sym = sym_with(
             tmp.path(),
             indoc! {r#"
@@ -476,7 +476,7 @@ mod tests {
             "#},
         );
 
-        let found = discover(&sym, &crates, tmp.path()).await;
+        let found = discover(&sym, &ws).await;
         assert!(found.active.is_empty());
         assert_eq!(found.candidates.len(), 1);
     }

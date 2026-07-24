@@ -1,6 +1,12 @@
 //! The cargo package manager: crates from the active workspace's dependency
 //! graph, resolved by [`RustCrateFetch`] (path-dependency override, then the
 //! cargo registry cache, then crates.io).
+//!
+//! The [`workspace`] submodule owns the cargo-workspace resolution — the
+//! `cargo metadata` invocation, its cache, and the [`WorkspaceCrate`] /
+//! [`WorkspaceDeps`] types — since that is cargo's ecosystem, not a generic
+//! concern. A [`WorkspaceDeps`] resolver is threaded through [`PmContext`] and
+//! driven by this PM (`cx.deps.crates()`).
 
 use std::path::PathBuf;
 
@@ -9,6 +15,11 @@ use symposium_install::UpdateLevel;
 
 use crate::crate_sources::RustCrateFetch;
 use crate::plugins::ParsedPlugin;
+
+pub mod workspace;
+pub use workspace::{
+    LoadedWorkspace, WorkspaceCrate, WorkspaceDeps, file_mtime, workspace_dir_name,
+};
 
 use super::{
     ANY_VERSION, CARGO_PM, FetchedPackage, PackageId, PackageManager, PluginInfo, PmContext,
@@ -258,7 +269,7 @@ impl PackageManager for CargoPm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::WorkspaceCrate;
+    use crate::pm::WorkspaceCrate;
     use symposium_install::InstallContext;
 
     /// A path dependency: `source_dir` defaults to its local path.
@@ -299,7 +310,7 @@ mod tests {
             .iter()
             .map(|c| PackageId::new(CARGO_PM, &c.name, c.version.to_string()))
             .collect();
-        let workspace = crate::workspace::WorkspaceDeps::fixture(tmp.path().to_path_buf(), crates);
+        let workspace = crate::pm::WorkspaceDeps::fixture(tmp.path().to_path_buf(), crates);
         let cx = PmContext {
             install: InstallContext::new(tmp.path().to_path_buf()),
             deps: &workspace,

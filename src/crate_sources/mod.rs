@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use crate::workspace::WorkspaceCrate;
+use crate::pm::WorkspaceCrate;
 use anyhow::Result;
 
 mod probe;

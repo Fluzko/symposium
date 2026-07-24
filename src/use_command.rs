@@ -150,11 +150,7 @@ pub async fn remove_plugin(
 
 /// Check that `name` resolves to something before recording it: a workspace
 /// dependency (offline-friendly) or a registry search hit.
-async fn resolve_name(
-    sym: &Symposium,
-    deps: &crate::workspace::WorkspaceDeps,
-    name: &str,
-) -> Result<()> {
+async fn resolve_name(sym: &Symposium, deps: &crate::pm::WorkspaceDeps, name: &str) -> Result<()> {
     let normalized = normalize_crate_name(name);
     let is_workspace_dep = deps.load().is_some_and(|ws| {
         ws.crates

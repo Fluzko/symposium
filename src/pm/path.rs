@@ -118,8 +118,8 @@ mod tests {
     fn cx(cache: &std::path::Path) -> PmContext<'static> {
         // PathPm ignores `deps`; a leaked empty resolver keeps the `'static`
         // signature without threading a workspace through every test.
-        let deps: &'static crate::workspace::WorkspaceDeps = Box::leak(Box::new(
-            crate::workspace::WorkspaceDeps::fixture(std::path::PathBuf::new(), vec![]),
+        let deps: &'static crate::pm::WorkspaceDeps = Box::leak(Box::new(
+            crate::pm::WorkspaceDeps::fixture(std::path::PathBuf::new(), vec![]),
         ));
         PmContext {
             install: InstallContext::new(cache.to_path_buf()),

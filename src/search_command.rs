@@ -56,7 +56,7 @@ pub async fn find_matches(sym: &Symposium, query: &str) -> Vec<SearchMatch> {
         }
     }
     // Search is workspace-independent; a detached resolver stands in.
-    let ws = crate::workspace::WorkspaceDeps::detached();
+    let ws = crate::pm::WorkspaceDeps::detached();
     let cx = PmContext::new(sym, &ws);
     for (instance, info) in sym.package_managers().search(query, &cx).await {
         matches.push(SearchMatch {

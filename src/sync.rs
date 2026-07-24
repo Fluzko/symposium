@@ -16,8 +16,8 @@ use crate::agents::Agent;
 use crate::config::Symposium;
 use crate::output::{Output, display_path};
 use crate::plugins;
+use crate::pm::WorkspaceDeps;
 use crate::skills;
-use crate::workspace::WorkspaceDeps;
 
 /// Marker file written into every skill directory symposium installs.
 ///

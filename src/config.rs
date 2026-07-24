@@ -520,7 +520,7 @@ impl Symposium {
     }
 
     /// Create a `WorkspaceDeps` with disk caching enabled.
-    pub fn workspace_deps(&self, cwd: &Path) -> crate::workspace::WorkspaceDeps {
+    pub fn workspace_deps(&self, cwd: &Path) -> crate::pm::WorkspaceDeps {
         self.dirs.workspace_deps(cwd)
     }
 

@@ -26,12 +26,12 @@ use std::path::PathBuf;
 use anyhow::Result;
 use symposium_install::{InstallContext, UpdateLevel};
 
-use crate::workspace::WorkspaceDeps;
-
 mod cargo;
 pub mod layout;
 mod path;
-pub use cargo::CargoPm;
+pub use cargo::{
+    CargoPm, LoadedWorkspace, WorkspaceCrate, WorkspaceDeps, file_mtime, workspace_dir_name,
+};
 pub use path::PathPm;
 
 /// The `pm` component of cargo package ids.

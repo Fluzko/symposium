@@ -11,7 +11,7 @@ use crate::installation::{
     resolve_runnable,
 };
 use crate::plugins::{HookFormat, Installation};
-use crate::workspace::WorkspaceDeps;
+use crate::pm::WorkspaceDeps;
 use crate::{
     config::Symposium,
     hook_schema::{AgentHookInput, symposium},

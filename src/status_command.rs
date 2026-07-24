@@ -21,7 +21,7 @@
 
 use std::path::Path;
 
-use crate::workspace::WorkspaceDeps;
+use crate::pm::WorkspaceDeps;
 use anyhow::Result;
 
 use crate::config::Symposium;

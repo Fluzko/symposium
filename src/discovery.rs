@@ -37,7 +37,7 @@
 
 use std::path::Path;
 
-use crate::workspace::WorkspaceDeps;
+use crate::pm::WorkspaceDeps;
 use anyhow::{Context, Result};
 
 use crate::config::Symposium;
@@ -358,7 +358,7 @@ fn consent_name(offer: &PluginInfo) -> &str {
 mod tests {
     use super::*;
     use crate::pm::ANY_VERSION;
-    use crate::workspace::WorkspaceCrate;
+    use crate::pm::WorkspaceCrate;
     use indoc::indoc;
 
     /// A workspace with `widget-lib` as a path dependency carrying skills,

@@ -19,7 +19,6 @@ pub mod status_command;
 pub mod subcommand_dispatch;
 pub mod telemetry;
 pub mod use_command;
-pub mod workspace;
 pub mod workspace_state;
 
 pub(crate) mod crate_metadata;

@@ -15,7 +15,7 @@ A plugin loads a crate as a plugin by naming that crate in a `[[plugins]]` chain
 
 A skill's install identity is the hash of its on-disk `SKILL.md` path, so a crate reached two ways dedupes to one install. The edge's version requirement is recorded but not yet enforced — the crate resolves against the workspace (pin / path override).
 
-The key code paths are in `pm/cargo.rs` (`CargoPm::load_plugin`), `plugins.rs` (`load_crate_manifest`, `RawPluginManifest::merge`, `ManifestOrigin::Crate`, `ParsedPlugin::canonical`), `skills.rs` (`active_plugins`, `expand_edges`, `expand_crate_plugin`, `collect_skills`, `hash_origin_key`), `crate_metadata.rs` (`symposium_metadata`), and `crate_sources/mod.rs` (`RustCrateFetch`, `WorkspaceCrate`).
+The key code paths are in `pm/cargo/mod.rs` (`CargoPm::load_plugin`), `plugins.rs` (`load_crate_manifest`, `RawPluginManifest::merge`, `ManifestOrigin::Crate`, `ParsedPlugin::canonical`), `skills.rs` (`active_plugins`, `expand_edges`, `expand_crate_plugin`, `collect_skills`, `hash_origin_key`), `crate_metadata.rs` (`symposium_metadata`), `pm/cargo/workspace.rs` (`WorkspaceDeps`, `WorkspaceCrate`), and `crate_sources/mod.rs` (`RustCrateFetch`).
 
 ## Dependency enablement
 
@@ -27,7 +27,7 @@ A dependency's own plugin content — a `SYMPOSIUM.toml`, `[package.metadata.sym
 
 The consent prompt and the `use` / `search` / `status` commands that record decisions are not implemented yet — today the `[plugins]` config is edited by hand.
 
-The key code paths are in `discovery.rs`, `config.rs` (`PluginsConfig`, `UseEntry`), `pm/cargo.rs` (`list_plugins`), `plugins.rs` (`Plugin::requires_use`), `predicate.rs` (`PredicateContext::is_used`), and `skills.rs` (`expand_crate_plugin`).
+The key code paths are in `discovery.rs`, `config.rs` (`PluginsConfig`, `UseEntry`), `pm/cargo/mod.rs` (`list_plugins`), `plugins.rs` (`Plugin::requires_use`), `predicate.rs` (`PredicateContext::is_used`), and `skills.rs` (`expand_crate_plugin`).
 
 ## Help rendering
 

@@ -708,6 +708,16 @@ fn run_shell(command: &str) -> bool {
             );
             false
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // A missing `sh` makes every shell(...) predicate silently false,
+            // which is confusing to debug. Surface it once at warn level.
+            tracing::warn!(
+                command = %command,
+                "shell predicate evaluated false because `sh` was not found on PATH; \
+                 add a POSIX shell to PATH to enable shell(...) predicates",
+            );
+            false
+        }
         Err(e) => {
             tracing::trace!(command = %command, error = %e, "shell predicate failed to spawn");
             false
@@ -1372,6 +1382,25 @@ mod tests {
         (PredicateContext::with_custom_predicates(&[], map), scripts)
     }
 
+    /// Render `path` for use *inside* a `/bin/sh` script body. On Windows `sh`
+    /// is git-bash's MSYS shell, which reads `C:\a\b` as escapes; rewrite it to
+    /// the `/c/a/b` form the shell understands.
+    #[cfg(windows)]
+    fn sh_path(path: &Path) -> String {
+        let slashed = path.to_string_lossy().replace('\\', "/");
+        match slashed.split_once(':') {
+            Some((drive, rest)) if drive.len() == 1 => {
+                format!("/{}{}", drive.to_ascii_lowercase(), rest)
+            }
+            _ => slashed,
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn sh_path(path: &Path) -> String {
+        path.to_string_lossy().to_string()
+    }
+
     fn ctx_with_script_entry(
         name: &str,
         script_content: &str,
@@ -1453,8 +1482,8 @@ mod tests {
         let script = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
         writeln!(
             script.as_file(),
-            "#!/bin/sh\necho x >> {}\nexit 0",
-            counter_path.display()
+            "#!/bin/sh\necho x >> \"{}\"\nexit 0",
+            sh_path(&counter_path)
         )
         .unwrap();
 
@@ -1490,8 +1519,8 @@ mod tests {
         let script = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
         writeln!(
             script.as_file(),
-            "#!/bin/sh\necho \"$@\" > {}",
-            output_path.display()
+            "#!/bin/sh\necho \"$@\" > \"{}\"",
+            sh_path(&output_path)
         )
         .unwrap();
 
@@ -1524,8 +1553,8 @@ mod tests {
         let script = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
         writeln!(
             script.as_file(),
-            "#!/bin/sh\necho \"$@\" > {}",
-            output_path.display()
+            "#!/bin/sh\necho \"$@\" > \"{}\"",
+            sh_path(&output_path)
         )
         .unwrap();
 

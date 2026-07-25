@@ -1349,6 +1349,15 @@ async fn agents_syncing_detects_modified_source_skill() {
 // ---------------------------------------------------------------------------
 // Self-update / state integration tests
 // ---------------------------------------------------------------------------
+//
+// The "query-only" tests below run on all platforms: `set_mock_cargo` runs the
+// `#!/bin/sh` mock through `sh` (via a `.cmd` shim on Windows), so self-update
+// version detection and throttling are covered everywhere. The two
+// `auto_update_re_execs_*` tests are `#[ignore]`d on Windows: they overwrite the
+// running binary with a shebang stand-in and re-exec into it, which needs
+// Windows-native process replacement. They still compile on Windows (so their
+// helpers below need no `#[cfg]` and stay live), just skip at runtime. Porting
+// them to actually run on Windows is a tracked follow-up.
 
 fn mock_cargo_script(search_version: &str) -> String {
     format!(
@@ -1662,6 +1671,10 @@ fn assert_surprise(output: &std::process::Output) {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "re_exec over a running binary + shebang mock/stand-in need a Windows port (follow-up)"
+)]
 async fn auto_update_re_execs_on_sync() {
     let fix = setup_auto_update_fixture();
     let output = fix
@@ -1673,6 +1686,10 @@ async fn auto_update_re_execs_on_sync() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "re_exec over a running binary + shebang mock/stand-in need a Windows port (follow-up)"
+)]
 async fn auto_update_re_execs_on_hook() {
     let fix = setup_auto_update_fixture();
     let output = fix

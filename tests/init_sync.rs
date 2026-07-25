@@ -134,6 +134,32 @@ async fn init_creates_config() {
     .unwrap();
 }
 
+/// A workspace with a bare `skills/` directory defines a workspace plugin;
+/// `sync` installs its skills without any configured plugin source or
+/// dependency gate.
+#[tokio::test]
+async fn sync_installs_workspace_plugin_skills() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["workspace-plugin0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let workspace_root = ctx.workspace_root.as_ref().unwrap();
+            let skills_dir = workspace_root.join(".claude/skills");
+            let skill_dir = find_installed_skill(&skills_dir, "ws-hello");
+            assert!(
+                skill_dir.join(".symposium").exists(),
+                "workspace skill should install as symposium-managed"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// `sync` installs skill files into the agent's expected location.
 #[tokio::test]
 async fn sync_installs_skills() {
@@ -385,7 +411,7 @@ async fn add_agent_is_additive() {
     .unwrap();
 }
 
-/// `sync` filters MCP servers by their `crates` predicates.
+/// `sync` filters MCP servers by their `depends-on` predicates.
 #[tokio::test]
 async fn sync_filters_mcp_servers_by_crates() {
     with_fixture(
@@ -399,12 +425,12 @@ async fn sync_filters_mcp_servers_by_crates() {
             let settings_path = workspace_root.join(".claude/settings.json");
             let settings = std::fs::read_to_string(&settings_path)?;
 
-            // always-server (crates = ["*"]) → registered
+            // always-server (depends-on = ["*"]) → registered
             assert!(
                 settings.contains("always-server"),
                 "wildcard MCP server should be registered"
             );
-            // serde-server (crates = ["serde"]) → registered (serde is in workspace0)
+            // serde-server (depends-on = ["serde"]) → registered (serde is in workspace0)
             assert!(
                 settings.contains("serde-server"),
                 "serde MCP server should be registered"
@@ -414,7 +440,7 @@ async fn sync_filters_mcp_servers_by_crates() {
                 settings.contains("inherited-server"),
                 "inherited MCP server should be registered"
             );
-            // missing-crate-server (crates = ["reqwest"]) → NOT registered
+            // missing-crate-server (depends-on = ["reqwest"]) → NOT registered
             assert!(
                 !settings.contains("missing-crate-server"),
                 "reqwest MCP server should NOT be registered"
@@ -476,7 +502,7 @@ async fn sync_installs_plugin_skill_group() {
     .unwrap();
 }
 
-/// `sync` installs skills from a plugin with `crates = ["*"]`.
+/// `sync` installs skills from a plugin with `depends-on = ["*"]`.
 /// Wildcard predicates should match any workspace.
 #[tokio::test]
 async fn sync_installs_wildcard_plugin_skill() {
@@ -525,6 +551,75 @@ async fn sync_installs_skill_from_crate_path() {
             let content = std::fs::read_to_string(z_dir.join("SKILL.md"))?;
             assert!(content.contains("Use crate-z like this"));
             assert!(z_dir.join(".symposium").exists());
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// `sync` loads a crate's skills through a `[[plugins]]` chained reference.
+///
+/// Fixture layout:
+/// - `chained-host` depends on `crate-w` (path dep)
+/// - `vouch-plugin` gates on `crate-w` and carries `[[plugins]] source.cargo
+///   = "crate-w"` but *no* skill group of its own
+/// - `crate-w` ships `skills/w-guidance/SKILL.md`
+///
+/// So `w-guidance` is reachable *only* via the chained edge — its presence
+/// proves the edge expanded and loaded crate-w as a (skill-providing) plugin.
+#[tokio::test]
+async fn sync_installs_skill_via_chained_plugin() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["chained-crate0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let workspace_root = ctx.workspace_root.as_ref().unwrap();
+            let skills_dir = workspace_root.join(".claude/skills");
+
+            let w_dir = find_installed_skill(&skills_dir, "w-guidance");
+            let content = std::fs::read_to_string(w_dir.join("SKILL.md"))?;
+            assert!(content.contains("Use crate-w like this"));
+            assert!(w_dir.join(".symposium").exists());
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// `sync` loads a crate that ships its own `SYMPOSIUM.toml` as a first-class
+/// plugin through a `[[plugins]]` chained reference.
+///
+/// Fixture layout:
+/// - `manifest-host` depends on `crate-m` (path dep)
+/// - `vouch-m` gates on `crate-m` and carries `[[plugins]] source.cargo =
+///   "crate-m"` but *no* skill group of its own
+/// - `crate-m` ships a `SYMPOSIUM.toml` whose skills live in `agent-docs/`
+///   (NOT the default `skills/`), plus `agent-docs/m-guidance/SKILL.md`
+///
+/// `m-guidance` sits at a non-default path, so it is reachable *only* if the
+/// crate's own manifest was parsed and its `source.path` group honored — the
+/// metadata / default-`skills/` fallback would find nothing.
+#[tokio::test]
+async fn sync_installs_skill_via_crate_manifest() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["crate-manifest0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let workspace_root = ctx.workspace_root.as_ref().unwrap();
+            let skills_dir = workspace_root.join(".claude/skills");
+
+            let m_dir = find_installed_skill(&skills_dir, "m-guidance");
+            let content = std::fs::read_to_string(m_dir.join("SKILL.md"))?;
+            assert!(content.contains("Use crate-m via the manifest"));
+            assert!(m_dir.join(".symposium").exists());
             Ok(())
         },
     )
@@ -712,11 +807,12 @@ async fn sync_installations_are_gitignored() {
 }
 
 // ---------------------------------------------------------------------------
-// SkillOrigin dedup
+// Origin-hash dedup
 // ---------------------------------------------------------------------------
 
 /// Two plugins both with `source = "crate"` pointing at the same crate
-/// produce the same `SkillOrigin::Crate { name, version }`, so the skill
+/// produce the same crate origin hash (over `(name, version, skill_path)` —
+/// the skill resolves to the same path within the crate both times), so it
 /// installs exactly once.
 #[tokio::test]
 async fn sync_dedups_same_crate_origin_across_plugins() {
@@ -753,13 +849,13 @@ async fn sync_dedups_same_crate_origin_across_plugins() {
 
 /// Two plugins in the same registry source whose `source.path` groups
 /// resolve to the same on-disk skill bundle produce the same
-/// `SkillOrigin::Source` and dedupe to a single install.
+/// origin hash and dedupe to a single install.
 ///
-/// Identity is `(source_name, skill-path-relative-to-source-root)`, so
-/// the path the SKILL.md actually lives at is what matters — not the
-/// plugin name that pointed at it. Standalone discovery of the same
-/// SKILL.md (the registry walk also surfaces it as a standalone since
-/// nothing claims its parent) collapses to that same origin too.
+/// Identity is the SKILL.md's on-disk path, so the path it actually lives
+/// at is what matters — not the plugin name that pointed at it. Standalone
+/// discovery of the same SKILL.md (the registry walk also surfaces it as a
+/// standalone since nothing claims its parent) collapses to that same
+/// origin too.
 #[tokio::test]
 async fn sync_dedups_same_source_path_across_plugins() {
     with_fixture(
@@ -792,8 +888,9 @@ async fn sync_dedups_same_source_path_across_plugins() {
 }
 
 /// Two plugins each contributing a skill named `code-review` from their
-/// own `source.path` produce distinct `SkillOrigin::Plugin { plugin_name }`
-/// values, so both install — under separate hashed directory names.
+/// own `source.path` live at distinct on-disk paths, so they produce
+/// distinct origin hashes (keyed on the SKILL.md path) and both install —
+/// under separate hashed directory names.
 #[tokio::test]
 async fn sync_keeps_distinct_plugin_origins_with_same_skill_name() {
     with_fixture(
@@ -1062,8 +1159,8 @@ async fn sync_keeps_distinct_groups_within_one_plugin() {
 
 /// Two standalone skills both named `my-skill` but living at different
 /// paths within the registry source (`foo/my-skill/SKILL.md` and
-/// `bar/my-skill/SKILL.md`) produce distinct origins (the relative path
-/// is part of the `SkillOrigin::Plugin` identifier), so both install.
+/// `bar/my-skill/SKILL.md`) produce distinct origin hashes (the SKILL.md
+/// path is what's hashed), so both install.
 #[tokio::test]
 async fn sync_keeps_distinct_standalone_origins_at_different_paths() {
     with_fixture(
@@ -1166,6 +1263,17 @@ async fn agents_syncing_noop_when_only_agents_path_used() {
             // No other agent's skills dir should have been created.
             assert!(!workspace_root.join(".claude/skills").exists());
             assert!(!workspace_root.join(".kiro/skills").exists());
+            // And no suffixed duplicate next to the source: the in-place
+            // source is this agent's install, not a collision to resolve.
+            let dupes: Vec<_> = std::fs::read_dir(workspace_root.join(".agents/skills"))?
+                .flatten()
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("user-authored-skill-")
+                })
+                .collect();
+            assert!(dupes.is_empty(), "no suffixed duplicate: {dupes:?}");
             Ok(())
         },
     )
@@ -1266,6 +1374,30 @@ async fn agents_syncing_disabling_removes_previously_propagated_skills() {
     .unwrap();
 }
 
+/// A member crate's `.agents/skills/` installs for everyone working in the
+/// workspace — the maintainer-skills default group applies per member, not
+/// just at the workspace root.
+#[tokio::test]
+async fn agents_syncing_installs_member_agents_skills() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["member-agents-skills0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let workspace_root = ctx.workspace_root.as_ref().unwrap();
+            find_installed_skill(&workspace_root.join(".claude/skills"), "tool-maintainer");
+            // Workspace skills are informal: no frontmatter needed, the
+            // directory name is the skill name.
+            find_installed_skill(&workspace_root.join(".claude/skills"), "plain-notes");
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// A pre-existing, user-managed directory in the target (no `.symposium`
 /// marker) is not overwritten even when a same-named skill exists in
 /// `.agents/skills/`.
@@ -1324,7 +1456,7 @@ async fn agents_syncing_detects_modified_source_skill() {
             // Modify the source skill.
             std::fs::write(
                 &source,
-                "---\nname: user-authored-skill\n---\n\n# Updated content\n",
+                "---\nname: user-authored-skill\ndescription: updated\n---\n\n# Updated content\n",
             )?;
 
             // Re-sync — should detect the change and update the destination.
@@ -1911,7 +2043,7 @@ async fn auto_sync_always_runs_on_session_start() {
 
 /// Crate metadata redirects: `crate-a` declares a redirect to `crate-b` via
 /// `[package.metadata.symposium]`. The plugin activates based on plugin-level
-/// `crates = ["crate-a"]` and discovers `crate-b`'s skills via redirect.
+/// `depends-on = ["crate-a"]` and discovers `crate-b`'s skills via redirect.
 #[tokio::test]
 async fn sync_installs_skill_from_named_crate_source() {
     with_fixture(
@@ -2126,7 +2258,7 @@ async fn sync_crate_metadata_redirect_target_optout() {
 }
 
 /// Diamond redirect: both crate-a and crate-b redirect to crate-c. The shared
-/// skill should be installed exactly once (dedup via SkillOrigin).
+/// skill should be installed exactly once (dedup via the crate origin hash).
 #[tokio::test]
 async fn sync_crate_metadata_diamond_dedup() {
     with_fixture(

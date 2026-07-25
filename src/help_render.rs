@@ -9,14 +9,14 @@
 use std::{fmt::Write as _, path::Path};
 
 use clap::{Command, CommandFactory};
-use semver::Version;
 
 use symposium_sdk::workspace::WorkspaceCrate;
 
 use crate::{
     cli::{Cli, Commands, builtin_audience},
     config::Symposium,
-    plugins::{Audience, PluginRegistry, load_registry},
+    plugins::{Audience, PluginRegistry, load_registry_with_workspace},
+    pm::{PackageId, PackageManager as _},
     subcommand_dispatch::applicable_subcommands,
 };
 
@@ -89,10 +89,10 @@ pub fn subcommand_help(args: &[String]) -> Option<String> {
 }
 
 pub fn render_help(sym: &Symposium, cwd: &Path) -> String {
-    let registry = load_registry(sym);
     let mut deps = sym.workspace_deps(cwd);
-    let workspace = deps.crates();
-    render(&registry, workspace)
+    let workspace = deps.load().cloned();
+    let registry = load_registry_with_workspace(sym, workspace.as_deref());
+    render(&registry, deps.crates())
 }
 
 fn render(registry: &PluginRegistry, workspace: &[WorkspaceCrate]) -> String {
@@ -108,7 +108,7 @@ fn render(registry: &PluginRegistry, workspace: &[WorkspaceCrate]) -> String {
     let header = &full[..commands_idx];
     let options = &full[options_idx..];
 
-    let deps = crate::crate_sources::crate_pairs(workspace);
+    let deps = crate::pm::CargoPm.list_deps(workspace);
 
     let humans = collect_section(&cmd, registry, &deps, Audience::Humans);
     let agents = collect_section(&cmd, registry, &deps, Audience::Agents);
@@ -146,7 +146,7 @@ fn render(registry: &PluginRegistry, workspace: &[WorkspaceCrate]) -> String {
 fn collect_section(
     cmd: &Command,
     registry: &PluginRegistry,
-    deps: &[(String, Version)],
+    deps: &[PackageId],
     target: Audience,
 ) -> Vec<(String, String)> {
     let mut builtins = cmd
@@ -183,6 +183,7 @@ mod tests {
 
     use crate::{
         plugins::{ParsedPlugin, Plugin, Subcommand},
+        pm::ANY_VERSION,
         predicate::PredicateSet,
     };
 
@@ -193,12 +194,12 @@ mod tests {
     }
 
     fn crate_set(spec: &str) -> PredicateSet {
-        PredicateSet::from_crates(spec).unwrap()
+        PredicateSet::from_depends_on(spec).unwrap()
     }
 
     fn plugin_with(
         name: &str,
-        crates: &str,
+        depends_on: &str,
         subcommands: BTreeMap<String, Subcommand>,
     ) -> ParsedPlugin {
         ParsedPlugin {
@@ -206,24 +207,26 @@ mod tests {
             plugin: Plugin {
                 name: name.into(),
                 hooks: vec![],
-                predicates: crate_set(crates),
+                predicates: crate_set(depends_on),
                 skills: vec![],
                 mcp_servers: vec![],
                 subcommands,
                 installations: vec![],
                 custom_predicates: vec![],
+                chained: vec![],
             },
-            source_name: "test".into(),
             source_dir: PathBuf::from("/test"),
+            workspace_member: false,
+            canonical: PackageId::new("test", name, ANY_VERSION),
         }
     }
 
-    fn subcommand(description: &str, audience: Audience, crates: Option<&str>) -> Subcommand {
+    fn subcommand(description: &str, audience: Audience, depends_on: Option<&str>) -> Subcommand {
         Subcommand {
             description: description.into(),
             audience,
             command: "ignored".into(),
-            predicates: crates.map(crate_set).unwrap_or_default(),
+            predicates: depends_on.map(crate_set).unwrap_or_default(),
         }
     }
 

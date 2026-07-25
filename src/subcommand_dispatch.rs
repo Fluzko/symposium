@@ -13,10 +13,10 @@ use symposium_sdk::workspace::WorkspaceCrate;
 use crate::{
     config::Symposium,
     installation::{acquire_installation, resolve_runnable},
-    plugins::{self, ParsedPlugin, Plugin, PluginRegistry, Subcommand},
+    plugins::{self, Plugin, PluginRegistry, Subcommand},
+    pm::{CargoPm, PackageId, PackageManager as _},
 };
 use anyhow::{Context, Result, bail};
-use semver::Version;
 use symposium_install::{Runnable, UpdateLevel};
 use tokio::process::Command;
 
@@ -24,12 +24,13 @@ use tokio::process::Command;
 /// apply to `deps`. Shared between dispatch (name lookup) and help rendering (audience grouping).
 pub fn applicable_subcommands<'a>(
     registry: &'a PluginRegistry,
-    deps: &[(String, Version)],
+    deps: &[PackageId],
 ) -> Vec<(&'a Plugin, &'a str, &'a Subcommand)> {
     let mut ctx = crate::predicate::PredicateContext::new(deps);
     let mut results = Vec::new();
-    for ParsedPlugin { plugin, .. } in &registry.plugins {
-        if !plugin.applies(&mut ctx) {
+    for parsed in &registry.plugins {
+        let plugin = &parsed.plugin;
+        if !parsed.applies(&mut ctx) {
             continue;
         }
         for (name, subcommand) in &plugin.subcommands {
@@ -52,7 +53,7 @@ pub fn find_subcommand<'a>(
     name: &str,
     workspace: &[WorkspaceCrate],
 ) -> Result<Option<(&'a Plugin, &'a Subcommand)>> {
-    let deps = crate::crate_sources::crate_pairs(workspace);
+    let deps = CargoPm.list_deps(workspace);
 
     let matches: Vec<_> = applicable_subcommands(registry, &deps)
         .into_iter()
@@ -95,11 +96,11 @@ pub async fn dispatch_external(
         .context("subcommand name must be valid UTF-8")?;
     let forwarded = argv.collect::<Vec<_>>();
 
-    let registry = plugins::load_registry(sym);
     let mut deps = sym.workspace_deps(cwd);
-    let workspace = deps.crates();
+    let workspace = deps.load().cloned();
+    let registry = plugins::load_registry_with_workspace(sym, workspace.as_deref());
 
-    let (plugin, subcommand) = find_subcommand(&registry, name, workspace)?
+    let (plugin, subcommand) = find_subcommand(&registry, name, deps.crates())?
         .with_context(|| format!("no plugin defines subcommand `{name}`"))?;
 
     let installation = plugin
@@ -158,6 +159,8 @@ fn exit_byte_from(status: ExitStatus) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::ParsedPlugin;
+    use crate::pm::ANY_VERSION;
     use crate::{plugins::Audience, predicate::PredicateSet};
     use std::{collections::BTreeMap, path::PathBuf};
 
@@ -166,37 +169,39 @@ mod tests {
     }
 
     fn crate_set(spec: &str) -> PredicateSet {
-        PredicateSet::from_crates(spec).unwrap()
+        PredicateSet::from_depends_on(spec).unwrap()
     }
 
     fn plugin_with(
         name: &str,
-        crates: &str,
+        depends_on: &str,
         subcommands: BTreeMap<String, Subcommand>,
     ) -> ParsedPlugin {
         ParsedPlugin {
+            canonical: PackageId::new("test", name, ANY_VERSION),
             path: PathBuf::from(format!("/test/{name}.toml")),
             plugin: Plugin {
                 name: name.into(),
-                predicates: crate_set(crates),
+                predicates: crate_set(depends_on),
                 installations: vec![],
                 hooks: vec![],
                 skills: vec![],
                 mcp_servers: vec![],
                 subcommands,
                 custom_predicates: vec![],
+                chained: vec![],
             },
-            source_name: "test".into(),
             source_dir: PathBuf::from("/test"),
+            workspace_member: false,
         }
     }
 
-    fn subcommand(command: &str, crates: Option<&str>) -> Subcommand {
+    fn subcommand(command: &str, depends_on: Option<&str>) -> Subcommand {
         Subcommand {
             description: "test".into(),
             audience: Audience::default(),
             command: command.into(),
-            predicates: crates.map(crate_set).unwrap_or_default(),
+            predicates: depends_on.map(crate_set).unwrap_or_default(),
         }
     }
 

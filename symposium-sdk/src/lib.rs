@@ -29,12 +29,14 @@
 //! # Custom predicates
 //!
 //! A custom predicate binary receives its argument via CLI args and signals
-//! pass/fail via exit code — that is the whole contract today.
+//! pass/fail via exit code. It may also stream [`CustomPredicateEvent`]s on
+//! stdout to describe the inputs whose changes should invalidate its cached
+//! result. Prefer the [`env::var`] and [`fs::read_to_string`] helpers, which
+//! report their inputs automatically.
 //!
-//! FIXME: [`predicate::PredicateEmitter`] is a reserved stdout channel for a
-//! custom predicate to set fields on the plugin (or component) it gates. It was
-//! originally built to name crates for the retired `source = "crate"`
-//! resolution and is currently ignored; see the [`predicate`] module docs.
+//! [`CustomPredicateEvent`]: predicate::CustomPredicateEvent
 
+pub mod env;
+pub mod fs;
 pub mod hook;
 pub mod predicate;

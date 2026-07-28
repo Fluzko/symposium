@@ -14,6 +14,7 @@
 - [About symposium](./about.md)
 - [Blog](./blog/outline.md)
   - [Announcing Symposium (2026-04-21)](./blog/announcing-symposium.md)
+  - [A Maturing Symposium (2026-07-03)](./blog/a-maturing-symposium.md)
 
 # User's guide
 
@@ -52,7 +53,7 @@
   - [Plugin definition](./reference/plugin-definition.md)
   - [Symposium hook events](./reference/hook-events.md)
   - [Skill definition](./reference/skill-definition.md)
-  - [Crate predicates](./reference/crate-predicates.md)
+  - [Dependency predicates (`depends-on`)](./reference/depends-on.md)
   - [Predicates](./reference/predicates.md)
 - [Contribution guide](./design/welcome.md)
   - [Tenets](./design/tenets.md)
@@ -85,5 +86,8 @@
   - [Template](./rfds/TEMPLATE/README.md)
   - [Accepted](./rfds/accepted.md) <!-- put accepted rfds in this section; the file goes in the rfds directory -->
     - [MCP meta-server](./rfds/mcp-meta-server/README.md)
+    - [Registry-centric plugin distribution](./rfds/registry-centric-plugins/README.md)
+    - [Predicate caching](./rfds/predicate-caching/README.md)
   - [Completed](./rfds/completed.md) <!-- move completed rfds to this section -->
+    - [Configuration parsing and normalization](./rfds/config-normalization/README.md)
     - [RFD Process](./rfds/rfd-process/README.md)

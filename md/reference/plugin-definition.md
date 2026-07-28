@@ -22,7 +22,7 @@ where `myplugin/SYMPOSIUM.toml` is as follows:
 
 ```toml
 name = "example"
-crates = ["*"]
+depends-on = ["*"]
 
 [[skills]]
 source.path = "skills"
@@ -33,26 +33,26 @@ source.path = "skills"
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | yes | Plugin name. Used in logs and CLI output. |
-| `crates` | string or array | no | Which crates this plugin applies to. Use `["*"]` for all crates. See [Plugin-level filtering](#plugin-level-filtering). |
-| `predicates` | array of strings | no | Predicates (`crate`, `shell`, `path_exists`, `env`, `not`, `any`, `all`) that must all hold for the plugin to apply. See [Predicates](./predicates.md). |
+| `depends-on` | string or array | no | Which crates this plugin applies to. Use `["*"]` for all crates. See [Plugin-level filtering](#plugin-level-filtering). |
+| `predicates` | array of strings | no | Predicates (`depends-on`, `shell`, `path_exists`, `env`, `workspace-member`, `not`, `any`, `all`) that must all hold for the plugin to apply. See [Predicates](./predicates.md). |
 | `installations` | array of tables | no | Named installation declarations (`[[installations]]`). Hooks reference these by name. See [Installations](#installations). |
 | `skills` | array of tables | no | Skill groups (`[[skills]]`). |
 | `hooks` | array of tables | no | Hooks (`[[hooks]]`). |
 | `predicate` | array of tables | no | Custom predicate definitions (`[[predicate]]`). See [Custom predicates](#predicate). |
 | `mcp_servers` | array of tables | no | MCP server registrations (`[[mcp_servers]]`). |
 
-**Note**: Every plugin must reference at least one crate somewhere — at the plugin level, in `[[skills]]` groups, or in `[[mcp_servers]]` entries — via a `crates` list or a `crate(...)` [predicate](./predicates.md). Plugins without any crate targeting will fail validation.
+**Note**: Every plugin must reference at least one crate somewhere — at the plugin level, in `[[skills]]` groups, or in `[[mcp_servers]]` entries — via a `depends-on` list or a `depends-on(...)` [predicate](./predicates.md). Plugins without any crate targeting will fail validation.
 
 ## Plugin-level filtering
 
-The top-level `crates` field controls when the entire plugin is active:
+The top-level `depends-on` field controls when the entire plugin is active:
 
 ```toml
 name = "my-plugin"
-crates = ["serde", "tokio"]  # Only active in projects using serde OR tokio
+depends-on = ["serde", "tokio"]  # Only active in projects using serde OR tokio
 
 # OR use wildcard to always apply
-crates = ["*"]
+depends-on = ["*"]
 ```
 
 Plugin-level filtering is combined with skill group filtering using AND logic — both must match for skills to be available.
@@ -63,89 +63,63 @@ Each `[[skills]]` entry declares a group of skills.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `crates` | string or array | Which crates this group advises on. Accepts a single string (`"serde"`) or array (`["serde", "tokio>=1.0"]`). See [Crate predicates](./crate-predicates.md) for syntax. |
-| `predicates` | array of strings | Predicates (`crate`, `shell`, `path_exists`, `env`, `not`, `any`, `all`) that must all hold for the group to install. See [Predicates](./predicates.md). |
+| `depends-on` | string or array | Which crates this group advises on. Accepts a single string (`"serde"`) or array (`["serde", "tokio>=1.0"]`). See [Crate predicates](./depends-on.md) for syntax. |
+| `predicates` | array of strings | Predicates (`depends-on`, `shell`, `path_exists`, `env`, `workspace-member`, `not`, `any`, `all`) that must all hold for the group to install. See [Predicates](./predicates.md). |
 | `source.path` | string | Local directory containing skill subdirectories. Resolved relative to the manifest file. |
 | `source.git` | string | GitHub URL pointing to a directory in a repository (e.g., `https://github.com/org/repo/tree/main/skills`). Symposium downloads the tarball, extracts the subdirectory, and caches it. |
-| `source = "crate"` | string | Look for skills inside the matched crates' source trees. Layout is determined by `[package.metadata.symposium]` in each crate's `Cargo.toml`. See [Crate-sourced skills](#crate-sourced-skills). |
 
-A skill group must have exactly one of `source.path`, `source.git`, or `source = "crate"`.
+A skill group must have exactly one of `source.path` or `source.git`. A crate is no longer a skill-group source; to load a crate's own skills, name it in a [chained plugin](#chained-plugins).
 
-### Crate-sourced skills
+## Chained plugins
 
-When using `source = "crate"`, Symposium resolves the crate predicates in scope (plugin-level and group-level) to determine which crate sources to fetch, then reads each crate's `[package.metadata.symposium]` section to find skills.
+A `[[plugins]]` entry names *another* plugin that loads whenever this plugin is active — the "a package is a plugin" edge. Today the referenced plugin is a **crate**, which always loads as a first-class plugin built from its manifest sources (see [Crate-embedded manifest](#crate-embedded-manifest) below). This is the recommended path for crate authors to ship skills alongside their crate — see [Supporting your crate](../crate-authors/supporting-your-crate.md).
 
-This is the recommended way for crate authors to ship skills alongside their crate. See [Supporting your crate](../crate-authors/supporting-your-crate.md) for details on the metadata format.
+| Field | Type | Description |
+|-------|------|-------------|
+| `source.cargo` | string or table | The crate carrying the plugin. A dependency-atom string (`"serde"`, `"serde>=1"`) or a `{ name = "...", version = "..." }` table. |
+| `depends-on` | string or array | Gate for this edge — the referenced plugin loads only when these hold (in addition to the owning plugin's own gate). |
+| `predicates` | array of strings | Additional gate for this edge. See [Predicates](./predicates.md). |
 
 ```toml
 name = "serde-plugin"
-crates = ["serde"]
 
-[[skills]]
-source = "crate"
+# When serde is a dependency, load serde's plugin (its skills).
+[[plugins]]
+depends-on = ["serde"]
+source.cargo = "serde"
 ```
 
-At least one non-wildcard crate predicate must be present (at either the plugin or group level) so that Symposium knows which crate sources to fetch. See [Matched crate set](./crate-predicates.md#matched-crate-set) for details.
+The edge's `depends-on` decides *whether* to load the referenced crate; the crate name in `source.cargo` decides *which* crate. (This replaces the retired `source = "crate"` skill-group form, where one `depends-on` predicate did both jobs.) List several `[[plugins]]` entries to load several crates.
 
-#### Skill layout in crate source
+> Only `source.cargo` is supported today; `source.git` / `source.path` chained plugins are reserved and rejected with a clear error.
 
-Symposium reads `[package.metadata.symposium]` from the crate's `Cargo.toml`:
+### Crate-embedded manifest
 
-- **No metadata section** — fall back to the default `skills/` subdirectory.
-- **Malformed metadata** — logged as a warning, then fall back to the default `skills/` subdirectory.
-- **`skills = []`** — no skills from this crate (not a fallback to `skills/`). This is an explicit opt-out and is respected even when the crate is reached via a redirect.
-- **`[[skills]]` entries** — process each entry independently:
-  - `path = "..."` — look in that subdirectory of this crate's source. If the directory does not exist, zero skills are produced for that entry (no error).
-  - `crate = { name = "...", version = "..." }` — redirect to another crate and follow its metadata recursively.
+A referenced crate describes its plugin with the ordinary plugin-manifest schema, from **two interchangeable sources**: a `SYMPOSIUM.toml` at its source root, and/or a `[package.metadata.symposium]` table in its `Cargo.toml`. Both are honored the same as a registry manifest — named `[[skills]]` groups, per-group predicates, `source.path` / `source.git` sources, and further `[[plugins]]` chained references. The crate's effective manifest is the two sources merged over the crate defaults (merge order **defaults → `[package.metadata.symposium]` → `SYMPOSIUM.toml`**): list entries from both are kept; where the two set the same scalar, the file wins. Each source is parsed leniently — a malformed layer is logged and dropped, and the crate still resolves through the remaining layers (at minimum the default `skills/` group).
 
-Redirects are followed with cycle detection (hyphen/underscore-insensitive) and a depth limit of 10. When multiple crates redirect to the same target, the target's skills are installed once (deduplication by crate name + version).
+Because the chained reference is already the gate, a crate manifest may omit `name` (defaults to the crate) and a top-level `depends-on`; the default `skills/` group is appended unless `[defaults] skills = false`. A crate with no manifest sources at all still resolves as a plugin whose only content is that default `skills/` group.
 
-See [Supporting your crate](../crate-authors/supporting-your-crate.md) for the full metadata schema.
+**The opt-out belongs to the referenced crate, not the referrer.** The edge decides only *whether* to load the crate (via its `depends-on` / `predicates`); it cannot toggle the crate's defaults. So for an active edge to crate `foo`:
 
-#### Semantics when matching against multiple crates
+- `foo` ships nothing → its `skills/` directory loads.
+- `foo` declares `[[skills]] source.path = "guidance"` → both `guidance/` **and** `skills/` load (combined with defaults).
+- `foo` declares `[defaults] skills = false` plus a custom group → only the custom group loads.
+- `foo` declares `[defaults] skills = false` and nothing else → nothing loads.
+- `foo` carries its own `[[plugins]] source.cargo = "bar"` → `bar` resolves the same way, recursively.
 
-If your plugin lists multiple crates, then skills will be loaded from whichever crates are present. For example, the following plugin will activate if `foo`, `bar`, or `baz` are present in the dependencies:
+Hooks, MCP servers, and subcommands declared in a crate manifest are parsed and validated but **not yet dispatched** — its skills and further chained references load today.
+
+### Delegating to another crate
+
+A crate can delegate to another crate with a `[[plugins]]` chained reference of its own — the replacement for the retired `crate = {..}` metadata redirect:
 
 ```toml
-name = "my-plugin"
-crates = ["foo", "bar", "baz"]
-
-[[skills]]
-source = "crate"
+# In the referenced crate's Cargo.toml (or its SYMPOSIUM.toml)
+[[package.metadata.symposium.plugins]]
+source.cargo = "companion-crate"
 ```
 
-Once activated, `source = "crate"` will cause Symposium to look for skills in whichever crates are present. So if the project has `foo` and `bar` (but not `baz`), we would look at the sources for `foo` and `bar` (but not `baz`).
-
-#### Redirects via crate metadata
-
-Crate authors can redirect skill resolution to another crate using their `Cargo.toml` metadata. For example, `dial9-tokio-telemetry` could redirect to `dial9-viewer`:
-
-```toml
-# In dial9-tokio-telemetry/Cargo.toml
-[[package.metadata.symposium.skills]]
-crate = { name = "dial9-viewer" }
-```
-
-This means the plugin just needs `source = "crate"` and the crate itself controls where skills are fetched from. Redirects are followed recursively (with cycle detection and a depth limit of 10).
-
-#### Semantics of `crates` predicates at multiple levels
-
-When you apply the `crates` predicate at multiple levels, all levels must match. This can be used to narrow the set of crates that have skills versus the set that activates your plugin overall.
-
-```toml
-name = "my-plugin"
-
-# Any of these crates activates the plugin
-crates = ["foo", "bar", "baz"]
-
-[[skills]]
-crates = ["foo", "bar"] # ... but this block applies only to "foo" and "bar"
-source = "crate" # ...which get their skills from their sources
-
-[[skills]]
-crates = ["baz"] # ... this block applies to "baz"
-source = "crate" # ... baz's Cargo.toml metadata controls where skills come from
-```
+Chained references are expanded recursively, with cycle detection (hyphen/underscore-insensitive) and a depth limit of 10. When multiple crates delegate to the same target, its skills install once (dedup by crate name + version). See [Supporting your crate](../crate-authors/supporting-your-crate.md) for the full crate-author walkthrough.
 
 ## Installations
 
@@ -256,7 +230,7 @@ Each `[[hooks]]` entry declares a hook that responds to agent events. For the JS
 | `requirements` | array (optional) | Installations to acquire before running. Same shape as `command` (string name or inline declaration). |
 | `agent` | string (optional) | Restrict the hook to a specific agent (`claude`, `copilot`, `gemini`, `kiro`, …). |
 | `format` | string | Wire format the handler expects on stdin. `symposium` (default): symposium converts the agent's event to its canonical format before delivering. Any agent name (`claude`, `codex`, `copilot`, `gemini`, `kiro`): the handler receives that agent's native wire format. Symposium always intermediates — it never registers plugin hooks directly into agent configs. See [Hooks](../crate-authors/authoring-a-plugin.md#hooks). |
-| `predicates` | array (optional) | Predicates (`crate`, `shell`, `path_exists`, `env`, `not`, `any`, `all`) that must all hold for the hook to dispatch. Evaluated per-dispatch. See [Predicates](./predicates.md). |
+| `predicates` | array (optional) | Predicates (`depends-on`, `shell`, `path_exists`, `env`, `workspace-member`, `not`, `any`, `all`) that must all hold for the hook to dispatch. Evaluated per-dispatch. See [Predicates](./predicates.md). |
 
 ### Examples
 
@@ -451,7 +425,7 @@ Each `[[predicate]]` entry defines a custom predicate function that can be used 
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `name` | string | The predicate name. Must be a valid identifier (`[a-zA-Z][a-zA-Z0-9_]*`) and must not collide with builtins (`crate`, `shell`, `path_exists`, `env`, `not`, `any`, `all`). |
+| `name` | string | The predicate name. Must be a valid identifier (`[a-zA-Z][a-zA-Z0-9_]*`) and must not collide with builtins (`depends-on`, `crate`, `shell`, `path_exists`, `env`, `workspace-member`, `not`, `any`, `all`). |
 | `command` | string or table | The installation to run. Same shape as hook `command` (a string naming a `[[installations]]` entry or an inline table). |
 | `args` | array of strings | Optional. Static arguments passed to the command before the dynamic argument. |
 
@@ -490,19 +464,7 @@ Exit 0 means the predicate passes; non-zero means it fails.
 
 The argument is trimmed of leading/trailing whitespace before being passed. An empty argument — `battery_pack()` or `battery_pack( )` — does not append anything to the command (only the static `args` are passed).
 
-### Witness output (stdout JSON)
-
-On success (exit 0), the command may write a JSON object to stdout. If present and valid, the `selectedCrates` field drives `source = "crate"` skill resolution — the named crates are fetched for skills, just as if they'd been matched by a `crate(...)` predicate.
-
-```json
-{
-    "selectedCrates": [
-        { "crate": "cli-battery-pack", "version": "0.3.1" }
-    ]
-}
-```
-
-If stdout is empty, the predicate passes but contributes no witness crates. If stdout is non-empty but not valid JSON, or any entry has an invalid `version` field, the predicate **fails** (treated as exit non-zero) and a warning is emitted.
+A custom predicate is a **boolean gate only**: it passes iff the command exits 0. Its stdout is ignored (the former `selectedCrates` witness output is retired along with `source = "crate"`).
 
 ### Collisions
 
@@ -531,8 +493,8 @@ env = []
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Server name as it appears in the agent's MCP config. |
-| `crates` | string or array | Which crates this server applies to. Optional if plugin has top-level `crates`. |
-| `predicates` | array of strings | Predicates (`crate`, `shell`, `path_exists`, `env`, `not`, `any`, `all`) that must all hold for the server to register. See [Predicates](./predicates.md). |
+| `depends-on` | string or array | Which crates this server applies to. Optional if plugin has top-level `depends-on`. |
+| `predicates` | array of strings | Predicates (`depends-on`, `shell`, `path_exists`, `env`, `workspace-member`, `not`, `any`, `all`) that must all hold for the server to register. See [Predicates](./predicates.md). |
 | `command` | string | Path to the server binary. |
 | `args` | array of strings | Arguments passed to the binary. |
 | `env` | array of objects | Environment variables to set when launching the server. |
@@ -553,7 +515,7 @@ headers = []
 |-------|------|-------------|
 | `type` | string | Must be `"http"`. |
 | `name` | string | Server name as it appears in the agent's MCP config. |
-| `crates` | string or array | Which crates this server applies to. Optional if plugin has top-level `crates`. |
+| `depends-on` | string or array | Which crates this server applies to. Optional if plugin has top-level `depends-on`. |
 | `url` | string | HTTP endpoint URL. |
 | `headers` | array of objects | HTTP headers to set when making requests. |
 
@@ -571,7 +533,7 @@ headers = []
 |-------|------|-------------|
 | `type` | string | Must be `"sse"`. |
 | `name` | string | Server name as it appears in the agent's MCP config. |
-| `crates` | string or array | Which crates this server applies to. Optional if plugin has top-level `crates`. |
+| `depends-on` | string or array | Which crates this server applies to. Optional if plugin has top-level `depends-on`. |
 | `url` | string | SSE endpoint URL. |
 | `headers` | array of objects | HTTP headers to set when making requests. |
 
@@ -600,16 +562,15 @@ All supported agents have MCP server configuration. Symposium handles the format
 
 ```toml
 name = "widgetlib"
-crates = ["widgetlib"]
+depends-on = ["widgetlib"]
 
 # Skills shipped inside the widgetlib crate source (in skills/)
-[[skills]]
-crates = ["widgetlib"]
-source = "crate"
+[[plugins]]
+source.cargo = "widgetlib"
 
 # Additional skills hosted in a git repo
 [[skills]]
-crates = ["widgetlib=1.0"]
+depends-on = ["widgetlib=1.0"]
 source.git = "https://github.com/org/widgetlib/tree/main/symposium/serde-skills"
 
 [[hooks]]

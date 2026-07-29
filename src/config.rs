@@ -276,6 +276,19 @@ impl McpConfig {
     fn is_default(&self) -> bool {
         *self == McpConfig::default()
     }
+
+    /// The script deadline bounds every tool call made inside it, so a
+    /// per-call timeout at or above it can never fire.
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.tool_call_timeout_secs >= self.script_timeout_secs {
+            anyhow::bail!(
+                "[mcp] tool-call-timeout-secs ({}) must be less than script-timeout-secs ({})",
+                self.tool_call_timeout_secs,
+                self.script_timeout_secs
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Default for Config {
@@ -330,8 +343,9 @@ impl Default for RawConfig {
 }
 
 impl RawConfig {
-    fn validate(self) -> Config {
-        Config {
+    fn validate(self) -> anyhow::Result<Config> {
+        self.mcp.validate()?;
+        Ok(Config {
             auto_sync: self.auto_sync,
             agents_syncing: self.agents_syncing,
             sync_debounce_secs: self.sync_debounce_secs,
@@ -343,7 +357,7 @@ impl RawConfig {
             logging: self.logging,
             defaults: self.defaults,
             plugin_source: self.plugin_source,
-        }
+        })
     }
 }
 
@@ -676,15 +690,19 @@ fn resolve_logs_dir(config_dir: &Path) -> PathBuf {
 /// Load config from a config directory.
 fn load_config_from(config_dir: &Path) -> Config {
     let path = config_dir.join("config.toml");
-    match fs::read_to_string(&path) {
-        Ok(contents) => toml::from_str::<RawConfig>(&contents)
-            .unwrap_or_else(|e| {
-                eprintln!("warning: failed to parse {}: {e}", path.display());
-                RawConfig::default()
-            })
-            .validate(),
-        Err(_) => Config::default(),
-    }
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Config::default();
+    };
+    toml::from_str::<RawConfig>(&contents)
+        .unwrap_or_else(|e| {
+            eprintln!("warning: failed to parse {}: {e}", path.display());
+            RawConfig::default()
+        })
+        .validate()
+        .unwrap_or_else(|e| {
+            eprintln!("warning: invalid config in {}: {e}", path.display());
+            Config::default()
+        })
 }
 
 fn default_true() -> bool {
@@ -705,7 +723,18 @@ mod tests {
     use indoc::indoc;
 
     fn parse_config(toml: &str) -> Config {
-        toml::from_str::<RawConfig>(toml).unwrap().validate()
+        toml::from_str::<RawConfig>(toml)
+            .unwrap()
+            .validate()
+            .unwrap()
+    }
+
+    fn validate_err(toml: &str) -> String {
+        toml::from_str::<RawConfig>(toml)
+            .unwrap()
+            .validate()
+            .expect_err("config should have been rejected")
+            .to_string()
     }
 
     #[test]
@@ -917,6 +946,45 @@ mod tests {
         assert!(
             err.to_string().contains("script-timout-secs"),
             "error should name the offending key, got: {err}"
+        );
+    }
+
+    /// A per-call timeout at or above the script deadline could never fire,
+    /// so it is rejected rather than silently ignored.
+    #[test]
+    fn mcp_rejects_tool_call_timeout_at_or_above_script_timeout() {
+        for (call, script) in [(60u64, 60u64), (120, 30)] {
+            let err = validate_err(&format!(
+                "[mcp]\nscript-timeout-secs = {script}\ntool-call-timeout-secs = {call}\n"
+            ));
+            assert!(
+                err.contains("tool-call-timeout-secs") && err.contains("script-timeout-secs"),
+                "error should name both knobs for call={call} script={script}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_accepts_tool_call_timeout_below_script_timeout() {
+        let config = parse_config(indoc! {"
+            [mcp]
+            script-timeout-secs = 30
+            tool-call-timeout-secs = 29
+        "});
+        assert_eq!(config.mcp.tool_call_timeout_secs, 29);
+    }
+
+    /// Raising only the per-call timeout must not silently pass by sitting
+    /// under the *default* script deadline the user never touched.
+    #[test]
+    fn mcp_rejects_raised_tool_call_timeout_against_default_script_timeout() {
+        let err = validate_err(indoc! {"
+            [mcp]
+            tool-call-timeout-secs = 600
+        "});
+        assert!(
+            err.contains("600"),
+            "error should quote the offending value, got: {err}"
         );
     }
 

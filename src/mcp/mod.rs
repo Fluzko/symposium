@@ -8,3 +8,6 @@
 
 pub mod declarations;
 pub mod schema_to_ts;
+
+#[cfg(test)]
+mod corpus_tests;

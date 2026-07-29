@@ -14,33 +14,115 @@
 //!   rather than silently assuming a shape that may not hold.
 
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
 /// Rendered when a schema is missing, unrecognized, or unconstrained.
 const UNKNOWN: &str = "unknown";
 
-/// Render a JSON Schema as a TypeScript type expression.
-pub fn render_type(schema: &Value) -> String {
-    render_at(schema, 0)
+/// Deepest nesting we will follow before giving up.
+///
+/// Schemas come from third parties and may nest arbitrarily; this keeps a
+/// pathological one from exhausting the stack.
+const MAX_DEPTH: usize = 64;
+
+/// Total subschemas we will render for one tool.
+///
+/// Composition keywords can fan out multiplicatively, so a depth cap alone is
+/// not enough to bound the work.
+const MAX_NODES: usize = 10_000;
+
+/// Renders schemas to TypeScript, accumulating the named types they reference.
+///
+/// One renderer is shared across all of a server's tools so a type defined in
+/// several tools' `$defs` is emitted once.
+#[derive(Debug, Default)]
+pub struct TypeRenderer {
+    /// Type name to rendered body, ordered so output is stable.
+    named: BTreeMap<String, String>,
 }
 
-fn render_at(schema: &Value, indent: usize) -> String {
+impl TypeRenderer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Render `schema` as a type expression, registering any named types it
+    /// references. `$ref` pointers resolve against `schema` itself.
+    pub fn render(&mut self, schema: &Value) -> String {
+        let mut cx = Cx {
+            root: schema,
+            named: &mut self.named,
+            in_progress: Vec::new(),
+            budget: MAX_NODES,
+        };
+        render_at(&mut cx, schema, 0, 0)
+    }
+
+    /// The named type declarations collected so far, in name order.
+    pub fn declarations(&self) -> String {
+        let mut out = String::new();
+        for (name, body) in &self.named {
+            // An object body is an interface; anything else is an alias.
+            if body.starts_with('{') {
+                out.push_str(&format!("interface {name} {body}\n\n"));
+            } else {
+                out.push_str(&format!("type {name} = {body};\n\n"));
+            }
+        }
+        out
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.named.is_empty()
+    }
+}
+
+/// Per-render state: the document `$ref` resolves against, the shared type
+/// table, the names currently being rendered, and the remaining node budget.
+struct Cx<'a> {
+    root: &'a Value,
+    named: &'a mut BTreeMap<String, String>,
+    in_progress: Vec<String>,
+    budget: usize,
+}
+
+fn render_at(cx: &mut Cx, schema: &Value, indent: usize, depth: usize) -> String {
+    if depth > MAX_DEPTH || cx.budget == 0 {
+        return UNKNOWN.to_string();
+    }
+    cx.budget -= 1;
+
     match schema {
         // A schema may be a bare boolean: `true` accepts anything, `false`
         // accepts nothing.
         Value::Bool(true) => UNKNOWN.to_string(),
         Value::Bool(false) => "never".to_string(),
-        Value::Object(map) => render_object_schema(map, indent),
+        Value::Object(map) => render_object_schema(cx, map, indent, depth),
         // Anything else is malformed; degrade rather than fail.
         _ => UNKNOWN.to_string(),
     }
 }
 
-fn render_object_schema(schema: &Map<String, Value>, indent: usize) -> String {
+fn render_object_schema(
+    cx: &mut Cx,
+    schema: &Map<String, Value>,
+    indent: usize,
+    depth: usize,
+) -> String {
     if schema.is_empty() {
         return UNKNOWN.to_string();
     }
 
-    let base = render_constrained(schema, indent);
+    // A `$ref` wins over every sibling keyword. Note that siblings do appear
+    // alongside it: one deployed generator emits `description` next to `$ref`,
+    // and a resolver that returned the target directly would drop it. The
+    // description is read from the referring schema by the caller, so it
+    // survives.
+    if let Some(Value::String(pointer)) = schema.get("$ref") {
+        return render_ref(cx, pointer, depth);
+    }
+
+    let base = render_constrained(cx, schema, indent, depth);
 
     // `nullable` is an OpenAPI 3.0 extension rather than JSON Schema, but the
     // schemars 0.8 line emits it for optional fields and those servers are
@@ -51,8 +133,81 @@ fn render_object_schema(schema: &Map<String, Value>, indent: usize) -> String {
     base
 }
 
+/// Resolve a `$ref`, emitting the target as a named type and returning its
+/// name.
+///
+/// Naming the type is what makes recursive schemas work: a self-reference
+/// resolves to a name that is already being defined, rather than expanding
+/// forever.
+fn render_ref(cx: &mut Cx, pointer: &str, depth: usize) -> String {
+    let Some(name) = type_name_for(pointer) else {
+        // A pointer we cannot name (an external URL, say) is unresolvable.
+        return UNKNOWN.to_string();
+    };
+
+    // Already emitted, or currently being emitted higher up the stack. The
+    // latter is the cycle case; returning the name closes the loop.
+    if cx.named.contains_key(&name) || cx.in_progress.contains(&name) {
+        return name;
+    }
+
+    let Some(target) = resolve_pointer(cx.root, pointer) else {
+        return UNKNOWN.to_string();
+    };
+    // Reserve the name before rendering the body, so a self-reference
+    // encountered inside sees it as in progress.
+    cx.in_progress.push(name.clone());
+    let body = render_at(cx, &target.clone(), 0, depth + 1);
+    cx.in_progress.pop();
+    cx.named.insert(name.clone(), body);
+    name
+}
+
+/// Follow a JSON pointer such as `#/$defs/Message` within `root`.
+fn resolve_pointer<'a>(root: &'a Value, pointer: &str) -> Option<&'a Value> {
+    let path = pointer.strip_prefix('#')?;
+    if path.is_empty() || path == "/" {
+        return Some(root);
+    }
+    let mut current = root;
+    for raw in path.trim_start_matches('/').split('/') {
+        // Per RFC 6901, `~1` is an escaped `/` and `~0` an escaped `~`.
+        let key = raw.replace("~1", "/").replace("~0", "~");
+        current = current.get(&key)?;
+    }
+    Some(current)
+}
+
+/// Derive a TypeScript type name from a pointer's last segment.
+fn type_name_for(pointer: &str) -> Option<String> {
+    if !pointer.starts_with('#') {
+        return None;
+    }
+    let last = pointer.rsplit('/').next()?;
+    let cleaned: String = last
+        .replace("~1", "/")
+        .replace("~0", "~")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if cleaned.is_empty() {
+        return None;
+    }
+    // A type name may not start with a digit.
+    if cleaned.starts_with(|c: char| c.is_ascii_digit()) {
+        Some(format!("_{cleaned}"))
+    } else {
+        Some(cleaned)
+    }
+}
+
 /// Dispatch on whichever constraint keyword the schema uses, narrowest first.
-fn render_constrained(schema: &Map<String, Value>, indent: usize) -> String {
+fn render_constrained(
+    cx: &mut Cx,
+    schema: &Map<String, Value>,
+    indent: usize,
+    depth: usize,
+) -> String {
     // A single permitted value is narrower than anything else present.
     if let Some(value) = schema.get("const") {
         return render_literal(value);
@@ -67,22 +222,22 @@ fn render_constrained(schema: &Map<String, Value>, indent: usize) -> String {
     // offer alternatives. A single-element `allOf` — the shape generators emit
     // to attach a description to a reference — collapses to its one member.
     if let Some(Value::Array(members)) = schema.get("allOf") {
-        return render_intersection(members, indent);
+        return render_intersection(cx, members, indent, depth);
     }
     for key in ["anyOf", "oneOf"] {
         if let Some(Value::Array(members)) = schema.get(key) {
-            return render_union(members, indent);
+            return render_union(cx, members, indent, depth);
         }
     }
 
     match schema.get("type") {
-        Some(Value::String(ty)) => render_with_type(schema, ty, indent),
+        Some(Value::String(ty)) => render_with_type(cx, schema, ty, indent, depth),
         // A type may be a list of alternatives, e.g. `["string", "null"]`.
         Some(Value::Array(types)) => {
             let parts = types
                 .iter()
                 .filter_map(Value::as_str)
-                .map(|ty| render_with_type(schema, ty, indent))
+                .map(|ty| render_with_type(cx, schema, ty, indent, depth))
                 .collect();
             join_union(parts)
         }
@@ -90,28 +245,99 @@ fn render_constrained(schema: &Map<String, Value>, indent: usize) -> String {
     }
 }
 
-fn render_with_type(schema: &Map<String, Value>, ty: &str, indent: usize) -> String {
+fn render_with_type(
+    cx: &mut Cx,
+    schema: &Map<String, Value>,
+    ty: &str,
+    indent: usize,
+    depth: usize,
+) -> String {
     match ty {
         "string" => "string".to_string(),
         // JSON Schema separates integers from other numbers; TypeScript does not.
         "number" | "integer" => "number".to_string(),
         "boolean" => "boolean".to_string(),
         "null" => "null".to_string(),
-        "array" => render_array(schema, indent),
-        "object" => render_struct(schema, indent),
+        "array" => render_array(cx, schema, indent, depth),
+        "object" => render_struct(cx, schema, indent, depth),
         _ => UNKNOWN.to_string(),
     }
 }
 
-fn render_union(members: &[Value], indent: usize) -> String {
-    let parts = members.iter().map(|m| render_at(m, indent)).collect();
+fn render_array(cx: &mut Cx, schema: &Map<String, Value>, indent: usize, depth: usize) -> String {
+    let Some(items) = schema.get("items") else {
+        return format!("{UNKNOWN}[]");
+    };
+    // `A | B[]` would parse as `A | (B[])`, so a union element needs parens.
+    let inner = parenthesize_if_composite(render_at(cx, items, indent, depth + 1));
+    format!("{inner}[]")
+}
+
+fn render_struct(cx: &mut Cx, schema: &Map<String, Value>, indent: usize, depth: usize) -> String {
+    let Some(Value::Object(properties)) = schema.get("properties") else {
+        // No declared properties: the schema describes a map, and
+        // `additionalProperties` types its values.
+        //
+        // `propertyNames` is deliberately ignored — it constrains keys, which
+        // TypeScript index signatures cannot express.
+        return match schema.get("additionalProperties") {
+            Some(Value::Bool(false)) => "{}".to_string(),
+            Some(value @ Value::Object(_)) => {
+                format!(
+                    "Record<string, {}>",
+                    render_at(cx, value, indent, depth + 1)
+                )
+            }
+            _ => format!("Record<string, {UNKNOWN}>"),
+        };
+    };
+
+    if properties.is_empty() {
+        return "{}".to_string();
+    }
+
+    let required: Vec<&str> = match schema.get("required") {
+        Some(Value::Array(names)) => names.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+
+    let pad = "  ".repeat(indent + 1);
+    let close_pad = "  ".repeat(indent);
+    let mut out = String::from("{\n");
+
+    for (name, subschema) in properties {
+        if let Some(doc) = doc_comment(subschema) {
+            out.push_str(&format!("{pad}/** {doc} */\n"));
+        }
+        let optional = if required.contains(&name.as_str()) {
+            ""
+        } else {
+            "?"
+        };
+        let rendered = render_at(cx, subschema, indent + 1, depth + 1);
+        out.push_str(&format!(
+            "{pad}{}{optional}: {rendered};\n",
+            property_key(name)
+        ));
+    }
+
+    out.push_str(&close_pad);
+    out.push('}');
+    out
+}
+
+fn render_union(cx: &mut Cx, members: &[Value], indent: usize, depth: usize) -> String {
+    let parts = members
+        .iter()
+        .map(|m| render_at(cx, m, indent, depth + 1))
+        .collect();
     join_union(parts)
 }
 
-fn render_intersection(members: &[Value], indent: usize) -> String {
+fn render_intersection(cx: &mut Cx, members: &[Value], indent: usize, depth: usize) -> String {
     let mut parts: Vec<String> = Vec::new();
     for member in members {
-        let rendered = parenthesize_if_composite(render_at(member, indent));
+        let rendered = parenthesize_if_composite(render_at(cx, member, indent, depth + 1));
         if !parts.contains(&rendered) {
             parts.push(rendered);
         }
@@ -121,6 +347,13 @@ fn render_intersection(members: &[Value], indent: usize) -> String {
         1 => parts.pop().unwrap_or_default(),
         _ => parts.join(" & "),
     }
+}
+
+fn render_enum(values: &[Value]) -> String {
+    if values.is_empty() {
+        return "never".to_string();
+    }
+    join_union(values.iter().map(render_literal).collect())
 }
 
 /// Join alternatives into a union, dropping duplicates and flattening the
@@ -149,72 +382,6 @@ fn parenthesize_if_composite(rendered: String) -> String {
     } else {
         rendered
     }
-}
-
-fn render_array(schema: &Map<String, Value>, indent: usize) -> String {
-    let Some(items) = schema.get("items") else {
-        return format!("{UNKNOWN}[]");
-    };
-    // `A | B[]` would parse as `A | (B[])`, so a union element needs parens.
-    let inner = parenthesize_if_composite(render_at(items, indent));
-    format!("{inner}[]")
-}
-
-fn render_struct(schema: &Map<String, Value>, indent: usize) -> String {
-    let Some(Value::Object(properties)) = schema.get("properties") else {
-        // No declared properties: the schema describes a map, and
-        // `additionalProperties` types its values.
-        //
-        // `propertyNames` is deliberately ignored — it constrains keys, which
-        // TypeScript index signatures cannot express.
-        return match schema.get("additionalProperties") {
-            Some(Value::Bool(false)) => "{}".to_string(),
-            Some(value @ Value::Object(_)) => {
-                format!("Record<string, {}>", render_at(value, indent))
-            }
-            _ => format!("Record<string, {UNKNOWN}>"),
-        };
-    };
-
-    if properties.is_empty() {
-        return "{}".to_string();
-    }
-
-    let required: Vec<&str> = match schema.get("required") {
-        Some(Value::Array(names)) => names.iter().filter_map(Value::as_str).collect(),
-        _ => Vec::new(),
-    };
-
-    let pad = "  ".repeat(indent + 1);
-    let close_pad = "  ".repeat(indent);
-    let mut out = String::from("{\n");
-
-    for (name, subschema) in properties {
-        if let Some(doc) = doc_comment(subschema) {
-            out.push_str(&format!("{pad}/** {doc} */\n"));
-        }
-        let optional = if required.contains(&name.as_str()) {
-            ""
-        } else {
-            "?"
-        };
-        let rendered = render_at(subschema, indent + 1);
-        out.push_str(&format!(
-            "{pad}{}{optional}: {rendered};\n",
-            property_key(name)
-        ));
-    }
-
-    out.push_str(&close_pad);
-    out.push('}');
-    out
-}
-
-fn render_enum(values: &[Value]) -> String {
-    if values.is_empty() {
-        return "never".to_string();
-    }
-    join_union(values.iter().map(render_literal).collect())
 }
 
 /// Render a JSON value as a TypeScript literal type.
@@ -270,7 +437,7 @@ mod tests {
     use serde_json::json;
 
     fn render(schema: Value) -> String {
-        render_type(&schema)
+        TypeRenderer::new().render(&schema)
     }
 
     // -- scalars --
@@ -343,6 +510,155 @@ mod tests {
             render(json!({"type": "boolean", "enum": [true]})),
             "true",
             "enum should win over type"
+        );
+    }
+
+    // -- references and named types --
+
+    /// Render a schema and return both the expression and the declarations of
+    /// every named type it pulled in.
+    fn render_with_defs(schema: Value) -> (String, String) {
+        let mut r = TypeRenderer::new();
+        let expr = r.render(&schema);
+        (expr, r.declarations())
+    }
+
+    #[test]
+    fn resolves_ref_into_a_named_interface() {
+        let (expr, defs) = render_with_defs(json!({
+            "type": "object",
+            "properties": {"msg": {"$ref": "#/$defs/Message"}},
+            "required": ["msg"],
+            "$defs": {
+                "Message": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+            },
+        }));
+        assert_eq!(expr, "{\n  msg: Message;\n}");
+        assert_eq!(defs, "interface Message {\n  text: string;\n}\n\n");
+    }
+
+    /// The older dialect spells the same thing `definitions`.
+    #[test]
+    fn resolves_legacy_definitions_pointer() {
+        let (expr, defs) = render_with_defs(json!({
+            "$ref": "#/definitions/Role",
+            "definitions": {"Role": {"enum": ["admin", "user"]}},
+        }));
+        assert_eq!(expr, "Role");
+        assert_eq!(defs, "type Role = \"admin\" | \"user\";\n\n");
+    }
+
+    /// Naming the target is what makes recursion terminate: the self-reference
+    /// resolves to a name that is already being defined.
+    #[test]
+    fn recursive_ref_terminates() {
+        let (expr, defs) = render_with_defs(json!({
+            "$ref": "#/$defs/Node",
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "children": {"type": "array", "items": {"$ref": "#/$defs/Node"}},
+                    },
+                },
+            },
+        }));
+        assert_eq!(expr, "Node");
+        assert!(
+            defs.contains("children?: Node[];"),
+            "self-reference should render as the name, got:\n{defs}"
+        );
+    }
+
+    /// Two schemas referring to each other must not expand forever.
+    #[test]
+    fn mutually_recursive_refs_terminate() {
+        let (_, defs) = render_with_defs(json!({
+            "$ref": "#/$defs/A",
+            "$defs": {
+                "A": {"type": "object", "properties": {"b": {"$ref": "#/$defs/B"}}},
+                "B": {"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}}},
+            },
+        }));
+        assert!(defs.contains("interface A"), "got:\n{defs}");
+        assert!(defs.contains("interface B"), "got:\n{defs}");
+    }
+
+    /// One deployed generator emits `description` beside `$ref`. Resolving the
+    /// reference must not discard it.
+    #[test]
+    fn ref_with_sibling_description_keeps_the_description() {
+        let (expr, _) = render_with_defs(json!({
+            "type": "object",
+            "properties": {
+                "msg": {
+                    "$ref": "#/$defs/Message",
+                    "description": "the message",
+                },
+            },
+            "$defs": {"Message": {"type": "string"}},
+        }));
+        assert!(expr.contains("/** the message */"), "got:\n{expr}");
+        assert!(expr.contains("msg?: Message;"), "got:\n{expr}");
+    }
+
+    /// A type shared by two properties is emitted once.
+    #[test]
+    fn shared_ref_is_emitted_once() {
+        let (_, defs) = render_with_defs(json!({
+            "type": "object",
+            "properties": {
+                "from": {"$ref": "#/$defs/User"},
+                "to": {"$ref": "#/$defs/User"},
+            },
+            "$defs": {"User": {"type": "object", "properties": {"id": {"type": "string"}}}},
+        }));
+        assert_eq!(defs.matches("interface User").count(), 1, "got:\n{defs}");
+    }
+
+    #[test]
+    fn unresolvable_refs_degrade_to_unknown() {
+        assert_eq!(render(json!({"$ref": "#/$defs/Missing"})), "unknown");
+        assert_eq!(
+            render(json!({"$ref": "https://example.com/schema.json"})),
+            "unknown",
+            "an external reference cannot be resolved offline"
+        );
+    }
+
+    /// A renderer is shared across a server's tools, so a type defined in two
+    /// tools' `$defs` is emitted once.
+    #[test]
+    fn named_types_accumulate_across_renders() {
+        let mut r = TypeRenderer::new();
+        for _ in 0..2 {
+            r.render(&json!({
+                "$ref": "#/$defs/Shared",
+                "$defs": {"Shared": {"type": "string"}},
+            }));
+        }
+        assert_eq!(r.declarations().matches("type Shared").count(), 1);
+    }
+
+    // -- traversal bounds --
+
+    /// Schemas arrive from third parties; deep nesting must not exhaust the
+    /// stack.
+    #[test]
+    fn deep_nesting_is_bounded() {
+        let mut schema = json!({"type": "string"});
+        for _ in 0..(MAX_DEPTH + 50) {
+            schema = json!({"type": "array", "items": schema});
+        }
+        let out = render(schema);
+        assert!(out.ends_with("[]"), "should still render, got: {out}");
+        assert!(
+            out.contains(UNKNOWN),
+            "the bound should show up as unknown at the bottom, got: {out}"
         );
     }
 

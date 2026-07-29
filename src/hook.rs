@@ -438,10 +438,11 @@ async fn prewarm_hook_sources(sym: &Symposium, deps: &Arc<WorkspaceDeps>) {
         .map(|ws| sym.config.plugins.used_names_in(&ws.root))
         .unwrap_or_default();
     let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used_names);
+    let pms = sym.package_managers(deps);
     let plugins = crate::skills::active_plugins(
         sym,
         &registry,
-        deps,
+        &pms,
         workspace.as_ref().map(|ws| ws.root.as_path()),
         &mut ctx,
     )
@@ -537,10 +538,11 @@ async fn discovery_hint(sym: &Symposium, deps: &Arc<WorkspaceDeps>) -> Option<St
         .map(|ws| sym.config.plugins.used_names_in(&ws.root))
         .unwrap_or_default();
     let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used);
+    let pms = sym.package_managers(deps);
     let active = crate::skills::active_plugins(
         sym,
         &registry,
-        deps,
+        &pms,
         workspace.as_ref().map(|ws| ws.root.as_path()),
         &mut ctx,
     )
@@ -655,10 +657,11 @@ pub async fn dispatch_plugin_hooks(
     let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used_names);
     // Dispatch over the active set — registry plugins plus crate-sourced ones —
     // so a crate plugin's hooks fire exactly like a registry plugin's.
+    let pms = sym.package_managers(deps);
     let plugins = crate::skills::active_plugins(
         sym,
         &registry,
-        deps,
+        &pms,
         workspace.as_ref().map(|ws| ws.root.as_path()),
         &mut ctx,
     )

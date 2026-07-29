@@ -223,20 +223,20 @@ async fn sync_skips_invalid_skill_frontmatter() {
         &["invalid-skill0", "workspace0"],
         async |mut ctx| {
             ctx.symposium(&["init", "--add-agent", "codex"]).await?;
-            let registry = symposium::plugins::load_registry(&ctx.sym).await;
-            // The bad skill is synthesized into a plugin, so the failure is a
-            // plugin-load warning whose message carries the SKILL.md path and
-            // the parse error.
-            assert!(
-                registry.warnings.iter().any(|warning| {
-                    warning.message.contains("bad-skill/SKILL.md")
-                        && warning.message.contains("failed to parse frontmatter")
-                }),
-                "registry should record a warning for skipped invalid skill: {:?}",
-                registry.warnings
-            );
 
-            ctx.symposium(&["sync"]).await?;
+            // The bad skill is synthesized into a plugin; loading it fails, and
+            // the package manager surfaces that as a warning during sync —
+            // naming the SKILL.md and the parse error — rather than installing
+            // anything.
+            let events = ctx.sync_with_report(tracing::Level::INFO).await?;
+            assert!(
+                events.iter().any(|e| e
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .is_some_and(|m| m.contains("bad-skill/SKILL.md")
+                        && m.contains("failed to parse frontmatter"))),
+                "sync should warn about the skipped invalid skill: {events:?}"
+            );
 
             let workspace_root = ctx.workspace_root.as_ref().unwrap();
             let installed =

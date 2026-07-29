@@ -10,15 +10,16 @@
 //! Ids look like `(<registry name>, <entry subpath>, *)`: the `pm` component
 //! is the configured registry's name — the same name plugins from it are
 //! attributed to — and the name component locates the entry within the
-//! source. The instance resolves its own ids against its directory; nothing
-//! routes them through the ecosystem transports.
+//! source. The instance resolves its own ids against its directory.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use symposium_install::UpdateLevel;
 
 use super::{ANY_VERSION, FetchedPackage, PackageId, PackageManager, PluginInfo, layout};
+use crate::plugins::ParsedPlugin;
+use crate::report::ReportEvent;
 
 /// A configured path registry: one local directory whose tree is a
 /// collection of plugin entries.
@@ -35,21 +36,6 @@ impl PathPm {
             dir: dir.into(),
         }
     }
-
-    /// The entries this registry offers, as package infos.
-    fn offers(&self) -> Result<Vec<PluginInfo>> {
-        Ok(layout::enumerate(&self.dir)?
-            .into_iter()
-            .map(|entry| PluginInfo {
-                id: PackageId::new(&self.name, layout::subpath_key(&entry.subpath), ANY_VERSION),
-                description: None,
-                subpath: Some(entry.subpath),
-                // A registry entry gates itself through its own manifest
-                // `depends-on`; the flat layout carries no recommendation.
-                recommends: None,
-            })
-            .collect())
-    }
 }
 
 #[async_trait::async_trait]
@@ -58,33 +44,49 @@ impl PackageManager for PathPm {
         &self.name
     }
 
-    /// The registry's entries. `deps` is unused — a local registry's
-    /// contents don't vary with the workspace.
-    async fn list_plugins(&self, _deps: &[PackageId]) -> Result<Vec<PluginInfo>> {
-        self.offers()
+    /// Every entry in the registry, loaded as a plugin. `deps` is ignored — a
+    /// local registry's contents don't vary with the workspace; whether each
+    /// plugin applies is decided later by its own predicates. A registry is a
+    /// trust root, so these activate without consent.
+    async fn active_plugins(&self, _deps: &[PackageId]) -> Vec<ParsedPlugin> {
+        let entries = match layout::enumerate(&self.dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(registry = %self.name, error = %e, "cannot list registry");
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            match crate::plugins::load_entry(&self.dir, &entry.subpath, &self.name) {
+                Some(Ok(p)) => out.push(p),
+                Some(Err(e)) => tracing::warn!(
+                    report = %ReportEvent::Warning {
+                        message: format!(
+                            "skipping {}: {e:#}",
+                            crate::output::display_path(&self.dir.join(&entry.subpath))
+                        ),
+                    },
+                ),
+                None => {}
+            }
+        }
+        out
     }
 
-    /// Substring match over the entries' names. Manifest names are the
-    /// plugin layer's to interpret, so this only sees directory names.
-    async fn search(&self, query: &str) -> Result<Vec<PluginInfo>> {
-        Ok(self
-            .offers()?
-            .into_iter()
-            .filter(|info| info.id.name.contains(query))
-            .collect())
-    }
-
-    /// Nothing to acquire — the content already lives in the registry
-    /// directory. A missing entry directory is not an error here; discovery
-    /// over the returned root decides what an empty entry means.
-    async fn fetch(&self, id: &PackageId, _update: UpdateLevel) -> Result<FetchedPackage> {
-        let root = self
-            .cached_root(id)
-            .ok_or_else(|| anyhow::anyhow!("registry `{}` cannot locate `{id}`", self.name))?;
-        Ok(FetchedPackage {
-            id: id.clone(),
-            root,
-        })
+    /// The entry an id names (`id.name` is the entry's subpath key).
+    async fn load_plugin(&self, id: &PackageId) -> Vec<ParsedPlugin> {
+        if id.pm != self.name {
+            return Vec::new();
+        }
+        match crate::plugins::load_entry(&self.dir, Path::new(&id.name), &self.name) {
+            Some(Ok(p)) => vec![p],
+            Some(Err(e)) => {
+                tracing::warn!(registry = %self.name, id = %id, error = %e, "failed to load plugin");
+                Vec::new()
+            }
+            None => Vec::new(),
+        }
     }
 
     /// A local directory contributes no workspace dependencies.
@@ -92,10 +94,24 @@ impl PackageManager for PathPm {
         Ok(Vec::new())
     }
 
-    /// The entry's directory within the registry directory — path entries
-    /// are their own cache.
-    fn cached_root(&self, id: &PackageId) -> Option<PathBuf> {
-        Some(self.dir.join(&id.name))
+    /// Substring match over the entries' subpath keys. Manifest names are the
+    /// plugin layer's to interpret, so this only sees directory names.
+    async fn search(&self, query: &str) -> Result<Vec<PluginInfo>> {
+        let entries = layout::enumerate(&self.dir).unwrap_or_default();
+        Ok(entries
+            .into_iter()
+            .map(|entry| layout::subpath_key(&entry.subpath))
+            .filter(|key| key.contains(query))
+            .map(|key| PluginInfo::from_id(PackageId::new(&self.name, key, ANY_VERSION)))
+            .collect())
+    }
+
+    /// The entry directory an id names — path entries are their own cache.
+    async fn fetch(&self, id: &PackageId, _update: UpdateLevel) -> Result<FetchedPackage> {
+        Ok(FetchedPackage {
+            id: id.clone(),
+            root: self.dir.join(&id.name),
+        })
     }
 }
 
@@ -104,25 +120,31 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn offers_one_package_per_entry() {
+    async fn loads_one_plugin_per_entry() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("registry");
         std::fs::create_dir_all(source.join("tools")).unwrap();
         std::fs::write(source.join("tools/SYMPOSIUM.toml"), "name = \"tools\"").unwrap();
         std::fs::create_dir_all(source.join("nested/style")).unwrap();
-        std::fs::write(source.join("nested/style/SKILL.md"), "# style").unwrap();
+        std::fs::write(
+            source.join("nested/style/SKILL.md"),
+            "---\nname: style\ndescription: d\ndepends-on: serde\n---\nbody",
+        )
+        .unwrap();
 
         let pm = PathPm::new("user-plugins", &source);
-        let offers = pm.list_plugins(&[]).await.unwrap();
-        let names: Vec<&str> = offers.iter().map(|o| o.id.name.as_str()).collect();
-        assert_eq!(names, vec!["nested/style", "tools"]);
-        assert!(offers.iter().all(|o| o.id.pm == "user-plugins"));
-        assert!(offers.iter().all(|o| o.recommends.is_none()));
-        assert_eq!(
-            offers[0].subpath.as_deref(),
-            Some(std::path::Path::new("nested/style"))
-        );
-        assert_eq!(pm.cached_root(&offers[1].id), Some(source.join("tools")));
+        let active = pm.active_plugins(&[]).await;
+        let mut names: Vec<&str> = active.iter().map(|p| p.plugin.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["style", "tools"]);
+        assert!(active.iter().all(|p| p.canonical.pm == "user-plugins"));
+
+        // load_plugin by the entry's subpath key.
+        let one = pm
+            .load_plugin(&PackageId::new("user-plugins", "tools", ANY_VERSION))
+            .await;
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].plugin.name, "tools");
 
         let hits = pm.search("too").await.unwrap();
         assert_eq!(hits.len(), 1);

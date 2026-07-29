@@ -135,110 +135,121 @@ pub async fn skills_applicable_to(
     let mut ctx = PredicateContext::with_custom_predicates(&for_crates, custom_predicate_entries)
         .with_used_names(&used_names);
 
-    let active = active_plugins(sym, registry, deps, workspace_root, &mut ctx).await;
+    let pms = sym.package_managers(deps);
+    let active = active_plugins(sym, registry, &pms, workspace_root, &mut ctx).await;
     collect_skills(sym, &active, &mut ctx, update).await
 }
 
-/// The full set of plugins active for a workspace: every registry plugin whose
-/// gate holds (cloned), followed by the crate-sourced plugins transitively
-/// reached through `[[plugins]]` chained references and dependency enablement.
+/// The full set of plugins active for a workspace, resolved as a fixed-point
+/// over the **package-manager set** (`pms`): the trust-root plugins the
+/// registry already loaded, plus the crate-sourced plugins transitively reached
+/// through `[[plugins]]` chained references and dependency enablement.
 ///
 /// This is the single seam every facet resolves over — skills, MCP servers,
 /// hooks, and subcommands — so a crate-sourced plugin's extensions dispatch
-/// exactly like a registry plugin's. Each returned plugin has already passed
-/// its own plugin-level gate; a facet still calls [`ParsedPlugin::applies`] (or
-/// stamps provenance) before evaluating its own predicates, since that re-stamps
-/// `workspace-member()` for the plugin being read.
+/// exactly like a registry plugin's. Each returned plugin has passed its own
+/// plugin-level gate; a facet still calls [`ParsedPlugin::applies`] before its
+/// own predicates, to re-stamp `workspace-member()` for the plugin being read.
 ///
-/// `ctx.deps` supplies the workspace dependency list expansion evaluates
-/// against, so callers build the context with the same deps they will use for
-/// the facet pass. Crate loading is cache-only ([`CargoPm::load_plugin`] fetches
-/// with [`UpdateLevel::None`]), so this is safe on the per-event hook path.
+/// Crate loading goes through `pms` ([`PmRegistry::load_plugin`]), which fetches
+/// cache-only, so this is safe on the per-event hook path. `ctx.deps` supplies
+/// the dependency list expansion evaluates against.
 pub async fn active_plugins(
     sym: &Symposium,
     registry: &PluginRegistry,
-    deps: &std::sync::Arc<crate::pm::WorkspaceDeps>,
+    pms: &crate::pm::PmRegistry,
     workspace_root: Option<&Path>,
     ctx: &mut PredicateContext<'_>,
 ) -> Vec<ParsedPlugin> {
-    let mut plugins = Vec::new();
-
-    // The cargo transport that loads each referenced crate, sharing this
-    // workspace's resolver so crate fetches reuse one cached `cargo metadata`.
-    let cargo = crate::pm::CargoPm::new(std::sync::Arc::clone(deps));
-
-    // A crate reached through more than one active plugin's chain — or through
-    // both a chain and dependency enablement — must load once, or its hooks
-    // would fire twice and its subcommands read as a false conflict. So cycle
-    // detection is global across the whole active set, keyed on the resolved
-    // crate identity. (Registry plugins are the explicit trust roots and are
-    // never deduped against each other.)
+    let mut active = Vec::new();
+    // Crate identities already loaded through the set, keyed on `(pm, name)` so
+    // a crate reached through two chains — or a chain and dependency enablement —
+    // loads once (its hooks don't double-fire, its subcommands aren't a false
+    // conflict), while a registry plugin and a crate of the same name stay
+    // distinct.
     let mut visited = std::collections::HashSet::new();
+    // Package ids still to resolve through the set.
+    let mut worklist: Vec<crate::pm::PackageId> = Vec::new();
 
+    // Seed with the trust-root plugins (registry + workspace), gated.
     for parsed in &registry.plugins {
-        // Plugin-level predicates gate everything below. Goes through the
-        // ParsedPlugin so the plugin's provenance is stamped for
-        // `workspace-member()`.
-        if !parsed.applies(ctx) {
-            tracing::debug!(
-                report = %crate::report::ReportEvent::PluginConsidered {
-                    plugin: parsed.plugin.name.clone(),
-                    matched: false,
-                    reason: Some("plugin-level predicates not satisfied".into()),
-                },
-            );
-            continue;
-        }
-        tracing::debug!(
-            report = %crate::report::ReportEvent::PluginConsidered {
-                plugin: parsed.plugin.name.clone(),
-                matched: true,
-                reason: None,
-            },
-        );
-
-        plugins.push(parsed.clone());
-
-        // `[[plugins]]` chained references: whenever this plugin is active and
-        // an edge's own predicates hold, the referenced crate is loaded as a
-        // first-class plugin. Expansion recurses into the loaded crate's own
-        // chained edges — a crate that names another crate (the reschema'd
-        // `[package.metadata.symposium]` redirect) is followed transitively.
-        expand_edges(
-            &parsed.plugin.chained,
-            parsed.workspace_member,
-            &cargo,
-            ctx,
-            &mut visited,
-            0,
-            &mut plugins,
-        )
-        .await;
+        record_active(parsed.clone(), ctx, &mut active, &mut worklist);
     }
 
-    // Crate-embedded plugins the user enabled: an enabled dependency, or a
-    // crate named by `use` that isn't a dependency, loads as a plugin in its
-    // own right with no manifest anywhere pointing at it. The consent check
-    // lives here rather than in the cargo PM — the PM offers, the config
-    // enables.
+    // Enabled crates: consented dependencies and `use`d crates that aren't
+    // dependencies. A name a registry already provides as a plugin was seeded
+    // above, so skip it here rather than also fetching it as a crate.
     if let Some(root) = workspace_root {
-        // A name a configured registry already provides as a plugin (including
-        // a dormant one that `use` wakes) was handled by the registry loop
-        // above; don't also try to fetch it as a crate from crates.io.
         let registry_names: std::collections::HashSet<String> = registry
             .plugins
             .iter()
             .map(|p| crate::crate_sources::normalize_crate_name(&p.plugin.name))
             .collect();
         for name in crate::discovery::enabled_dependencies(sym, ctx.deps, root) {
-            if registry_names.contains(&crate::crate_sources::normalize_crate_name(&name)) {
-                continue;
+            if !registry_names.contains(&crate::crate_sources::normalize_crate_name(&name)) {
+                worklist.push(crate::pm::CargoPm::id_for(&name, None));
             }
-            expand_crate_plugin(&name, &cargo, ctx, &mut visited, 0, &mut plugins).await;
         }
     }
 
-    plugins
+    // Fixed-point: resolve each id through the set, record any new plugin, and
+    // enqueue its own chained references.
+    while let Some(id) = worklist.pop() {
+        for plugin in pms.load_plugin(&id).await {
+            if visited.insert(plugin_key(&plugin.canonical)) {
+                record_active(plugin, ctx, &mut active, &mut worklist);
+            }
+        }
+    }
+
+    active
+}
+
+/// The dedup key for a loaded crate plugin: its ecosystem plus normalized name,
+/// so hyphen/underscore spellings collapse but a registry plugin and a crate of
+/// the same name stay distinct.
+fn plugin_key(id: &crate::pm::PackageId) -> String {
+    format!(
+        "{}/{}",
+        id.pm,
+        crate::crate_sources::normalize_crate_name(&id.name)
+    )
+}
+
+/// Gate `plugin` and, if it passes, record it into `active` and enqueue its
+/// `[[plugins]]` chained references (evaluated against this plugin's provenance)
+/// onto `worklist`.
+fn record_active(
+    plugin: ParsedPlugin,
+    ctx: &mut PredicateContext<'_>,
+    active: &mut Vec<ParsedPlugin>,
+    worklist: &mut Vec<crate::pm::PackageId>,
+) {
+    if !plugin.applies(ctx) {
+        tracing::debug!(
+            report = %crate::report::ReportEvent::PluginConsidered {
+                plugin: plugin.plugin.name.clone(),
+                matched: false,
+                reason: Some("plugin-level predicates not satisfied".into()),
+            },
+        );
+        return;
+    }
+    tracing::debug!(
+        report = %crate::report::ReportEvent::PluginConsidered {
+            plugin: plugin.plugin.name.clone(),
+            matched: true,
+            reason: None,
+        },
+    );
+    warn_undispatched_crate_features(&plugin);
+    for edge in &plugin.plugin.chained {
+        ctx.set_workspace_member(plugin.workspace_member);
+        if edge.predicates.evaluate(ctx) {
+            worklist.push(crate::pm::CargoPm::id_for(&edge.name, None));
+        }
+    }
+    active.push(plugin);
 }
 
 /// Extract the applicable skills from an already-resolved active plugin set.
@@ -383,10 +394,6 @@ async fn resolve_group_dirs(
     }
 }
 
-/// Depth limit for `[[plugins]]` chained-reference expansion, bounding both
-/// intentional chains and redirect loops that slip past cycle detection.
-const MAX_CHAIN_DEPTH: usize = 10;
-
 /// Warn when a crate-embedded plugin declares custom predicates. Its skills,
 /// hooks, MCP servers, and subcommands now dispatch through the active-plugin
 /// set, but custom predicate *definitions* are still resolved only from
@@ -400,107 +407,6 @@ fn warn_undispatched_crate_features(parsed: &ParsedPlugin) {
              registered (its skills, hooks, MCP servers, and subcommands are dispatched)"
         );
     }
-}
-
-/// Expand a set of `[[plugins]]` chained references, recursively collecting the
-/// referenced crates as first-class plugins.
-///
-/// For each edge whose predicates hold (evaluated against the *owning* plugin's
-/// provenance), the referenced crate is loaded via [`CargoPm::load_plugin`],
-/// its own plugin-level predicates are honored, and it is appended to
-/// `collected`. The loaded crate's own chained edges are then expanded in turn —
-/// this is how a crate that names another crate (a reschema'd
-/// `[package.metadata.symposium]` redirect) is followed.
-///
-/// `visited` (shared across the whole [`active_plugins`] call) holds the
-/// normalized crate names already loaded, collapsing diamonds and breaking
-/// cycles. `depth`/[`MAX_CHAIN_DEPTH`] is a backstop. Taking the edge slice and
-/// provenance directly — rather than an owning `&ParsedPlugin` — lets the caller
-/// append the owner to `collected` first without aliasing it.
-async fn expand_edges(
-    edges: &[crate::plugins::ChainedPlugin],
-    owner_workspace_member: bool,
-    pm: &crate::pm::CargoPm,
-    ctx: &mut PredicateContext<'_>,
-    visited: &mut std::collections::HashSet<String>,
-    depth: usize,
-    collected: &mut Vec<ParsedPlugin>,
-) {
-    if depth >= MAX_CHAIN_DEPTH {
-        tracing::warn!(
-            "chained plugin expansion exceeded depth limit ({MAX_CHAIN_DEPTH}); stopping"
-        );
-        return;
-    }
-
-    for edge in edges {
-        // Edge predicates evaluate against the owning plugin's provenance; the
-        // crate plugin's own `applies` restamps its own — never a workspace
-        // member — so reset before each edge's gate.
-        ctx.set_workspace_member(owner_workspace_member);
-        if !edge.predicates.evaluate(ctx) {
-            continue;
-        }
-
-        expand_crate_plugin(&edge.name, pm, ctx, visited, depth, collected).await;
-    }
-}
-
-/// Load one crate as a plugin, append it to `collected`, then expand its own
-/// `[[plugins]]` edges.
-///
-/// The shared tail of the two ways a crate becomes a plugin: a `[[plugins]]`
-/// chained reference naming it, or the user enabling the dependency it lives
-/// in. Skipped when the crate can't be loaded, when `visited` has already
-/// seen it (a cycle or a diamond), or when its own plugin-level predicates
-/// don't hold.
-async fn expand_crate_plugin(
-    crate_name: &str,
-    pm: &crate::pm::CargoPm,
-    ctx: &mut PredicateContext<'_>,
-    visited: &mut std::collections::HashSet<String>,
-    depth: usize,
-    collected: &mut Vec<ParsedPlugin>,
-) {
-    let Some(crate_plugin) = pm.load_plugin(crate_name).await else {
-        return;
-    };
-
-    // Cycle / diamond detection on the resolved crate identity, normalized
-    // so hyphen/underscore spellings of one crate collapse.
-    let key = crate::crate_sources::normalize_crate_name(&crate_plugin.canonical.name);
-    if !visited.insert(key) {
-        tracing::debug!(
-            crate_name = %crate_name,
-            "crate plugin already loaded; skipping (cycle or diamond)"
-        );
-        return;
-    }
-
-    // Honor the crate plugin's own plugin-level predicates (which stamp its
-    // provenance: never a workspace member) before recording it.
-    if !crate_plugin.applies(ctx) {
-        return;
-    }
-    warn_undispatched_crate_features(&crate_plugin);
-
-    // Recurse into the crate's own chained edges after recording the crate
-    // itself (owner-first order). Clone the edges out so the crate can move into
-    // `collected` without aliasing it during the recursive borrow.
-    let edges = crate_plugin.plugin.chained.clone();
-    let workspace_member = crate_plugin.workspace_member;
-    collected.push(crate_plugin);
-
-    Box::pin(expand_edges(
-        &edges,
-        workspace_member,
-        pm,
-        ctx,
-        visited,
-        depth + 1,
-        collected,
-    ))
-    .await;
 }
 
 /// Discover skills in each resolved base dir and stamp origins. The single

@@ -9,7 +9,6 @@
 //! [`Arc`], so several instances share one lazily-run, cached `cargo metadata`)
 //! and drives it (`self.workspace.crates()`).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -49,30 +48,20 @@ impl CargoPm {
         PackageId::new(CARGO_PM, name, version.unwrap_or(ANY_VERSION))
     }
 
-    /// Resolve a crate to its plugin definition.
+    /// Build a first-class [`ParsedPlugin`] from an already-fetched crate
+    /// source, layering its manifest sources — `[package.metadata.symposium]`
+    /// in `Cargo.toml` and a `SYMPOSIUM.toml` at the root — over the crate
+    /// defaults (see
+    /// [`load_crate_manifest`](crate::plugins::load_crate_manifest)) and
+    /// resolving its `source.path` groups to absolute directories. The plugin is
+    /// stamped with the resolved crate id as its
+    /// [`canonical`](ParsedPlugin::canonical) identity. A crate with no manifest
+    /// sources still yields a plugin whose only content is the default `skills/`
+    /// group.
     ///
-    /// Fetches the crate and builds a first-class [`ParsedPlugin`] from its
-    /// manifest sources — `[package.metadata.symposium]` in `Cargo.toml` and a
-    /// `SYMPOSIUM.toml` at the source root — layered over the crate defaults
-    /// (see [`load_crate_manifest`](crate::plugins::load_crate_manifest)). The
-    /// plugin is stamped with the resolved crate id as its
-    /// [`canonical`](ParsedPlugin::canonical) identity (which keys chained-plugin
-    /// cycle detection). A crate with no manifest sources still yields a plugin
-    /// whose only content is the default `skills/` group.
-    ///
-    /// Returns `None` only when the crate can't be fetched or the merged
-    /// manifest fails validation (both logged); the caller then contributes no
-    /// skills for this reference.
-    pub async fn load_plugin(&self, name: &str) -> Option<ParsedPlugin> {
-        let id = Self::id_for(name, None);
-        let fetched = match self.fetch(&id, UpdateLevel::None).await {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!(crate_name = %name, error = %e, "failed to fetch crate for plugin");
-                return None;
-            }
-        };
-
+    /// `None` only when the merged manifest fails validation (logged).
+    fn build_from_fetched(&self, fetched: FetchedPackage) -> Option<ParsedPlugin> {
+        let name = &fetched.id.name;
         let metadata = crate::crate_metadata::symposium_metadata(&fetched.root.join("Cargo.toml"))
             .unwrap_or_else(|e| {
                 tracing::warn!(
@@ -170,28 +159,22 @@ impl PackageManager for CargoPm {
         CARGO_PM
     }
 
-    /// Offer every dependency in `deps` whose source tree embeds plugin
-    /// content. Each offer `recommends` the dependency itself — a
-    /// dependency-embedded plugin is a plugin *for* the crate carrying it —
-    /// which is what [`discovery`](crate::discovery) matches against the
-    /// workspace.
+    /// The plugins embedded in the workspace's dependencies: every dep in
+    /// `deps` whose source tree embeds plugin content, built into a full
+    /// `ParsedPlugin`. Whether each is *trusted* (may activate without consent)
+    /// is the caller's decision — the cargo transport is marked untrusted.
     ///
     /// Each dependency is fetched cache-only ([`UpdateLevel::None`]) to locate
-    /// its source, then inspected. For a workspace dependency that is a
-    /// [`fetch`](Self::fetch) into the source `cargo metadata` already
-    /// extracted — no probe, no network — so registry dependencies are
-    /// discoverable exactly like path ones. A dependency whose source can't be
-    /// served from cache is skipped.
-    ///
-    /// Offers are consent-gated by the caller: the PM offers, the
-    /// `[plugins]` config enables.
-    async fn list_plugins(&self, deps: &[PackageId]) -> Result<Vec<PluginInfo>> {
-        let mut offers = Vec::new();
+    /// its source, then inspected. A workspace dependency resolves into the
+    /// source `cargo metadata` already extracted — no probe, no network — so
+    /// registry dependencies are surfaced exactly like path ones. A dependency
+    /// whose source can't be served from cache is skipped.
+    async fn active_plugins(&self, deps: &[PackageId]) -> Vec<ParsedPlugin> {
+        let mut out = Vec::new();
         for id in deps.iter().filter(|id| id.pm == CARGO_PM) {
             // Fetch by name only: the concrete version in `id` would make
             // `fetch` treat it as an explicit `--version` and probe, bypassing
-            // the workspace-source shortcut. The resolved version is recovered
-            // from the fetched id.
+            // the workspace-source shortcut.
             let fetched = match self
                 .fetch(&Self::id_for(&id.name, None), UpdateLevel::None)
                 .await
@@ -202,16 +185,27 @@ impl PackageManager for CargoPm {
                     continue;
                 }
             };
-            if let Some(kind) = embedded_plugin_kind(&fetched.root) {
-                offers.push(PluginInfo {
-                    id: fetched.id,
-                    description: Some(kind.to_string()),
-                    subpath: None,
-                    recommends: Some(id.name.clone()),
-                });
+            // Only surface dependencies that actually embed plugin content.
+            if embedded_plugin_kind(&fetched.root).is_some() {
+                out.extend(self.build_from_fetched(fetched));
             }
         }
-        Ok(offers)
+        out
+    }
+
+    /// Resolve a specific crate id to its plugin (a chained reference or an
+    /// enabled crate). Unlike `active_plugins`, this loads the named crate
+    /// whatever it embeds — any fetchable crate yields at least the default
+    /// `skills/` plugin. Fetched cache-only.
+    async fn load_plugin(&self, id: &PackageId) -> Vec<ParsedPlugin> {
+        let fetched = match self.fetch(id, UpdateLevel::None).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(id = %id, error = %e, "failed to fetch crate for plugin");
+                return Vec::new();
+            }
+        };
+        self.build_from_fetched(fetched).into_iter().collect()
     }
 
     /// Search crates.io for crates matching `query`.
@@ -237,8 +231,6 @@ impl PackageManager for CargoPm {
             .map(|c| PluginInfo {
                 id: PackageId::new(CARGO_PM, c.name, c.max_version),
                 description: c.description,
-                subpath: None,
-                recommends: None,
             })
             .collect())
     }
@@ -266,18 +258,13 @@ impl PackageManager for CargoPm {
             .map(|c| PackageId::new(CARGO_PM, c.name.clone(), c.version.to_string()))
             .collect())
     }
-
-    /// A crate's cache location depends on how it resolved (path override,
-    /// registry cache, download), so it can't be answered from the id alone.
-    fn cached_root(&self, _id: &PackageId) -> Option<PathBuf> {
-        None
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pm::WorkspaceCrate;
+    use std::path::PathBuf;
 
     /// A path dependency: `source_dir` defaults to its local path.
     fn path_dep(name: &str, dir: PathBuf) -> WorkspaceCrate {
@@ -300,7 +287,7 @@ mod tests {
         std::fs::write(with_skills.join("skills/guidance/SKILL.md"), "").unwrap();
 
         // A *registry* dependency (no path) with an extracted source that
-        // embeds a manifest — discoverable now that `list_plugins` fetches.
+        // embeds a manifest — surfaced now that `active_plugins` fetches.
         let registry_embedded = tmp.path().join("registry-embedded");
         std::fs::create_dir_all(&registry_embedded).unwrap();
         std::fs::write(registry_embedded.join("SYMPOSIUM.toml"), "").unwrap();
@@ -322,25 +309,15 @@ mod tests {
             crates,
         ));
 
-        let offers = pm.list_plugins(&deps).await.unwrap();
-        let got: Vec<(&str, Option<&str>)> = offers
-            .iter()
-            .map(|o| (o.id.name.as_str(), o.recommends.as_deref()))
-            .collect();
-        assert_eq!(
-            got,
-            vec![
-                ("with-skills", Some("with-skills")),
-                ("registry-embedded", Some("registry-embedded")),
-            ]
-        );
-        assert!(offers.iter().all(|o| o.id.pm == CARGO_PM));
-        assert!(
-            offers[0]
-                .description
-                .as_deref()
-                .unwrap()
-                .contains("skills/")
-        );
+        let active = pm.active_plugins(&deps).await;
+        let got: Vec<&str> = active.iter().map(|p| p.canonical.name.as_str()).collect();
+        // `plain` embeds nothing, so it is not surfaced.
+        assert_eq!(got, vec!["with-skills", "registry-embedded"]);
+        assert!(active.iter().all(|p| p.canonical.pm == CARGO_PM));
+        // The default `skills/` group resolved to an absolute directory.
+        assert!(active[0].plugin.skills.iter().any(|g| matches!(
+            &g.source,
+            crate::plugins::PluginSource::Path(d) if d.is_absolute()
+        )));
     }
 }

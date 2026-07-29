@@ -44,7 +44,7 @@ use std::sync::Arc;
 use crate::config::Symposium;
 use crate::crate_sources::normalize_crate_name;
 use crate::output::Output;
-use crate::pm::{CARGO_PM, PackageId, PluginInfo};
+use crate::pm::{CARGO_PM, PackageId};
 use crate::report::ReportEvent;
 
 /// Why a discovered offer is (or is not) enabled.
@@ -121,28 +121,22 @@ pub async fn discover(sym: &Symposium, deps: &Arc<WorkspaceDeps>) -> Discovery {
     let Some(workspace_root) = deps.workspace_root().map(Path::to_path_buf) else {
         return Discovery::default();
     };
-    let dep_ids = crate::pm::workspace_dep_ids(sym, deps).await;
     let pms = sym.package_managers(deps);
+    let dep_ids = pms.list_deps().await.unwrap_or_default();
 
     let mut discovery = Discovery::default();
-    for inst in pms.instances() {
-        let offers = match inst.pm.list_plugins(&dep_ids).await {
-            Ok(offers) => offers,
-            Err(e) => {
-                tracing::debug!(instance = %inst.name, error = %e, "cannot list plugins");
-                continue;
-            }
-        };
-        for offer in offers {
-            let Some(recommends) = matched_dependency(&offer, &dep_ids) else {
-                continue;
-            };
-            let enablement = decide(sym, consent_name(&offer), &workspace_root);
+    // Untrusted instances = the cargo transport: its `active_plugins` are the
+    // plugins embedded in dependencies, which run only with consent. Classify
+    // each against the `[plugins]` config.
+    for inst in pms.instances().filter(|i| !i.trusted) {
+        for plugin in inst.pm.active_plugins(&dep_ids).await {
+            let name = plugin.canonical.name.clone();
+            let enablement = decide(sym, &name, &workspace_root);
             let discovered = DiscoveredPlugin {
                 registry: inst.name.clone(),
-                id: offer.id,
-                recommends,
-                description: offer.description,
+                id: plugin.canonical,
+                recommends: name,
+                description: None,
                 enablement,
             };
             match enablement {
@@ -320,14 +314,6 @@ pub async fn prompt_for_consent(
 /// workspace has it. Ecosystem-agnostic on purpose: `recommends` is a bare
 /// name, so an offer from one PM can recommend a plugin for another's
 /// package.
-fn matched_dependency(offer: &PluginInfo, dep_ids: &[PackageId]) -> Option<String> {
-    let recommends = normalize_crate_name(offer.recommends.as_deref()?);
-    dep_ids
-        .iter()
-        .find(|id| normalize_crate_name(&id.name) == recommends)
-        .map(|id| id.name.clone())
-}
-
 /// Classify one offer against the `[plugins]` config. An explicit decision —
 /// `use`, then `disable` — outranks the standing `auto-enable`, so a name the
 /// user declined stays declined.
@@ -341,16 +327,6 @@ fn decide(sym: &Symposium, name: &str, workspace_root: &Path) -> Enablement {
         Enablement::AutoEnabled
     } else {
         Enablement::Candidate
-    }
-}
-
-/// The name a consent decision about an offer is recorded under: the offered
-/// package's own name, or — for a positional registry entry, whose name is a
-/// namespaced path like `cargo/serde` — the dependency it recommends.
-fn consent_name(offer: &PluginInfo) -> &str {
-    match &offer.recommends {
-        Some(dep) if offer.subpath.is_some() => dep,
-        _ => &offer.id.name,
     }
 }
 

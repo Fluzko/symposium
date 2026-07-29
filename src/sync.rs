@@ -315,7 +315,8 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     // reached through `[[plugins]]` chained references and dependency
     // enablement. Every facet resolves over this one set, so a crate plugin's
     // skills and MCP servers install exactly like a registry plugin's.
-    let active = skills::active_plugins(sym, &registry, deps, Some(&project_root), &mut ctx).await;
+    let pms = sym.package_managers(deps);
+    let active = skills::active_plugins(sym, &registry, &pms, Some(&project_root), &mut ctx).await;
 
     // Find all applicable skills.
     let applicable = skills::collect_skills(sym, &active, &mut ctx, update).await;

@@ -1220,19 +1220,18 @@ pub async fn list_plugins(sym: &Symposium) -> Vec<ProviderInfo> {
     let mut by_registry: std::collections::HashMap<String, Vec<PluginInfo>> =
         std::collections::HashMap::new();
 
-    let (offers, _warnings) = list_plugin_offers(&pms).await;
-    for offer in offers {
-        let Some(Ok(p)) = load_offer(&offer) else {
-            continue;
-        };
-        by_registry
-            .entry(offer.registry_name.clone())
-            .or_default()
-            .push(PluginInfo {
-                name: p.plugin.name,
-                hooks_count: p.plugin.hooks.len(),
-                skill_groups_count: p.plugin.skills.len(),
-            });
+    // Trusted instances only: registry entries, not dependency-embedded crates.
+    for inst in pms.instances().filter(|i| i.trusted) {
+        for p in inst.pm.active_plugins(&[]).await {
+            by_registry
+                .entry(inst.name.clone())
+                .or_default()
+                .push(PluginInfo {
+                    name: p.plugin.name,
+                    hooks_count: p.plugin.hooks.len(),
+                    skill_groups_count: p.plugin.skills.len(),
+                });
+        }
     }
 
     sym.registries()
@@ -1257,12 +1256,11 @@ pub async fn list_plugins(sym: &Symposium) -> Vec<ProviderInfo> {
 /// Find a plugin by name across all registries. First match wins.
 pub async fn find_plugin(sym: &Symposium, name: &str) -> Option<ParsedPlugin> {
     let pms = sym.detached_managers();
-    let (offers, _warnings) = list_plugin_offers(&pms).await;
-    for offer in offers {
-        if let Some(Ok(parsed_plugin)) = load_offer(&offer)
-            && parsed_plugin.plugin.name == name
-        {
-            return Some(*parsed_plugin);
+    for inst in pms.instances().filter(|i| i.trusted) {
+        for parsed in inst.pm.active_plugins(&[]).await {
+            if parsed.plugin.name == name {
+                return Some(parsed);
+            }
         }
     }
     None
@@ -1277,98 +1275,23 @@ async fn fetch_registry(sym: &Symposium, git_url: &str, update: UpdateLevel) -> 
     cache_mgr.fetch_url(git_url, update).await
 }
 
-/// One package offered by a PM instance, located on disk: the instance's
-/// display name (origin attribution), the source content root, and the
-/// package's directory within it.
-struct PluginOffer {
-    registry_name: String,
-    /// Registry content root. `ParsedPlugin::source_dir` — the base for a
-    /// plugin's `source.path` groups — is always this, not the entry dir.
-    root: PathBuf,
-    /// The package's directory relative to `root`.
-    subpath: PathBuf,
-}
-
-impl PluginOffer {
-    /// The directory holding this offer's package.
-    fn dir(&self) -> PathBuf {
-        self.root.join(&self.subpath)
-    }
-}
-
-/// Every positional package offered by the configured **registry** instances,
-/// located on disk, plus warnings for instances that could not be listed (e.g.
-/// a misconfigured registry whose root is itself a plugin). Ecosystem
-/// transports (cargo) are intentionally excluded: registry loading consumes
-/// only positional entries (which transports never offer), and a transport's
-/// `list_plugins` may fetch, so it must not run on this per-event path —
-/// dependency-embedded crates load through discovery / chained references.
-///
-/// Does no network I/O — `list_plugins` and `cached_root` both serve from
-/// what is already on disk; a git registry that was never fetched offers
-/// nothing.
-async fn list_plugin_offers(pms: &crate::pm::PmRegistry) -> (Vec<PluginOffer>, Vec<LoadWarning>) {
-    let mut offers = Vec::new();
-    let mut warnings = Vec::new();
-    for inst in pms.registries() {
-        let infos = match inst.pm.list_plugins(&[]).await {
-            Ok(infos) => infos,
-            Err(e) => {
-                tracing::warn!(registry = %inst.name, error = %e, "cannot list registry");
-                warnings.push(LoadWarning {
-                    path: PathBuf::new(),
-                    message: format!("cannot list registry `{}`: {e:#}", inst.name),
-                });
-                continue;
-            }
-        };
-        for info in infos {
-            // Registry loading only consumes positional registry entries;
-            // offers without a subpath (dependency-embedded crates) are the
-            // chained-plugin flow's concern.
-            let Some(subpath) = info.subpath else {
-                continue;
-            };
-            let Some(entry_dir) = inst.pm.cached_root(&info.id) else {
-                tracing::warn!(registry = %inst.name, id = %info.id, "cannot locate plugin package");
-                continue;
-            };
-            // The instance built the entry dir as `<content root>/<subpath>`;
-            // peel the subpath back off to recover the attribution root.
-            let mut root = entry_dir;
-            for _ in subpath.components() {
-                root.pop();
-            }
-            offers.push(PluginOffer {
-                registry_name: inst.name.clone(),
-                root,
-                subpath,
-            });
-        }
-    }
-    (offers, warnings)
-}
-
-/// Interpret one offer's package as a plugin. A `SYMPOSIUM.toml` entry loads
-/// as an ordinary registry plugin; a bare `SKILL.md` entry is synthesized into
-/// a default plugin ([`load_standalone_skill_plugin`]). `None` when the
-/// directory is neither (e.g. it disappeared since it was listed).
-fn load_offer(offer: &PluginOffer) -> Option<Result<Box<ParsedPlugin>>> {
-    let dir = offer.dir();
+/// Load the plugin at `root/subpath` as a registry entry: a `SYMPOSIUM.toml`
+/// manifest loads as an ordinary registry plugin; a bare `SKILL.md` is
+/// synthesized into a default plugin ([`load_standalone_skill_plugin`]). `None`
+/// when the directory is neither. Called by [`PathPm`](crate::pm::PathPm).
+pub(crate) fn load_entry(
+    root: &Path,
+    subpath: &Path,
+    source_name: &str,
+) -> Option<Result<ParsedPlugin>> {
+    let dir = root.join(subpath);
     match crate::pm::layout::classify(&dir)? {
         crate::pm::layout::EntryKind::Plugin(toml_path) => Some(
-            load_plugin_as(
-                &toml_path,
-                &offer.registry_name,
-                &offer.root,
-                ManifestOrigin::Registry,
-            )
-            .map(Box::new)
-            .with_context(|| format!("loading plugin from `{}`", toml_path.display())),
+            load_plugin_as(&toml_path, source_name, root, ManifestOrigin::Registry)
+                .with_context(|| format!("loading plugin from `{}`", toml_path.display())),
         ),
         crate::pm::layout::EntryKind::Skill(skill_md) => Some(
-            load_standalone_skill_plugin(&skill_md, &offer.registry_name, &offer.root)
-                .map(Box::new)
+            load_standalone_skill_plugin(&skill_md, source_name, root)
                 .with_context(|| format!("loading skill from `{}`", skill_md.display())),
         ),
     }
@@ -1489,22 +1412,14 @@ async fn load_registry_impl(
 ) -> PluginRegistry {
     let pms = sym.detached_managers();
     let mut plugins = Vec::new();
+    let mut warnings = Vec::new();
 
-    let (offers, mut warnings) = list_plugin_offers(&pms).await;
-    for offer in offers {
-        match load_offer(&offer) {
-            Some(Ok(p)) => plugins.push(*p),
-            Some(Err(e)) => {
-                tracing::warn!(error = %e, "failed to load plugin");
-                warnings.push(LoadWarning {
-                    path: offer.dir(),
-                    // `{e:#}` renders the full cause chain, so the warning
-                    // names both the failing file and the underlying reason.
-                    message: format!("failed to load plugin: {e:#}"),
-                });
-            }
-            None => {}
-        }
+    // Trust roots only: the configured registries (and, below, the workspace).
+    // Dependency-embedded crate plugins are not trust roots — they reach the
+    // active set through discovery / consent and the driver's `load_plugin`,
+    // never here. Each registry instance logs its own load failures.
+    for inst in pms.instances().filter(|i| i.trusted) {
+        plugins.extend(inst.pm.active_plugins(&[]).await);
     }
 
     if let Some(ws) = workspace {

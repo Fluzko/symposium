@@ -8,9 +8,11 @@
 //! **transport** ([`CargoPm`]) can `fetch` any id of its ecosystem, because the
 //! id carries the source; a **registry instance** ([`PathPm`]) fronts one
 //! configured source and enumerates the packages it contains. [`PmRegistry`]
-//! holds both tiers: transports are dispatched by [`PackageId::pm`] for
-//! `fetch` / `cached_root` / `list_deps`, while discovery (`list_plugins` /
-//! `search`) iterates everything.
+//! holds them as one flat set: an id is dispatched to the instance whose
+//! [`PackageManager::name`] matches its [`PackageId::pm`], and plugin loading
+//! ([`active_plugins`](PackageManager::active_plugins) /
+//! [`load_plugin`](PackageManager::load_plugin) / `search`) iterates every
+//! instance.
 //!
 //! A registry instance's [`PackageManager::name`] is the *configured registry
 //! name* (`user-plugins`, `symposium-recommendations`, …), which is also the
@@ -26,6 +28,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use symposium_install::UpdateLevel;
+
+use crate::plugins::ParsedPlugin;
 
 mod cargo;
 pub mod layout;
@@ -76,11 +80,8 @@ impl std::fmt::Display for PackageId {
     }
 }
 
-/// What a PM knows about a plugin *before* its content is on disk: the
-/// canonical identity plus whatever metadata its registry offers. This is what
-/// [`list_plugins`](PackageManager::list_plugins) and
-/// [`search`](PackageManager::search) return — pass [`Self::id`] to
-/// [`fetch`](PackageManager::fetch) to materialize the content.
+/// What [`search`](PackageManager::search) knows about a candidate package
+/// before its content is on disk: its identity and an optional description.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginInfo {
     /// Canonical identity. The version component may still be a requirement
@@ -88,24 +89,14 @@ pub struct PluginInfo {
     pub id: PackageId,
     /// Human-oriented description when the PM's registry provides one.
     pub description: Option<String>,
-    /// For registry-instance offers: the package's directory within the
-    /// registry source. `None` for offers that aren't positional registry
-    /// entries (e.g. dependency-embedded crates).
-    pub subpath: Option<PathBuf>,
-    /// The dependency this entry recommends a plugin for. Name-only and
-    /// ecosystem-agnostic on purpose: the gate it implies
-    /// (`depends-on(<name>)`) matches a dependency from any PM.
-    pub recommends: Option<String>,
 }
 
 impl PluginInfo {
-    /// An info with no registry metadata — just the identity.
+    /// An info with just the identity.
     pub fn from_id(id: PackageId) -> Self {
         Self {
             id,
             description: None,
-            subpath: None,
-            recommends: None,
         }
     }
 }
@@ -126,6 +117,15 @@ pub struct FetchedPackage {
 /// directory), so operations take no ambient context. This mirrors the
 /// out-of-process shape — a PM spawned for a workspace answers RPC calls from
 /// its own state, with nothing workspace-shaped threaded per call.
+///
+/// Loading has two forms. [`active_plugins`](Self::active_plugins) is what the
+/// PM activates for the workspace's dependency set (a registry lists its
+/// entries; the cargo transport surfaces dependency-embedded plugins);
+/// [`load_plugin`](Self::load_plugin) resolves a *specific* id named elsewhere
+/// (a `[[plugins]]` chained reference, an explicitly enabled crate). Both return
+/// fully-resolved [`ParsedPlugin`]s (absolute skill dirs) and are best-effort —
+/// failures are logged and dropped, not surfaced, so one bad plugin never
+/// aborts a sync or hook.
 #[async_trait::async_trait]
 pub trait PackageManager {
     /// The PM's registry name — the `pm` component of every id it owns. For
@@ -133,110 +133,91 @@ pub trait PackageManager {
     /// instance it is the configured registry's name.
     fn name(&self) -> &str;
 
-    /// The plugin-bearing packages this PM offers for the given workspace
-    /// dependency set. This is the input-less form of the RFD's `resolve`: a
-    /// registry instance lists its own source; ecosystem PMs use `deps` to
-    /// surface dependency-matched plugins.
-    ///
-    /// Must not fetch or touch the network — read-only callers (help
-    /// rendering, hook dispatch) rely on this serving from cache.
-    async fn list_plugins(&self, deps: &[PackageId]) -> Result<Vec<PluginInfo>>;
+    /// The plugins this PM activates for the workspace's dependency set. A
+    /// registry lists its own entries (deps ignored); the cargo transport
+    /// surfaces the plugins its dependencies embed. Whether a dependency-embedded
+    /// plugin is *trusted* is the caller's decision — see [`PmInstance::trusted`].
+    async fn active_plugins(&self, deps: &[PackageId]) -> Vec<ParsedPlugin>;
 
-    /// Find packages matching a partial query. PMs without a searchable
-    /// registry return an empty list.
-    async fn search(&self, query: &str) -> Result<Vec<PluginInfo>>;
+    /// The plugin(s) a specific id maps to — zero, one, or many. Used for
+    /// `[[plugins]]` chained references and explicitly enabled crates.
+    async fn load_plugin(&self, id: &PackageId) -> Vec<ParsedPlugin>;
 
-    /// Acquire the package's content into a local directory, canonicalizing
-    /// the id's version component. `update` controls how aggressively an
-    /// already-cached package is refreshed.
-    async fn fetch(&self, id: &PackageId, update: UpdateLevel) -> Result<FetchedPackage>;
-
-    /// The package ids the current workspace depends on. PMs with no
-    /// workspace notion return an empty list.
+    /// The package ids the current workspace depends on. Empty for PMs with no
+    /// workspace notion.
     async fn list_deps(&self) -> Result<Vec<PackageId>>;
 
-    /// Where a previously fetched package's content lives on disk, computed
-    /// without fetching or touching the network. `None` when the PM can't
-    /// answer from the id alone.
-    fn cached_root(&self, id: &PackageId) -> Option<PathBuf>;
+    /// Find packages matching a partial query (backs `use` / `search`). PMs
+    /// without a searchable registry return an empty list.
+    async fn search(&self, query: &str) -> Result<Vec<PluginInfo>>;
+
+    /// Acquire a package's source content, canonicalizing the id's version.
+    /// `update` controls how aggressively an already-cached package is refreshed.
+    async fn fetch(&self, id: &PackageId, update: UpdateLevel) -> Result<FetchedPackage>;
 }
 
-/// A package-manager instance paired with its attribution name: the config
-/// source name for registry instances, the pm name for the built-in
-/// transports. The name labels what the instance's plugins are loaded *as*.
+/// A package-manager instance: its attribution name (the config registry name,
+/// or `cargo` for the transport — the `pm` component of every id it owns), a
+/// trust marker, and the PM itself.
 pub struct PmInstance {
     pub name: String,
+    /// Whether this instance's [`active_plugins`](PackageManager::active_plugins)
+    /// are trust roots. Registries and the workspace are trusted; the cargo
+    /// transport is not, since its `active_plugins` are the plugins *embedded in
+    /// dependencies*, which run only with the user's consent.
+    pub trusted: bool,
     pub pm: Box<dyn PackageManager + Send + Sync>,
 }
 
-/// The active set of package-manager instances, in two tiers: the fixed
-/// per-ecosystem transports and the config-derived registry instances.
+/// The active set of package-manager instances — one flat collection, the cargo
+/// transport alongside one instance per configured registry. Ids are dispatched
+/// by their `pm` component ([`PackageId::pm`]) to the instance that owns them.
 pub struct PmRegistry {
-    /// One transport per ecosystem, always present.
-    transports: Vec<PmInstance>,
-    /// One instance per configured registry.
-    registries: Vec<PmInstance>,
+    instances: Vec<PmInstance>,
 }
 
 impl PmRegistry {
-    /// The fixed transports (built over `workspace`) plus the given registry
-    /// instances. `new(vec![], workspace)` is a transport-only set for callers
-    /// that just need `fetch` or `list_deps`.
-    pub fn new(registries: Vec<PmInstance>, workspace: Arc<WorkspaceDeps>) -> Self {
-        Self {
-            transports: vec![PmInstance {
-                name: CARGO_PM.to_string(),
-                pm: Box::new(CargoPm::new(workspace)),
-            }],
-            registries,
-        }
+    pub fn new(instances: Vec<PmInstance>) -> Self {
+        Self { instances }
     }
 
-    /// All active instances: transports first, then registries in config order.
+    /// Every instance, in order (cargo transport first, then registries).
     pub fn instances(&self) -> impl Iterator<Item = &PmInstance> {
-        self.transports.iter().chain(self.registries.iter())
+        self.instances.iter()
     }
 
-    /// The configured registry instances only (no ecosystem transports). Used
-    /// by registry loading, which consumes only positional registry entries —
-    /// transports never offer those, and their `list_plugins` may now fetch, so
-    /// they must stay off the per-event load path.
-    pub fn registries(&self) -> impl Iterator<Item = &PmInstance> {
-        self.registries.iter()
-    }
-
-    /// The transport owning the named ecosystem.
-    fn transport_for(
-        &self,
-        pm: &str,
-        id: &PackageId,
-    ) -> Result<&(dyn PackageManager + Send + Sync)> {
-        self.transports
+    /// The instance owning the named ecosystem/registry.
+    fn owner(&self, pm: &str, id: &PackageId) -> Result<&(dyn PackageManager + Send + Sync)> {
+        self.instances
             .iter()
             .find(|inst| inst.pm.name() == pm)
             .map(|inst| inst.pm.as_ref())
             .ok_or_else(|| anyhow::anyhow!("unknown package manager `{pm}` in package id `{id}`"))
     }
 
-    /// Fetch a package via the transport named in its id.
+    /// Fetch a package via the instance named in its id.
     pub async fn fetch(&self, id: &PackageId, update: UpdateLevel) -> Result<FetchedPackage> {
-        self.transport_for(&id.pm, id)?.fetch(id, update).await
+        self.owner(&id.pm, id)?.fetch(id, update).await
     }
 
-    /// Union of `list_deps` across the ecosystems — the workspace's full
+    /// Union of `list_deps` across the instances — the workspace's full
     /// dependency set for discovery and `depends-on` predicate evaluation.
     pub async fn list_deps(&self) -> Result<Vec<PackageId>> {
         let mut deps = Vec::new();
-        for inst in &self.transports {
+        for inst in &self.instances {
             deps.extend(inst.pm.list_deps().await?);
         }
         Ok(deps)
     }
 
-    /// Where a fetched package's content lives, via the transport named in its
-    /// id. No fetching, no network.
-    pub fn cached_root(&self, id: &PackageId) -> Result<Option<PathBuf>> {
-        Ok(self.transport_for(&id.pm, id)?.cached_root(id))
+    /// Load the plugin(s) an id maps to, asking every instance. Any instance may
+    /// contribute a plugin relevant to the id, so this can return several.
+    pub async fn load_plugin(&self, id: &PackageId) -> Vec<ParsedPlugin> {
+        let mut out = Vec::new();
+        for inst in &self.instances {
+            out.extend(inst.pm.load_plugin(id).await);
+        }
+        out
     }
 
     /// Search every instance for packages matching `query`, tagged with the
@@ -287,9 +268,9 @@ mod tests {
     #[tokio::test]
     async fn registry_rejects_unknown_pm() {
         let tmp = tempfile::tempdir().unwrap();
-        let deps = WorkspaceDeps::fixture(tmp.path().to_path_buf(), vec![]);
+        let _ = tmp;
         let id = PackageId::any_version("npm", "leftpad");
-        let err = PmRegistry::new(vec![], deps)
+        let err = PmRegistry::new(vec![])
             .fetch(&id, UpdateLevel::None)
             .await
             .unwrap_err();

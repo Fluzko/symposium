@@ -555,18 +555,25 @@ impl Symposium {
         &self,
         workspace: &Arc<crate::pm::WorkspaceDeps>,
     ) -> crate::pm::PmRegistry {
-        let instances = self
-            .registries()
-            .into_iter()
-            .filter_map(|resolved| {
-                let dir = resolved.content_dir(self.cache_dir())?;
-                let name = resolved.registry.name;
-                let pm: Box<dyn crate::pm::PackageManager + Send + Sync> =
-                    Box::new(crate::pm::PathPm::new(name.clone(), dir));
-                Some(crate::pm::PmInstance { name, pm })
+        // The cargo transport first — over dependencies, so not a trust root.
+        let mut instances = vec![crate::pm::PmInstance {
+            name: crate::pm::CARGO_PM.to_string(),
+            trusted: false,
+            pm: Box::new(crate::pm::CargoPm::new(Arc::clone(workspace))),
+        }];
+        // One registry instance per configured registry — trust roots.
+        instances.extend(self.registries().into_iter().filter_map(|resolved| {
+            let dir = resolved.content_dir(self.cache_dir())?;
+            let name = resolved.registry.name;
+            let pm: Box<dyn crate::pm::PackageManager + Send + Sync> =
+                Box::new(crate::pm::PathPm::new(name.clone(), dir));
+            Some(crate::pm::PmInstance {
+                name,
+                trusted: true,
+                pm,
             })
-            .collect();
-        crate::pm::PmRegistry::new(instances, Arc::clone(workspace))
+        }));
+        crate::pm::PmRegistry::new(instances)
     }
 
     /// The package managers for a workspace-independent operation (registry

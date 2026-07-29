@@ -101,10 +101,11 @@ pub async fn render_help(sym: &Symposium, cwd: &Path) -> String {
 
     // Resolve the active plugin set so crate-sourced subcommands appear in help.
     let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used);
+    let pms = sym.package_managers(&deps);
     let active = crate::skills::active_plugins(
         sym,
         &registry,
-        &deps,
+        &pms,
         workspace.as_ref().map(|ws| ws.root.as_path()),
         &mut ctx,
     )

@@ -1142,7 +1142,6 @@ mod tests {
             requires_use: false,
         };
         crate::plugins::ParsedPlugin {
-            manifest_path: Some(std::path::PathBuf::from("test.toml")),
             plugin,
             workspace_member: false,
             canonical: PackageId::new("test", "test-plugin", ANY_VERSION),

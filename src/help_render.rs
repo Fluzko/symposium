@@ -195,7 +195,7 @@ fn collect_section(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::collections::BTreeMap;
 
     use expect_test::expect;
 
@@ -221,7 +221,6 @@ mod tests {
         subcommands: BTreeMap<String, Subcommand>,
     ) -> ParsedPlugin {
         ParsedPlugin {
-            manifest_path: Some(PathBuf::from(format!("/test/{name}.toml"))),
             plugin: Plugin {
                 name: name.into(),
                 hooks: vec![],

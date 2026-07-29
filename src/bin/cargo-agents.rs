@@ -302,18 +302,22 @@ async fn handle_plugin_command(sym: &config::Symposium, command: PluginCommand) 
             }
         }
         PluginCommand::Show { plugin } => match plugins::find_plugin(sym, &plugin).await {
-            Some(p) => match p.manifest_path {
-                Some(manifest) => {
-                    println!("# Source: {}", manifest.display());
-                    println!();
-                    print!("{}", tokio::fs::read_to_string(manifest).await.unwrap());
-                    ExitCode::SUCCESS
+            // A plugin is identified by its id; render its effective (resolved)
+            // configuration rather than re-reading a manifest file.
+            Some(p) => {
+                println!("# {}", p.canonical);
+                match toml::to_string_pretty(&p.plugin) {
+                    Ok(rendered) => {
+                        println!();
+                        print!("{rendered}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("cannot render `{}`: {e}", p.canonical);
+                        ExitCode::FAILURE
+                    }
                 }
-                None => {
-                    println!("# {plugin}: synthesized plugin (no manifest file)");
-                    ExitCode::SUCCESS
-                }
-            },
+            }
             None => {
                 eprintln!("Plugin not found: {plugin}");
                 ExitCode::FAILURE
@@ -328,7 +332,7 @@ fn emit_validation_results(r: &plugins::ValidationResult) -> usize {
         Ok(()) => {
             tracing::info!(
                 report = %report::ReportEvent::Validated {
-                    path: r.path.display().to_string(),
+                    path: r.id.clone(),
                     item_kind: r.kind.to_string(),
                     valid: true,
                     error: None,
@@ -339,7 +343,7 @@ fn emit_validation_results(r: &plugins::ValidationResult) -> usize {
         Err(e) => {
             tracing::info!(
                 report = %report::ReportEvent::Validated {
-                    path: r.path.display().to_string(),
+                    path: r.id.clone(),
                     item_kind: r.kind.to_string(),
                     valid: false,
                     error: Some(e.to_string()),

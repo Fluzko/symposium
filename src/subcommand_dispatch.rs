@@ -185,7 +185,7 @@ mod tests {
     use crate::plugins::PluginRegistry;
     use crate::pm::ANY_VERSION;
     use crate::{plugins::Audience, predicate::PredicateSet};
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::collections::BTreeMap;
 
     fn ws_crate(name: &str, version: &str) -> PackageId {
         PackageId::new(crate::pm::CARGO_PM, name, version)
@@ -202,7 +202,6 @@ mod tests {
     ) -> ParsedPlugin {
         ParsedPlugin {
             canonical: PackageId::new("test", name, ANY_VERSION),
-            manifest_path: Some(PathBuf::from(format!("/test/{name}.toml"))),
             plugin: Plugin {
                 name: name.into(),
                 predicates: crate_set(depends_on),

@@ -1220,7 +1220,6 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                manifest_path: Some(tmp.path().join("plugin.toml")),
                 plugin,
                 workspace_member: false,
             }],
@@ -1280,7 +1279,6 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                manifest_path: Some(tmp.path().join("plugin.toml")),
                 plugin,
                 workspace_member: false,
             }],
@@ -1358,7 +1356,6 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                manifest_path: Some(tmp.path().join("plugin.toml")),
                 plugin,
                 workspace_member: false,
             }],
@@ -1441,7 +1438,6 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                manifest_path: Some(tmp.path().join("plugin.toml")),
                 plugin,
                 workspace_member: false,
             }],
@@ -1525,7 +1521,6 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                manifest_path: Some(tmp.path().join("plugin.toml")),
                 plugin,
                 workspace_member: false,
             }],
@@ -1654,7 +1649,6 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: crate::pm::PackageId::any_version("recs", "my-skill"),
-                manifest_path: Some(skill_dir.join("SKILL.md")),
                 plugin,
                 workspace_member: false,
             }],

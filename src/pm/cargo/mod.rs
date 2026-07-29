@@ -110,9 +110,6 @@ impl CargoPm {
         crate::plugins::resolve_group_sources(&mut plugin, &fetched.root, &fetched.root);
 
         Some(ParsedPlugin {
-            // Only a real `SYMPOSIUM.toml` is a manifest to show; a plugin built
-            // from `Cargo.toml` metadata or crate defaults is synthesized.
-            manifest_path: file.is_some().then_some(manifest_path),
             plugin,
             workspace_member: false,
             canonical: fetched.id,

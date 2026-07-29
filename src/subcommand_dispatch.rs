@@ -201,7 +201,7 @@ mod tests {
     ) -> ParsedPlugin {
         ParsedPlugin {
             canonical: PackageId::new("test", name, ANY_VERSION),
-            path: PathBuf::from(format!("/test/{name}.toml")),
+            manifest_path: Some(PathBuf::from(format!("/test/{name}.toml"))),
             plugin: Plugin {
                 name: name.into(),
                 predicates: crate_set(depends_on),
@@ -214,7 +214,6 @@ mod tests {
                 chained: vec![],
                 requires_use: false,
             },
-            source_dir: PathBuf::from("/test"),
             workspace_member: false,
         }
     }

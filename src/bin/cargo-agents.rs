@@ -289,8 +289,9 @@ async fn handle_plugin_command(sym: &config::Symposium, command: PluginCommand) 
             } else {
                 let parent = path.parent().unwrap_or(&path);
                 match plugins::load_plugin(&path, "", parent) {
-                    Ok(p) => {
-                        println!("{}", tokio::fs::read_to_string(p.path).await.unwrap());
+                    Ok(_) => {
+                        // `path` is the manifest file being validated.
+                        println!("{}", tokio::fs::read_to_string(&path).await.unwrap());
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
@@ -301,12 +302,18 @@ async fn handle_plugin_command(sym: &config::Symposium, command: PluginCommand) 
             }
         }
         PluginCommand::Show { plugin } => match plugins::find_plugin(sym, &plugin).await {
-            Some(p) => {
-                println!("# Source: {}", p.path.display());
-                println!();
-                print!("{}", tokio::fs::read_to_string(p.path).await.unwrap());
-                ExitCode::SUCCESS
-            }
+            Some(p) => match p.manifest_path {
+                Some(manifest) => {
+                    println!("# Source: {}", manifest.display());
+                    println!();
+                    print!("{}", tokio::fs::read_to_string(manifest).await.unwrap());
+                    ExitCode::SUCCESS
+                }
+                None => {
+                    println!("# {plugin}: synthesized plugin (no manifest file)");
+                    ExitCode::SUCCESS
+                }
+            },
             None => {
                 eprintln!("Plugin not found: {plugin}");
                 ExitCode::FAILURE

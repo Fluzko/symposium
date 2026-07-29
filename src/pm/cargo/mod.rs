@@ -100,7 +100,7 @@ impl CargoPm {
             None
         };
 
-        let plugin = match crate::plugins::load_crate_manifest(
+        let mut plugin = match crate::plugins::load_crate_manifest(
             metadata,
             file.as_deref(),
             &fetched.id.name,
@@ -116,9 +116,14 @@ impl CargoPm {
             }
         };
 
+        // The crate source root is both the base for `source.path` groups and
+        // the attribution root for their labels.
+        crate::plugins::resolve_group_sources(&mut plugin, &fetched.root, &fetched.root);
+
         Some(ParsedPlugin {
-            path: manifest_path,
-            source_dir: fetched.root,
+            // Only a real `SYMPOSIUM.toml` is a manifest to show; a plugin built
+            // from `Cargo.toml` metadata or crate defaults is synthesized.
+            manifest_path: file.is_some().then_some(manifest_path),
             plugin,
             workspace_member: false,
             canonical: fetched.id,

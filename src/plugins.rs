@@ -172,9 +172,15 @@ pub struct SkillGroup {
         skip_serializing_if = "crate::predicate::PredicateSet::is_empty"
     )]
     pub predicates: crate::predicate::PredicateSet,
-    /// Remote source for skills.
+    /// Remote source for skills. For a `Path` source this is resolved to an
+    /// absolute directory by the package manager before the plugin reaches
+    /// core symposium.
     #[serde(default)]
     pub source: PluginSource,
+    /// Display label for the resolved source (`path:<rel>` / `git:<url>`),
+    /// produced by the package manager. `None` until resolved.
+    #[serde(skip)]
+    pub source_label: Option<String>,
     /// The group is defined by a workspace-member plugin. Provenance, stamped
     /// during manifest validation, not manifest content: workspace skills are
     /// informal, so their SKILL.md `name` defaults to the skill directory's
@@ -207,6 +213,7 @@ impl RawSkillGroup {
         Ok(SkillGroup {
             predicates: crate::predicate::PredicateSet::merged(self.depends_on, self.predicates),
             source,
+            source_label: None,
             workspace_member: false,
         })
     }
@@ -398,15 +405,17 @@ pub struct CustomPredicate {
 /// A parsed plugin with its path and manifest.
 #[derive(Debug, Clone)]
 pub struct ParsedPlugin {
-    /// The path from which the plugin was parsed.
-    pub path: PathBuf,
+    /// The manifest file this plugin was parsed from, when it came from one
+    /// (`SYMPOSIUM.toml`, a `Cargo.toml`, or a bare `SKILL.md`). `None` for a
+    /// plugin the package manager *synthesized* with no manifest behind it
+    /// (a bare `skills/` directory, a default-only crate). Diagnostics only —
+    /// skill group directories are resolved to absolute paths by the PM, so no
+    /// core logic depends on it.
+    pub manifest_path: Option<PathBuf>,
 
-    /// The parsed plugin manifest.
+    /// The parsed plugin manifest, with every `source.path` group resolved to
+    /// an absolute directory by the package manager.
     pub plugin: Plugin,
-
-    /// The plugin source's root directory on disk. Used to compute a
-    /// `source.path` group's base directory and its `path:<rel>` report label.
-    pub source_dir: PathBuf,
 
     /// Whether this plugin is defined by a member of the active workspace.
     /// Provenance, stamped by the loader: registry sources stamp `false`;
@@ -1365,6 +1374,32 @@ fn load_offer(offer: &PluginOffer) -> Option<Result<Box<ParsedPlugin>>> {
     }
 }
 
+/// Resolve each `source.path` skill group to an absolute directory and a
+/// display label, given the plugin's own base directory (what the relative
+/// path is joined onto) and the attribution root the label is shown relative
+/// to. Git sources are left untouched — they are fetched at collection time.
+///
+/// This is what lets a `ParsedPlugin` carry absolute skill dirs and no
+/// manifest/base path: the package manager bakes location in before returning.
+pub(crate) fn resolve_group_sources(plugin: &mut Plugin, base_dir: &Path, attribution_root: &Path) {
+    let attribution =
+        fs::canonicalize(attribution_root).unwrap_or_else(|_| attribution_root.into());
+    for group in &mut plugin.skills {
+        let PluginSource::Path(rel) = &group.source else {
+            continue;
+        };
+        let abs = base_dir.join(rel);
+        let abs = fs::canonicalize(&abs).unwrap_or(abs);
+        let label = abs
+            .strip_prefix(&attribution)
+            .unwrap_or(&abs)
+            .display()
+            .to_string();
+        group.source_label = Some(format!("path:{label}"));
+        group.source = PluginSource::Path(abs);
+    }
+}
+
 /// Build a plugin from a bare `SKILL.md` entry (no manifest): a plugin whose
 /// single `source.path = "."` skill group discovers that skill. The plugin is
 /// named for the skill's declared `name` (its identity, falling back to the
@@ -1401,7 +1436,7 @@ fn load_standalone_skill_plugin(
         toml::from_str(r#"source.path = ".""#).expect("static default group");
     let skills = vec![group.validate()?];
 
-    let plugin = Plugin {
+    let mut plugin = Plugin {
         name: name.clone(),
         predicates,
         installations: Vec::new(),
@@ -1413,11 +1448,12 @@ fn load_standalone_skill_plugin(
         chained: Vec::new(),
         requires_use,
     };
+    let base = skill_md.parent().unwrap_or(source_dir);
+    resolve_group_sources(&mut plugin, base, source_dir);
     Ok(ParsedPlugin {
         canonical: PackageId::new(source_name, &name, ANY_VERSION),
-        path: skill_md.to_path_buf(),
+        manifest_path: Some(skill_md.to_path_buf()),
         plugin,
-        source_dir: source_dir.to_path_buf(),
         workspace_member: false,
     })
 }
@@ -1557,7 +1593,7 @@ fn workspace_plugin_for_dir(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
-    let plugin = validate_manifest(
+    let mut plugin = validate_manifest(
         raw,
         ManifestOrigin::WorkspaceMember {
             dir_name,
@@ -1565,12 +1601,12 @@ fn workspace_plugin_for_dir(
         },
     )
     .with_context(|| format!("validating `{}`", manifest_path.display()))?;
+    resolve_group_sources(&mut plugin, dir, workspace_root);
 
     Ok(Some(ParsedPlugin {
         canonical: PackageId::new("local", &plugin.name, ANY_VERSION),
-        path: manifest_path,
+        manifest_path: manifest_path.is_file().then_some(manifest_path),
         plugin,
-        source_dir: workspace_root.to_path_buf(),
         workspace_member: true,
     }))
 }
@@ -1654,7 +1690,14 @@ pub fn validate_source_dir(dir: &Path) -> Result<Vec<ValidationResult>> {
 
     for plugin_result in contents.plugins {
         let (path, plugin, result) = match plugin_result {
-            Ok(parsed) => (parsed.path.clone(), Some(parsed), Ok(())),
+            Ok(parsed) => (
+                parsed
+                    .manifest_path
+                    .clone()
+                    .unwrap_or_else(|| dir.to_path_buf()),
+                Some(parsed),
+                Ok(()),
+            ),
             Err(e) => {
                 let path = dir.join("<unknown>.toml");
                 (path, None, Err(e))
@@ -1665,11 +1708,9 @@ pub fn validate_source_dir(dir: &Path) -> Result<Vec<ValidationResult>> {
 
         // Validate that local skill groups contain discoverable skills.
         if let Some(parsed) = &plugin {
-            let plugin_dir = parsed.path.parent().unwrap_or(dir);
             for group in &parsed.plugin.skills {
-                if let PluginSource::Path(ref rel_path) = group.source {
-                    let joined = plugin_dir.join(rel_path);
-                    let skills_dir: PathBuf = joined.components().collect();
+                if let PluginSource::Path(ref skills_dir) = group.source {
+                    let skills_dir = skills_dir.clone();
                     let found = crate::skills::discover_skills(
                         &skills_dir,
                         group.workspace_member,
@@ -1793,13 +1834,14 @@ fn load_plugin_as(
 ) -> Result<ParsedPlugin> {
     let content = fs::read_to_string(manifest_path)?;
     let manifest: RawPluginManifest = toml::from_str(&content)?;
-    let plugin = validate_manifest(manifest, origin)
+    let mut plugin = validate_manifest(manifest, origin)
         .with_context(|| format!("validating `{}`", manifest_path.display()))?;
+    let base = manifest_path.parent().unwrap_or(source_dir);
+    resolve_group_sources(&mut plugin, base, source_dir);
     Ok(ParsedPlugin {
         canonical: PackageId::new(source_name, &plugin.name, ANY_VERSION),
-        path: manifest_path.to_path_buf(),
+        manifest_path: Some(manifest_path.to_path_buf()),
         plugin,
-        source_dir: source_dir.to_path_buf(),
         // Registry sources are never workspace members; the workspace-plugin
         // loader is the only place that stamps true.
         workspace_member: false,
@@ -2158,7 +2200,7 @@ fn build_custom_predicate_registry(
                 let existing: &ResolvedCustomPredicate = existing;
                 let existing_plugin_name = &plugins[existing.plugin_index].plugin.name;
                 warnings.push(LoadWarning {
-                    path: parsed.path.clone(),
+                    path: parsed.manifest_path.clone().unwrap_or_default(),
                     message: format!(
                         "custom predicate `{}` defined by both `{}` and `{}` — skipping both",
                         cp.name, existing_plugin_name, parsed.plugin.name
@@ -3228,7 +3270,6 @@ mod tests {
 
         for parsed in &plugins {
             assert!(parsed.workspace_member);
-            assert_eq!(parsed.source_dir, root);
             // Groups carry the provenance too: workspace skills load with
             // lenient frontmatter rules.
             assert!(parsed.plugin.skills.iter().all(|g| g.workspace_member));
@@ -3237,14 +3278,15 @@ mod tests {
         // Root and bare member each get the two default groups: `skills/`
         // and the `workspace-member()`-gated `.agents/skills`.
         assert_eq!(plugins[0].plugin.skills.len(), 2);
-        assert_eq!(
-            plugins[1].plugin.skills[0].source,
-            PluginSource::Path(PathBuf::from("skills"))
-        );
-        assert_eq!(
-            plugins[1].plugin.skills[1].source,
-            PluginSource::Path(PathBuf::from(".agents/skills"))
-        );
+        // The PM resolved both default groups to absolute directories.
+        assert!(matches!(
+            &plugins[1].plugin.skills[0].source,
+            PluginSource::Path(p) if p.is_absolute() && p.ends_with("skills")
+        ));
+        assert!(matches!(
+            &plugins[1].plugin.skills[1].source,
+            PluginSource::Path(p) if p.is_absolute() && p.ends_with(".agents/skills")
+        ));
         assert!(!plugins[1].plugin.skills[1].predicates.predicates.is_empty());
         // The opt-out member has no groups.
         assert!(plugins[2].plugin.skills.is_empty());
@@ -3382,9 +3424,8 @@ mod tests {
             requires_use: false,
         };
         let mut parsed = ParsedPlugin {
-            path: PathBuf::from("/test/SYMPOSIUM.toml"),
+            manifest_path: Some(PathBuf::from("/test/SYMPOSIUM.toml")),
             plugin,
-            source_dir: PathBuf::from("/test"),
             workspace_member: false,
             canonical: PackageId::new("test", "test", ANY_VERSION),
         };
@@ -4810,7 +4851,7 @@ mod tests {
 
     fn make_plugin_with_predicate(plugin_name: &str, predicate_name: &str) -> ParsedPlugin {
         ParsedPlugin {
-            path: std::path::PathBuf::from(format!("{plugin_name}.toml")),
+            manifest_path: Some(std::path::PathBuf::from(format!("{plugin_name}.toml"))),
             plugin: Plugin {
                 name: plugin_name.to_string(),
                 predicates: pred_set("*"),
@@ -4835,7 +4876,6 @@ mod tests {
                 chained: vec![],
                 requires_use: false,
             },
-            source_dir: std::path::PathBuf::from("/test"),
             workspace_member: false,
             canonical: PackageId::new("test", plugin_name, ANY_VERSION),
         }

@@ -20,6 +20,15 @@ fn source_display(source: &PluginSource) -> String {
     }
 }
 
+/// The group's resolved source label: the string the package manager attached
+/// to a `Path` source, or the derived form for a `Git` source.
+fn group_source_label(group: &crate::plugins::SkillGroup) -> String {
+    group
+        .source_label
+        .clone()
+        .unwrap_or_else(|| source_display(&group.source))
+}
+
 /// A parsed skill from a SKILL.md file.
 #[derive(Debug, Clone)]
 pub struct Skill {
@@ -278,7 +287,6 @@ async fn load_skills_for_group(
     update: UpdateLevel,
 ) -> Vec<(Skill, String)> {
     let plugin = &parsed.plugin;
-    let plugin_path = parsed.path.as_path();
 
     // Pre-fetch filtering: skip groups whose predicates don't hold (crate
     // matching and runtime checks alike). Done before any git/crates fetch so
@@ -293,12 +301,12 @@ async fn load_skills_for_group(
     let predicates_display = (!predicates_display.is_empty()).then_some(predicates_display);
 
     if !group.predicates.evaluate(ctx) {
-        tracing::debug!(plugin = %plugin_path.display(), "skill group predicates failed, skipping");
+        tracing::debug!(plugin = %plugin.name, "skill group predicates failed, skipping");
         tracing::debug!(
             report = %crate::report::ReportEvent::SkillGroupConsidered {
                 plugin: plugin.name.clone(),
                 group_crates: predicates_display,
-                source: Some(source_display(&group.source)),
+                source: Some(group_source_label(group)),
                 matched: false,
                 skills_found: None,
                 reason: Some("group predicates not satisfied".into()),
@@ -314,7 +322,7 @@ async fn load_skills_for_group(
         report = %crate::report::ReportEvent::SkillGroupConsidered {
             plugin: plugin.name.clone(),
             group_crates: predicates_display,
-            source: Some(source_display(&group.source)),
+            source: Some(group_source_label(group)),
             matched: true,
             skills_found: Some(skills.len()),
             reason: None,
@@ -349,23 +357,15 @@ async fn resolve_group_dirs(
     update: UpdateLevel,
 ) -> Vec<ResolvedSkillDir> {
     let plugin = &parsed.plugin;
-    let plugin_path = parsed.path.as_path();
 
     match &group.source {
-        PluginSource::Path(p) => {
-            let plugin_dir = plugin_path.parent().unwrap_or(plugin_path);
-            let dir = plugin_dir.join(p);
-            let dir = dir.canonicalize().unwrap_or(dir);
-            let rel = dir
-                .strip_prefix(&parsed.source_dir)
-                .unwrap_or(&dir)
-                .display()
-                .to_string();
-
+        // Resolved to an absolute directory by the package manager, so there is
+        // nothing to join here.
+        PluginSource::Path(dir) => {
             vec![ResolvedSkillDir {
-                dir,
+                dir: dir.clone(),
                 plugin_label: plugin.name.clone(),
-                source_label: format!("path:{rel}"),
+                source_label: group_source_label(group),
             }]
         }
         PluginSource::Git(url) => {
@@ -1300,6 +1300,7 @@ mod tests {
             skills: vec![SkillGroup {
                 predicates: pred_set("serde"), // Group targets serde
                 source: PluginSource::Path(PathBuf::from("skills")),
+                source_label: None,
                 workspace_member: false,
             }],
             mcp_servers: vec![],
@@ -1313,9 +1314,8 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                path: tmp.path().join("plugin.toml"),
+                manifest_path: Some(tmp.path().join("plugin.toml")),
                 plugin,
-                source_dir: tmp.path().to_path_buf(),
                 workspace_member: false,
             }],
             warnings: vec![],
@@ -1360,6 +1360,7 @@ mod tests {
             skills: vec![SkillGroup {
                 predicates: pred_set("other-crate"), // But group targets other-crate
                 source: PluginSource::Path(PathBuf::from("skills")),
+                source_label: None,
                 workspace_member: false,
             }],
             mcp_servers: vec![],
@@ -1373,9 +1374,8 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                path: tmp.path().join("plugin.toml"),
+                manifest_path: Some(tmp.path().join("plugin.toml")),
                 plugin,
-                source_dir: tmp.path().to_path_buf(),
                 workspace_member: false,
             }],
             warnings: vec![],
@@ -1438,6 +1438,7 @@ mod tests {
             skills: vec![SkillGroup {
                 predicates: pred_set("serde"), // Group also targets serde
                 source: PluginSource::Path(skill_dir.to_path_buf()),
+                source_label: None,
                 workspace_member: false,
             }],
             mcp_servers: vec![],
@@ -1451,9 +1452,8 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                path: tmp.path().join("plugin.toml"),
+                manifest_path: Some(tmp.path().join("plugin.toml")),
                 plugin,
-                source_dir: tmp.path().to_path_buf(),
                 workspace_member: false,
             }],
             warnings: vec![],
@@ -1521,6 +1521,7 @@ mod tests {
             skills: vec![SkillGroup {
                 predicates: pred_set("serde"),
                 source: PluginSource::Path(skill_dir.to_path_buf()),
+                source_label: None,
                 workspace_member: false,
             }],
             mcp_servers: vec![],
@@ -1534,9 +1535,8 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                path: tmp.path().join("plugin.toml"),
+                manifest_path: Some(tmp.path().join("plugin.toml")),
                 plugin,
-                source_dir: PathBuf::from(".".to_string()),
                 workspace_member: false,
             }],
             warnings: vec![],
@@ -1605,6 +1605,7 @@ mod tests {
                     ],
                 },
                 source: PluginSource::Path(skill_dir.to_path_buf()),
+                source_label: None,
                 workspace_member: false,
             }],
             mcp_servers: vec![],
@@ -1618,9 +1619,8 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                path: tmp.path().join("plugin.toml"),
+                manifest_path: Some(tmp.path().join("plugin.toml")),
                 plugin,
-                source_dir: PathBuf::from(".".to_string()),
                 workspace_member: false,
             }],
             warnings: vec![],
@@ -1733,7 +1733,10 @@ mod tests {
             hooks: vec![],
             skills: vec![SkillGroup {
                 predicates: PredicateSet::default(),
-                source: PluginSource::Path(".".into()),
+                // A PM returns absolute skill dirs; the bare-skill group's "."
+                // resolves to the skill's own directory.
+                source: PluginSource::Path(skill_dir.clone()),
+                source_label: None,
                 workspace_member: false,
             }],
             mcp_servers: vec![],
@@ -1745,9 +1748,8 @@ mod tests {
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {
                 canonical: crate::pm::PackageId::any_version("recs", "my-skill"),
-                path: skill_dir.join("SKILL.md"),
+                manifest_path: Some(skill_dir.join("SKILL.md")),
                 plugin,
-                source_dir: tmp.path().to_path_buf(),
                 workspace_member: false,
             }],
             warnings: vec![],

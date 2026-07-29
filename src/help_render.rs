@@ -220,7 +220,7 @@ mod tests {
         subcommands: BTreeMap<String, Subcommand>,
     ) -> ParsedPlugin {
         ParsedPlugin {
-            path: PathBuf::from(format!("/test/{name}.toml")),
+            manifest_path: Some(PathBuf::from(format!("/test/{name}.toml"))),
             plugin: Plugin {
                 name: name.into(),
                 hooks: vec![],
@@ -233,7 +233,6 @@ mod tests {
                 chained: vec![],
                 requires_use: false,
             },
-            source_dir: PathBuf::from("/test"),
             workspace_member: false,
             canonical: PackageId::new("test", name, ANY_VERSION),
         }

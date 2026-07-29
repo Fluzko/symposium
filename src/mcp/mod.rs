@@ -6,6 +6,7 @@
 //!
 //! See the [MCP meta-server RFD](../../md/rfds/mcp-meta-server/README.md).
 
+pub mod console;
 pub mod declarations;
 pub mod dispatch;
 pub mod normalize;

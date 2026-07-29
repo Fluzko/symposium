@@ -206,10 +206,10 @@ mod tests {
             timeout: Duration::from_secs(5),
             ..Limits::default()
         });
-        let outcome = sandbox
-            .run_script_with(source, &namespaces, calls)
-            .await
-            .map_err(|e| e.to_string());
+        let outcome = match sandbox.run_script_with(source, &namespaces, calls).await {
+            Ok(o) => o.value().map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
 
         pump.await.unwrap();
         let asked = seen.lock().unwrap().clone();

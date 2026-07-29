@@ -104,7 +104,12 @@ mod tests {
             timeout: Duration::from_secs(2),
             ..Limits::default()
         });
-        sandbox.run_script(source).await.map_err(|e| e.to_string())
+        sandbox
+            .run_script(source)
+            .await
+            .map_err(|e| e.to_string())?
+            .value()
+            .map_err(|e| e.to_string())
     }
 
     // -- the two forms --

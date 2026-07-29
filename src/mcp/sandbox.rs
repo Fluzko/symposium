@@ -23,7 +23,7 @@ use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{dispatch, normalize};
+use super::{console, dispatch, normalize};
 
 /// Extra room beyond the JavaScript stack limit for the interpreter's own
 /// frames. Without it a script that hits the JS limit would instead overflow
@@ -42,6 +42,11 @@ pub struct Limits {
     pub timeout: Duration,
     pub memory_bytes: usize,
     pub stack_bytes: usize,
+    /// Ceiling on the serialized result. Exceeding it truncates rather than
+    /// fails: a script that already called tools should not lose its work.
+    pub max_result_bytes: usize,
+    /// Ceiling on captured console output.
+    pub max_console_bytes: usize,
 }
 
 impl Default for Limits {
@@ -50,6 +55,8 @@ impl Default for Limits {
             timeout: Duration::from_secs(120),
             memory_bytes: 64 << 20,
             stack_bytes: 1 << 20,
+            max_result_bytes: 32 << 10,
+            max_console_bytes: 8 << 10,
         }
     }
 }
@@ -83,6 +90,28 @@ impl std::fmt::Display for SandboxError {
 
 impl std::error::Error for SandboxError {}
 
+/// What a script produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    /// The result, serialized. A prefix of it when `truncated_from` is set.
+    pub json: String,
+    /// Byte length of the untruncated result, when it did not fit.
+    pub truncated_from: Option<usize>,
+    /// Console output, in the order it was written.
+    pub logs: Vec<String>,
+    /// Whether logging stopped for want of budget.
+    pub logs_dropped: bool,
+}
+
+impl Outcome {
+    /// Parse the result back, for callers that know it was not truncated.
+    pub fn value(&self) -> Result<Value, SandboxError> {
+        serde_json::from_str(&self.json).map_err(|e| SandboxError::Internal {
+            message: format!("result was not valid JSON: {e}"),
+        })
+    }
+}
+
 /// Runs one script under [`Limits`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Sandbox {
@@ -100,14 +129,16 @@ impl Sandbox {
     /// thread lets the stack be sized against the configured limit. A fresh
     /// runtime per call means no state survives from one script to the next.
     pub async fn eval(&self, script: &str) -> Result<Value, SandboxError> {
-        self.eval_inner(script, None, Vec::new(), None).await
+        self.eval_inner(script, None, Vec::new(), None)
+            .await?
+            .value()
     }
 
     /// Run a model-written script.
     ///
     /// The source is handed to the engine as a value rather than spliced into
     /// program text.
-    pub async fn run_script(&self, source: &str) -> Result<Value, SandboxError> {
+    pub async fn run_script(&self, source: &str) -> Result<Outcome, SandboxError> {
         self.run_script_with(source, &[], dispatch::channel().0)
             .await
     }
@@ -118,7 +149,7 @@ impl Sandbox {
         source: &str,
         namespaces: &[dispatch::Namespace],
         calls: dispatch::CallSender,
-    ) -> Result<Value, SandboxError> {
+    ) -> Result<Outcome, SandboxError> {
         self.eval_inner(
             normalize::PROGRAM,
             Some(&normalize::prepare(source)),
@@ -134,7 +165,7 @@ impl Sandbox {
         source: Option<&str>,
         namespaces: Vec<dispatch::Namespace>,
         calls: Option<dispatch::CallSender>,
-    ) -> Result<Value, SandboxError> {
+    ) -> Result<Outcome, SandboxError> {
         let limits = self.limits;
         let script = script.to_string();
         let source = source.map(str::to_string);
@@ -190,7 +221,7 @@ async fn run(
     namespaces: &[dispatch::Namespace],
     calls: Option<&dispatch::CallSender>,
     limits: Limits,
-) -> Result<Value, SandboxError> {
+) -> Result<Outcome, SandboxError> {
     let runtime = AsyncRuntime::new().map_err(internal)?;
     runtime.set_memory_limit(limits.memory_bytes).await;
     runtime.set_max_stack_size(limits.stack_bytes).await;
@@ -202,20 +233,56 @@ async fn run(
         .set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)))
         .await;
 
+    let log = console::Log::shared(limits.max_console_bytes);
     let context = AsyncContext::full(&runtime).await.map_err(internal)?;
     let outcome = AsyncContext::async_with(&context, async |ctx| {
-        evaluate(ctx, script, source, namespaces, calls).await
+        evaluate(ctx, script, source, namespaces, calls, &log).await
     })
     .await;
 
     // Settle any promises the script left pending before deciding the result.
     runtime.idle().await;
 
-    let Err(message) = outcome else {
-        return outcome.map_err(|e| classify(e, deadline, limits, 0));
+    let (logs, logs_dropped) = {
+        let log = log.borrow();
+        (log.entries().to_vec(), log.dropped())
     };
-    let allocated = runtime.memory_usage().await.malloc_size.max(0) as usize;
-    Err(classify(message, deadline, limits, allocated))
+
+    let json = match outcome {
+        Ok(json) => json,
+        Err(message) => {
+            let allocated = runtime.memory_usage().await.malloc_size.max(0) as usize;
+            return Err(classify(message, deadline, limits, allocated));
+        }
+    };
+
+    let (json, truncated_from) = truncate(json, limits.max_result_bytes);
+    Ok(Outcome {
+        json,
+        truncated_from,
+        logs,
+        logs_dropped,
+    })
+}
+
+/// Bound the serialized result.
+///
+/// Truncating rather than rejecting keeps whatever the script achieved: it may
+/// already have called tools with side effects, and an error would discard
+/// that along with the data. The cut lands on a character boundary, so the
+/// prefix is still valid text even though it is no longer valid JSON.
+fn truncate(json: String, limit: usize) -> (String, Option<usize>) {
+    if json.len() <= limit {
+        return (json, None);
+    }
+    let original = json.len();
+    let mut end = limit;
+    while end > 0 && !json.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut cut = json;
+    cut.truncate(end);
+    (cut, Some(original))
 }
 
 async fn evaluate<'js>(
@@ -224,7 +291,9 @@ async fn evaluate<'js>(
     source: Option<&str>,
     namespaces: &[dispatch::Namespace],
     calls: Option<&dispatch::CallSender>,
-) -> Result<Value, String> {
+    log: &console::Shared,
+) -> Result<String, String> {
+    console::install(&ctx, log)?;
     if let Some(calls) = calls {
         dispatch::install(&ctx, namespaces, calls)?;
     }
@@ -260,9 +329,9 @@ async fn evaluate<'js>(
 
 /// Convert a JavaScript value to JSON via the engine's own serializer, so
 /// `toJSON` and nested structures behave as the script author expects.
-fn to_json<'js>(ctx: &Ctx<'js>, value: rquickjs::Value<'js>) -> Result<Value, String> {
+fn to_json<'js>(ctx: &Ctx<'js>, value: rquickjs::Value<'js>) -> Result<String, String> {
     if value.is_undefined() {
-        return Ok(Value::Null);
+        return Ok("null".to_string());
     }
     let encoded = ctx
         .json_stringify(value)
@@ -270,10 +339,9 @@ fn to_json<'js>(ctx: &Ctx<'js>, value: rquickjs::Value<'js>) -> Result<Value, St
         .map_err(|e| e.to_string())?;
     let Some(encoded) = encoded else {
         // `JSON.stringify` yields nothing for values with no JSON form.
-        return Ok(Value::Null);
+        return Ok("null".to_string());
     };
-    let text = encoded.to_string().map_err(|e| e.to_string())?;
-    serde_json::from_str(&text).map_err(|e| format!("result was not valid JSON: {e}"))
+    encoded.to_string().map_err(|e| e.to_string())
 }
 
 /// Decide which limit, if any, a failure represents.
@@ -437,6 +505,61 @@ mod tests {
             serde_json::to_value(&err).unwrap(),
             json!({"error": "script_timeout", "limit_secs": 120})
         );
+    }
+
+    // -- result size --
+
+    /// Truncation rather than rejection: a script that already called tools
+    /// may have caused side effects, and an error would discard the data it
+    /// gathered along with them.
+    #[tokio::test]
+    async fn oversized_results_are_truncated_not_rejected() {
+        let sandbox = Sandbox::new(Limits {
+            max_result_bytes: 64,
+            ..fast()
+        });
+        let outcome = sandbox
+            .run_script(r#"return "x".repeat(5000);"#)
+            .await
+            .expect("an oversized result is not a failure");
+
+        assert_eq!(outcome.json.len(), 64);
+        assert_eq!(
+            outcome.truncated_from,
+            Some(5002),
+            "the original length is reported so the model can judge the shortfall"
+        );
+    }
+
+    #[tokio::test]
+    async fn results_within_the_limit_are_untouched() {
+        let outcome = Sandbox::new(fast()).run_script("return 42;").await.unwrap();
+        assert_eq!(outcome.json, "42");
+        assert_eq!(outcome.truncated_from, None);
+    }
+
+    /// The cut lands on a character boundary, so the prefix is still valid
+    /// text even though it is no longer valid JSON.
+    #[tokio::test]
+    async fn truncation_does_not_split_a_character() {
+        for limit in 8..24 {
+            let sandbox = Sandbox::new(Limits {
+                max_result_bytes: limit,
+                ..fast()
+            });
+            let outcome = sandbox.run_script(r#"return "éééééééééé";"#).await.unwrap();
+            assert!(
+                outcome.json.len() <= limit,
+                "limit {limit}: kept {} bytes",
+                outcome.json.len()
+            );
+            // Valid UTF-8 by construction in Rust; assert the cut is where we
+            // expect rather than mid-sequence.
+            assert!(
+                outcome.json.is_char_boundary(outcome.json.len()),
+                "limit {limit}: cut mid-character"
+            );
+        }
     }
 
     // -- ambient capabilities --

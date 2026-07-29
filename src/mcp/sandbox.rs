@@ -23,7 +23,7 @@ use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::normalize;
+use super::{dispatch, normalize};
 
 /// Extra room beyond the JavaScript stack limit for the interpreter's own
 /// frames. Without it a script that hits the JS limit would instead overflow
@@ -100,7 +100,7 @@ impl Sandbox {
     /// thread lets the stack be sized against the configured limit. A fresh
     /// runtime per call means no state survives from one script to the next.
     pub async fn eval(&self, script: &str) -> Result<Value, SandboxError> {
-        self.eval_inner(script, None).await
+        self.eval_inner(script, None, Vec::new(), None).await
     }
 
     /// Run a model-written script.
@@ -108,11 +108,33 @@ impl Sandbox {
     /// The source is handed to the engine as a value rather than spliced into
     /// program text.
     pub async fn run_script(&self, source: &str) -> Result<Value, SandboxError> {
-        self.eval_inner(normalize::PROGRAM, Some(&normalize::prepare(source)))
+        self.run_script_with(source, &[], dispatch::channel().0)
             .await
     }
 
-    async fn eval_inner(&self, script: &str, source: Option<&str>) -> Result<Value, SandboxError> {
+    /// Run a script with backing servers in scope.
+    pub async fn run_script_with(
+        &self,
+        source: &str,
+        namespaces: &[dispatch::Namespace],
+        calls: dispatch::CallSender,
+    ) -> Result<Value, SandboxError> {
+        self.eval_inner(
+            normalize::PROGRAM,
+            Some(&normalize::prepare(source)),
+            namespaces.to_vec(),
+            Some(calls),
+        )
+        .await
+    }
+
+    async fn eval_inner(
+        &self,
+        script: &str,
+        source: Option<&str>,
+        namespaces: Vec<dispatch::Namespace>,
+        calls: Option<dispatch::CallSender>,
+    ) -> Result<Value, SandboxError> {
         let limits = self.limits;
         let script = script.to_string();
         let source = source.map(str::to_string);
@@ -126,7 +148,13 @@ impl Sandbox {
                     .enable_time()
                     .build()
                 {
-                    Ok(rt) => rt.block_on(run(&script, source.as_deref(), limits)),
+                    Ok(rt) => rt.block_on(run(
+                        &script,
+                        source.as_deref(),
+                        &namespaces,
+                        calls.as_ref(),
+                        limits,
+                    )),
                     Err(e) => Err(SandboxError::Internal {
                         message: format!("could not start sandbox runtime: {e}"),
                     }),
@@ -156,7 +184,13 @@ impl Sandbox {
     }
 }
 
-async fn run(script: &str, source: Option<&str>, limits: Limits) -> Result<Value, SandboxError> {
+async fn run(
+    script: &str,
+    source: Option<&str>,
+    namespaces: &[dispatch::Namespace],
+    calls: Option<&dispatch::CallSender>,
+    limits: Limits,
+) -> Result<Value, SandboxError> {
     let runtime = AsyncRuntime::new().map_err(internal)?;
     runtime.set_memory_limit(limits.memory_bytes).await;
     runtime.set_max_stack_size(limits.stack_bytes).await;
@@ -169,8 +203,10 @@ async fn run(script: &str, source: Option<&str>, limits: Limits) -> Result<Value
         .await;
 
     let context = AsyncContext::full(&runtime).await.map_err(internal)?;
-    let outcome =
-        AsyncContext::async_with(&context, async |ctx| evaluate(ctx, script, source).await).await;
+    let outcome = AsyncContext::async_with(&context, async |ctx| {
+        evaluate(ctx, script, source, namespaces, calls).await
+    })
+    .await;
 
     // Settle any promises the script left pending before deciding the result.
     runtime.idle().await;
@@ -182,7 +218,17 @@ async fn run(script: &str, source: Option<&str>, limits: Limits) -> Result<Value
     Err(classify(message, deadline, limits, allocated))
 }
 
-async fn evaluate<'js>(ctx: Ctx<'js>, script: &str, source: Option<&str>) -> Result<Value, String> {
+async fn evaluate<'js>(
+    ctx: Ctx<'js>,
+    script: &str,
+    source: Option<&str>,
+    namespaces: &[dispatch::Namespace],
+    calls: Option<&dispatch::CallSender>,
+) -> Result<Value, String> {
+    if let Some(calls) = calls {
+        dispatch::install(&ctx, namespaces, calls)?;
+    }
+
     if let Some(source) = source {
         ctx.globals()
             .set(normalize::SOURCE_GLOBAL, source)

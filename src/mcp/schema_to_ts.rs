@@ -40,17 +40,58 @@ fn render_object_schema(schema: &Map<String, Value>, indent: usize) -> String {
         return UNKNOWN.to_string();
     }
 
-    // `enum` constrains the value regardless of any declared `type`, so it
-    // wins over the `type` dispatch below.
+    let base = render_constrained(schema, indent);
+
+    // `nullable` is an OpenAPI 3.0 extension rather than JSON Schema, but the
+    // schemars 0.8 line emits it for optional fields and those servers are
+    // deployed today.
+    if schema.get("nullable") == Some(&Value::Bool(true)) && base != "null" {
+        return join_union(vec![base, "null".to_string()]);
+    }
+    base
+}
+
+/// Dispatch on whichever constraint keyword the schema uses, narrowest first.
+fn render_constrained(schema: &Map<String, Value>, indent: usize) -> String {
+    // A single permitted value is narrower than anything else present.
+    if let Some(value) = schema.get("const") {
+        return render_literal(value);
+    }
+
+    // `enum` constrains the value regardless of any declared `type`.
     if let Some(Value::Array(values)) = schema.get("enum") {
         return render_enum(values);
     }
 
-    let Some(Value::String(ty)) = schema.get("type") else {
-        return UNKNOWN.to_string();
-    };
+    // Composition keywords. `allOf` combines constraints; `anyOf`/`oneOf`
+    // offer alternatives. A single-element `allOf` — the shape generators emit
+    // to attach a description to a reference — collapses to its one member.
+    if let Some(Value::Array(members)) = schema.get("allOf") {
+        return render_intersection(members, indent);
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(Value::Array(members)) = schema.get(key) {
+            return render_union(members, indent);
+        }
+    }
 
-    match ty.as_str() {
+    match schema.get("type") {
+        Some(Value::String(ty)) => render_with_type(schema, ty, indent),
+        // A type may be a list of alternatives, e.g. `["string", "null"]`.
+        Some(Value::Array(types)) => {
+            let parts = types
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|ty| render_with_type(schema, ty, indent))
+                .collect();
+            join_union(parts)
+        }
+        _ => UNKNOWN.to_string(),
+    }
+}
+
+fn render_with_type(schema: &Map<String, Value>, ty: &str, indent: usize) -> String {
+    match ty {
         "string" => "string".to_string(),
         // JSON Schema separates integers from other numbers; TypeScript does not.
         "number" | "integer" => "number".to_string(),
@@ -62,26 +103,77 @@ fn render_object_schema(schema: &Map<String, Value>, indent: usize) -> String {
     }
 }
 
+fn render_union(members: &[Value], indent: usize) -> String {
+    let parts = members.iter().map(|m| render_at(m, indent)).collect();
+    join_union(parts)
+}
+
+fn render_intersection(members: &[Value], indent: usize) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for member in members {
+        let rendered = parenthesize_if_composite(render_at(member, indent));
+        if !parts.contains(&rendered) {
+            parts.push(rendered);
+        }
+    }
+    match parts.len() {
+        0 => UNKNOWN.to_string(),
+        1 => parts.pop().unwrap_or_default(),
+        _ => parts.join(" & "),
+    }
+}
+
+/// Join alternatives into a union, dropping duplicates and flattening the
+/// `unknown` case — `T | unknown` is just `unknown`.
+fn join_union(parts: Vec<String>) -> String {
+    let mut unique: Vec<String> = Vec::new();
+    for part in parts {
+        if part == UNKNOWN {
+            return UNKNOWN.to_string();
+        }
+        if !unique.contains(&part) {
+            unique.push(part);
+        }
+    }
+    match unique.len() {
+        0 => UNKNOWN.to_string(),
+        1 => unique.pop().unwrap_or_default(),
+        _ => unique.join(" | "),
+    }
+}
+
+/// Parenthesize a union so it binds correctly inside a larger type.
+fn parenthesize_if_composite(rendered: String) -> String {
+    if rendered.contains(" | ") && !rendered.starts_with('(') {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
+}
+
 fn render_array(schema: &Map<String, Value>, indent: usize) -> String {
     let Some(items) = schema.get("items") else {
         return format!("{UNKNOWN}[]");
     };
-    let inner = render_at(items, indent);
     // `A | B[]` would parse as `A | (B[])`, so a union element needs parens.
-    if inner.contains('|') && !inner.starts_with('(') {
-        format!("({inner})[]")
-    } else {
-        format!("{inner}[]")
-    }
+    let inner = parenthesize_if_composite(render_at(items, indent));
+    format!("{inner}[]")
 }
 
 fn render_struct(schema: &Map<String, Value>, indent: usize) -> String {
     let Some(Value::Object(properties)) = schema.get("properties") else {
-        // An object with no declared properties is an open map. Note that
-        // `additionalProperties: false` is deliberately ignored: it constrains
-        // what may be *sent*, not the shape of what is described, and treating
-        // it as unrecognized would degrade every ordinary object to `unknown`.
-        return format!("Record<string, {UNKNOWN}>");
+        // No declared properties: the schema describes a map, and
+        // `additionalProperties` types its values.
+        //
+        // `propertyNames` is deliberately ignored — it constrains keys, which
+        // TypeScript index signatures cannot express.
+        return match schema.get("additionalProperties") {
+            Some(Value::Bool(false)) => "{}".to_string(),
+            Some(value @ Value::Object(_)) => {
+                format!("Record<string, {}>", render_at(value, indent))
+            }
+            _ => format!("Record<string, {UNKNOWN}>"),
+        };
     };
 
     if properties.is_empty() {
@@ -122,9 +214,7 @@ fn render_enum(values: &[Value]) -> String {
     if values.is_empty() {
         return "never".to_string();
     }
-    let mut rendered: Vec<String> = values.iter().map(render_literal).collect();
-    rendered.dedup();
-    rendered.join(" | ")
+    join_union(values.iter().map(render_literal).collect())
 }
 
 /// Render a JSON value as a TypeScript literal type.
@@ -254,6 +344,143 @@ mod tests {
             "true",
             "enum should win over type"
         );
+    }
+
+    // -- unions and composition --
+
+    /// The dominant Python generator emits this for every optional field, and
+    /// it is the single most common construct the naive mapping would drop.
+    #[test]
+    fn renders_nullable_anyof_as_union() {
+        let out = render(json!({
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+        }));
+        assert_eq!(out, "string | null");
+    }
+
+    /// Optionality is decided by `required`. A nullable field that *is*
+    /// required stays non-optional; only its type gains `null`.
+    #[test]
+    fn nullable_union_does_not_imply_optional() {
+        let out = render(json!({
+            "type": "object",
+            "properties": {
+                "a": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            },
+            "required": ["a"],
+        }));
+        assert_eq!(out, "{\n  a: string | null;\n}");
+    }
+
+    #[test]
+    fn renders_oneof_as_union() {
+        let out = render(json!({
+            "oneOf": [{"type": "string"}, {"type": "number"}],
+        }));
+        assert_eq!(out, "string | number");
+    }
+
+    #[test]
+    fn renders_allof_as_intersection() {
+        let out = render(json!({
+            "allOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}},
+                {"type": "object", "properties": {"b": {"type": "number"}}},
+            ],
+        }));
+        assert_eq!(out, "{\n  a?: string;\n} & {\n  b?: number;\n}");
+    }
+
+    /// Generators wrap a single member in `allOf` to attach a sibling
+    /// description. That must collapse rather than render a one-sided `&`.
+    #[test]
+    fn collapses_single_member_allof() {
+        let out = render(json!({
+            "allOf": [{"type": "string"}],
+            "description": "wrapped",
+        }));
+        assert_eq!(out, "string");
+    }
+
+    /// `T | unknown` is just `unknown`, and repeated alternatives collapse.
+    #[test]
+    fn union_absorbs_unknown_and_drops_duplicates() {
+        assert_eq!(
+            render(json!({"anyOf": [{"type": "string"}, {}]})),
+            "unknown"
+        );
+        assert_eq!(
+            render(json!({"anyOf": [{"type": "string"}, {"type": "string"}]})),
+            "string"
+        );
+    }
+
+    // -- type as a list --
+
+    #[test]
+    fn renders_array_valued_type_as_union() {
+        assert_eq!(render(json!({"type": ["string", "null"]})), "string | null");
+        assert_eq!(
+            render(json!({"type": ["string", "number", "boolean"]})),
+            "string | number | boolean"
+        );
+    }
+
+    // -- const --
+
+    #[test]
+    fn renders_const_as_literal() {
+        assert_eq!(render(json!({"const": "resource"})), r#""resource""#);
+        assert_eq!(render(json!({"const": 3})), "3");
+    }
+
+    // -- nullable (OpenAPI spelling) --
+
+    /// One deployed Rust generator marks optional fields with `nullable`
+    /// rather than a union or a null-typed alternative.
+    #[test]
+    fn renders_openapi_nullable_as_union() {
+        let out = render(json!({
+            "type": "array",
+            "items": {"type": "string"},
+            "nullable": true,
+        }));
+        assert_eq!(out, "string[] | null");
+    }
+
+    #[test]
+    fn nullable_null_type_does_not_repeat_null() {
+        assert_eq!(render(json!({"type": "null", "nullable": true})), "null");
+    }
+
+    // -- records --
+
+    #[test]
+    fn renders_typed_additional_properties_as_record() {
+        let out = render(json!({
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+        }));
+        assert_eq!(out, "Record<string, string>");
+    }
+
+    /// `propertyNames` constrains keys, which a TypeScript index signature
+    /// cannot express, so it is ignored rather than degrading the type.
+    #[test]
+    fn ignores_property_names_constraint() {
+        let out = render(json!({
+            "type": "object",
+            "propertyNames": {"type": "string"},
+            "additionalProperties": {"type": "string"},
+        }));
+        assert_eq!(out, "Record<string, string>");
+    }
+
+    #[test]
+    fn renders_closed_empty_object_as_empty_type() {
+        let out = render(json!({"type": "object", "additionalProperties": false}));
+        assert_eq!(out, "{}");
     }
 
     // -- objects --

@@ -13,6 +13,7 @@ pub mod dispatch;
 pub mod normalize;
 pub mod sandbox;
 pub mod schema_to_ts;
+pub mod server;
 pub mod supervisor;
 
 #[cfg(test)]

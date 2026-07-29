@@ -618,10 +618,23 @@ impl Plugin {
         &self,
         ctx: &mut crate::predicate::PredicateContext,
     ) -> Vec<McpServerEntry> {
+        self.applicable_mcp_entries(ctx)
+            .into_iter()
+            .map(|s| s.server.clone())
+            .collect()
+    }
+
+    /// Applicable MCP servers with their per-server overrides intact.
+    ///
+    /// Registration only needs the transport details, but running a server
+    /// needs the timings and tool filters its plugin declared.
+    pub fn applicable_mcp_entries(
+        &self,
+        ctx: &mut crate::predicate::PredicateContext,
+    ) -> Vec<&PluginMcpServer> {
         self.mcp_servers
             .iter()
             .filter(|s| s.predicates.evaluate(ctx))
-            .map(|s| s.server.clone())
             .collect()
     }
 }

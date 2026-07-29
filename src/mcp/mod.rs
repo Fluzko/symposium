@@ -11,6 +11,7 @@ pub mod console;
 pub mod declarations;
 pub mod dispatch;
 pub mod normalize;
+pub mod resolve;
 pub mod sandbox;
 pub mod schema_to_ts;
 pub mod server;

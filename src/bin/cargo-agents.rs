@@ -155,13 +155,28 @@ async fn main() -> ExitCode {
         // Commands that need direct I/O (stdin/stdout) stay in the binary
         Some(Commands::Hook { agent, event }) => hook::run(&sym, agent, event).await,
 
-        Some(Commands::McpServe) => match symposium::mcp::server::serve(Vec::new()).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => {
-                eprintln!("Error: {err:#}");
-                ExitCode::FAILURE
+        Some(Commands::McpServe) => {
+            let resolution = symposium::mcp::resolve::resolve(&sym, &cwd);
+            for rejection in &resolution.rejected {
+                tracing::warn!(
+                    server = %rejection.server,
+                    "skipping mcp server: {}",
+                    rejection.reason
+                );
             }
-        },
+            let names = resolution
+                .servers
+                .iter()
+                .map(|s| s.name().to_string())
+                .collect();
+            match symposium::mcp::server::serve(names).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("Error: {err:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
 
         Some(Commands::Plugin { command }) => {
             let code = handle_plugin_command(&sym, command).await;

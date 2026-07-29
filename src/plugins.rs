@@ -28,8 +28,73 @@ pub struct PluginMcpServer {
         skip_serializing_if = "crate::predicate::PredicateSet::is_empty"
     )]
     pub predicates: crate::predicate::PredicateSet,
+
+    /// Plugin-authored timing and tool-visibility overrides for this server.
+    #[serde(flatten)]
+    pub overrides: McpServerOverrides,
+
     #[serde(flatten)]
     pub server: McpServerEntry,
+}
+
+/// Per-server settings a plugin author may set, overriding the user's `[mcp]`
+/// defaults.
+///
+/// These describe the *server* — how slow it is to start, which of its tools
+/// are worth exposing — which is the plugin author's knowledge. Sandbox limits
+/// stay user-owned: a plugin must not be able to raise its own ceiling.
+///
+/// The timeouts are clamped against the user's `script-timeout-secs` when a
+/// server is dispatched, not here, because a manifest cannot see user config
+/// and must not fail to parse because a user lowered their own limit.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct McpServerOverrides {
+    /// Ceiling on spawning this server and completing its handshake.
+    #[serde(
+        default,
+        rename = "startup-timeout-secs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub startup_timeout_secs: Option<u64>,
+
+    /// Ceiling on a single tool call to this server.
+    #[serde(
+        default,
+        rename = "tool-call-timeout-secs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tool_call_timeout_secs: Option<u64>,
+
+    /// Expose only these tools. Mutually exclusive with `disabled-tools`.
+    ///
+    /// An empty list is distinct from absence: it exposes nothing.
+    #[serde(
+        default,
+        rename = "enabled-tools",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enabled_tools: Option<Vec<String>>,
+
+    /// Expose everything except these tools. Mutually exclusive with
+    /// `enabled-tools`.
+    #[serde(
+        default,
+        rename = "disabled-tools",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disabled_tools: Option<Vec<String>>,
+}
+
+impl McpServerOverrides {
+    fn validate(&self, server_name: &str) -> Result<()> {
+        if self.enabled_tools.is_some() && self.disabled_tools.is_some() {
+            bail!(
+                "mcp server `{server_name}` sets both `enabled-tools` and `disabled-tools`; \
+                 use one or the other"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +106,19 @@ struct RawPluginMcpServer {
     crates: Option<toml::Value>,
     #[serde(default)]
     predicates: crate::predicate::PredicateSet,
+
+    // Override fields are named siblings rather than a second `flatten`:
+    // two flattened fields make serde hand the same residual map to both, and
+    // the untagged `McpServer` enum cannot deserialize from it.
+    #[serde(default, rename = "startup-timeout-secs")]
+    startup_timeout_secs: Option<u64>,
+    #[serde(default, rename = "tool-call-timeout-secs")]
+    tool_call_timeout_secs: Option<u64>,
+    #[serde(default, rename = "enabled-tools")]
+    enabled_tools: Option<Vec<String>>,
+    #[serde(default, rename = "disabled-tools")]
+    disabled_tools: Option<Vec<String>>,
+
     #[serde(flatten)]
     server: McpServerEntry,
 }
@@ -48,10 +126,28 @@ struct RawPluginMcpServer {
 impl RawPluginMcpServer {
     fn validate(self) -> Result<PluginMcpServer> {
         reject_crates_field(&self.crates)?;
+        let overrides = McpServerOverrides {
+            startup_timeout_secs: self.startup_timeout_secs,
+            tool_call_timeout_secs: self.tool_call_timeout_secs,
+            enabled_tools: self.enabled_tools,
+            disabled_tools: self.disabled_tools,
+        };
+        overrides.validate(server_name(&self.server))?;
         Ok(PluginMcpServer {
             predicates: crate::predicate::PredicateSet::merged(self.depends_on, self.predicates),
+            overrides,
             server: self.server,
         })
+    }
+}
+
+/// Name of an MCP server entry, whatever its transport.
+fn server_name(server: &McpServerEntry) -> &str {
+    match server {
+        McpServer::Stdio(s) => &s.name,
+        McpServer::Http(s) => &s.name,
+        McpServer::Sse(s) => &s.name,
+        _ => "<unknown>",
     }
 }
 
@@ -3330,6 +3426,113 @@ mod tests {
     fn parse_manifest_with_no_mcp_servers() {
         let plugin = from_str(SAMPLE).expect("parse");
         assert!(plugin.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn mcp_server_without_overrides_leaves_them_unset() {
+        let plugin = from_str(indoc! {r#"
+            name = "p"
+            depends-on = ["*"]
+
+            [[mcp_servers]]
+            name = "sqlx"
+            command = "/usr/bin/true"
+            args = []
+            env = []
+        "#})
+        .expect("parse");
+        assert_eq!(
+            plugin.mcp_servers[0].overrides,
+            McpServerOverrides::default(),
+            "absent overrides should stay None, got: {:#?}",
+            plugin.mcp_servers[0].overrides
+        );
+    }
+
+    #[test]
+    fn mcp_server_parses_timing_and_tool_overrides() {
+        let plugin = from_str(indoc! {r#"
+            name = "p"
+            depends-on = ["*"]
+
+            [[mcp_servers]]
+            name = "sqlx"
+            command = "/usr/bin/true"
+            args = []
+            env = []
+            startup-timeout-secs = 45
+            tool-call-timeout-secs = 90
+            enabled-tools = ["query", "explain"]
+        "#})
+        .expect("parse");
+        let o = &plugin.mcp_servers[0].overrides;
+        assert_eq!(o.startup_timeout_secs, Some(45));
+        assert_eq!(o.tool_call_timeout_secs, Some(90));
+        assert_eq!(
+            o.enabled_tools.as_deref(),
+            Some(&["query".to_string(), "explain".to_string()][..])
+        );
+        assert_eq!(o.disabled_tools, None);
+    }
+
+    /// An empty allow-list means "expose nothing", which is distinct from
+    /// omitting the field.
+    #[test]
+    fn mcp_server_empty_enabled_tools_is_not_absence() {
+        let plugin = from_str(indoc! {r#"
+            name = "p"
+            depends-on = ["*"]
+
+            [[mcp_servers]]
+            name = "sqlx"
+            command = "/usr/bin/true"
+            args = []
+            env = []
+            enabled-tools = []
+        "#})
+        .expect("parse");
+        assert_eq!(plugin.mcp_servers[0].overrides.enabled_tools, Some(vec![]));
+    }
+
+    #[test]
+    fn mcp_server_with_both_tool_lists_errors() {
+        let err = from_str(indoc! {r#"
+            name = "p"
+            depends-on = ["*"]
+
+            [[mcp_servers]]
+            name = "sqlx"
+            command = "/usr/bin/true"
+            args = []
+            env = []
+            enabled-tools = ["query"]
+            disabled-tools = ["drop"]
+        "#})
+        .expect_err("both tool lists should be rejected");
+        assert!(
+            err.to_string().contains("sqlx"),
+            "error should name the offending server, got: {err}"
+        );
+    }
+
+    #[test]
+    fn mcp_server_overrides_work_on_http_transport() {
+        let plugin = from_str(indoc! {r#"
+            name = "p"
+            depends-on = ["*"]
+
+            [[mcp_servers]]
+            type = "http"
+            name = "remote"
+            url = "http://localhost:8080/mcp"
+            headers = []
+            tool-call-timeout-secs = 15
+        "#})
+        .expect("parse");
+        assert_eq!(
+            plugin.mcp_servers[0].overrides.tool_call_timeout_secs,
+            Some(15)
+        );
     }
 
     #[test]

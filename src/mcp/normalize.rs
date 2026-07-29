@@ -92,7 +92,6 @@ fn strip_fence(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::mcp::sandbox::{Limits, Sandbox};
     use serde_json::{Value, json};
     use std::time::Duration;

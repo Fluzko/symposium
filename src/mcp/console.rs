@@ -119,7 +119,6 @@ fn format_args_for_log<'js>(ctx: &Ctx<'js>, args: &[rquickjs::Value<'js>]) -> St
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::mcp::sandbox::{Limits, Sandbox};
     use std::time::Duration;
 

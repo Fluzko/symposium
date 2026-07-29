@@ -49,13 +49,19 @@ impl TypeRenderer {
     /// Render `schema` as a type expression, registering any named types it
     /// references. `$ref` pointers resolve against `schema` itself.
     pub fn render(&mut self, schema: &Value) -> String {
+        self.render_indented(schema, 0)
+    }
+
+    /// Render at a given nesting level, so a type embedded inside another
+    /// block lines up with it.
+    pub fn render_indented(&mut self, schema: &Value, indent: usize) -> String {
         let mut cx = Cx {
             root: schema,
             named: &mut self.named,
             in_progress: Vec::new(),
             budget: MAX_NODES,
         };
-        render_at(&mut cx, schema, 0, 0)
+        render_at(&mut cx, schema, indent, 0)
     }
 
     /// The named type declarations collected so far, in name order.
@@ -399,7 +405,12 @@ fn render_literal(value: &Value) -> String {
 /// A property's `description`, collapsed to one line and safe inside a JSDoc
 /// block.
 fn doc_comment(schema: &Value) -> Option<String> {
-    let text = schema.get("description")?.as_str()?.trim();
+    jsdoc_text(schema.get("description")?.as_str()?)
+}
+
+/// Collapse text to one line and make it safe inside a JSDoc block.
+pub(crate) fn jsdoc_text(text: &str) -> Option<String> {
+    let text = text.trim();
     if text.is_empty() {
         return None;
     }

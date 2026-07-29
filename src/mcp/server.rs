@@ -34,13 +34,59 @@ pub struct MetaServer {
     catalog: Arc<super::catalog::Catalog>,
     /// Names of the backing servers, cached for the tool descriptions.
     servers: Arc<Vec<String>>,
+    limits: super::sandbox::Limits,
 }
 
 impl MetaServer {
-    pub fn new(catalog: Arc<super::catalog::Catalog>) -> Self {
+    pub fn new(catalog: Arc<super::catalog::Catalog>, limits: super::sandbox::Limits) -> Self {
         Self {
             servers: Arc::new(catalog.server_names()),
             catalog,
+            limits,
+        }
+    }
+
+    /// Run a model-written script with the workspace's tools in scope.
+    async fn execute(&self, script: &str) -> CallToolResult {
+        let (namespaces, problems) = self.catalog.namespaces().await;
+        if namespaces.is_empty() {
+            let mut message =
+                String::from("No MCP tools are in scope, so there is nothing to call.");
+            for problem in &problems {
+                message.push_str(&format!("\n  {problem}"));
+            }
+            return CallToolResult::error(vec![ContentBlock::text(message)]);
+        }
+
+        // Tool calls cross back to this runtime: backing servers are child
+        // processes owned here, and their I/O cannot be polled from the
+        // engine's thread.
+        let (calls, mut receiver) = super::dispatch::channel();
+        let catalog = Arc::clone(&self.catalog);
+        let pump = tokio::spawn(async move {
+            while let Some(call) = receiver.recv().await {
+                let answer = catalog.call(&call.server, &call.tool, call.args).await;
+                let _ = call.reply.send(answer);
+            }
+        });
+
+        let outcome = super::sandbox::Sandbox::new(self.limits)
+            .run_script_with(script, &namespaces, calls)
+            .await;
+        // The sender is dropped with the sandbox, ending the pump.
+        let _ = pump.await;
+
+        match outcome {
+            Ok(outcome) => CallToolResult::success(vec![ContentBlock::text(render_outcome(
+                &outcome, &problems,
+            ))]),
+            Err(e) => {
+                // Tagged rather than prose, so the model can tell a limit it
+                // exceeded from a mistake in its own code.
+                let detail =
+                    serde_json::to_string(&e).unwrap_or_else(|_| format!("{{\"error\":\"{e}\"}}"));
+                CallToolResult::error(vec![ContentBlock::text(detail)])
+            }
         }
     }
 
@@ -163,16 +209,51 @@ impl ServerHandler for MetaServer {
                 let body = self.catalog.describe(&query).await;
                 Ok(CallToolResult::success(vec![ContentBlock::text(body)]).into())
             }
-            EXECUTE => Ok(CallToolResult::error(vec![ContentBlock::text(
-                "`execute` is not wired up yet.",
-            )])
-            .into()),
+            EXECUTE => {
+                let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+                let Some(script) = args.get("script").and_then(Value::as_str) else {
+                    return Err(McpError::invalid_params(
+                        "`execute` requires a `script` string",
+                        None,
+                    ));
+                };
+                Ok(self.execute(script).await.into())
+            }
             other => Err(McpError::invalid_params(
                 format!("no such tool: {other}. Available: {LIST_TOOLS}, {EXECUTE}"),
                 None,
             )),
         }
     }
+}
+
+/// Present a script's result to the model.
+///
+/// Console output and truncation are reported alongside the value rather than
+/// folded into it, so a script that logged its way to an answer is readable
+/// without the log being mistaken for the answer.
+fn render_outcome(outcome: &super::sandbox::Outcome, problems: &[String]) -> String {
+    let mut text = outcome.json.clone();
+
+    if let Some(original) = outcome.truncated_from {
+        text.push_str(&format!(
+            "\n\n[result truncated from {original} bytes. Return less data \
+             — filter or select fields inside the script.]"
+        ));
+    }
+    if !outcome.logs.is_empty() {
+        text.push_str("\n\nconsole:\n");
+        for line in &outcome.logs {
+            text.push_str(&format!("  {line}\n"));
+        }
+        if outcome.logs_dropped {
+            text.push_str("  [further output dropped]\n");
+        }
+    }
+    for problem in problems {
+        text.push_str(&format!("\n[{problem}]"));
+    }
+    text
 }
 
 fn object_schema(value: Value) -> Map<String, Value> {
@@ -183,8 +264,11 @@ fn object_schema(value: Value) -> Map<String, Value> {
 }
 
 /// Serve until the client disconnects.
-pub async fn serve(catalog: Arc<super::catalog::Catalog>) -> anyhow::Result<()> {
-    let service = MetaServer::new(Arc::clone(&catalog))
+pub async fn serve(
+    catalog: Arc<super::catalog::Catalog>,
+    limits: super::sandbox::Limits,
+) -> anyhow::Result<()> {
+    let service = MetaServer::new(Arc::clone(&catalog), limits)
         .serve(rmcp::transport::io::stdio())
         .await?;
     let outcome = service.waiting().await;
@@ -205,7 +289,7 @@ mod tests {
     /// advertises.
     fn test_server(names: &[&str]) -> MetaServer {
         let catalog = Catalog::new(Vec::new(), RestartPolicy::default(), false);
-        let mut server = MetaServer::new(Arc::new(catalog));
+        let mut server = MetaServer::new(Arc::new(catalog), crate::mcp::sandbox::Limits::default());
         server.servers = Arc::new(names.iter().map(|n| n.to_string()).collect());
         server
     }

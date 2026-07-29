@@ -178,7 +178,14 @@ async fn main() -> ExitCode {
                 },
                 sym.config.mcp.read_only,
             ));
-            match symposium::mcp::server::serve(catalog).await {
+            let limits = symposium::mcp::sandbox::Limits {
+                timeout: std::time::Duration::from_secs(sym.config.mcp.script_timeout_secs),
+                memory_bytes: (sym.config.mcp.script_memory_limit_mb as usize) << 20,
+                stack_bytes: (sym.config.mcp.script_stack_limit_kb as usize) << 10,
+                max_result_bytes: sym.config.mcp.max_result_bytes,
+                max_console_bytes: sym.config.mcp.max_console_bytes,
+            };
+            match symposium::mcp::server::serve(catalog, limits).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
                     eprintln!("Error: {err:#}");

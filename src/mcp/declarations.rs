@@ -61,6 +61,19 @@ pub fn render_server(server: &str, tools: &[ToolDecl]) -> String {
     out
 }
 
+/// The keys a tool is reachable under in JavaScript.
+///
+/// A wire name that is already an identifier needs one key. One that is not
+/// gets two — the quoted wire name and a sanitized alias — so both
+/// `sqlx["migrate-status"]` and `sqlx.migrate_status` dispatch.
+pub fn binding_keys(name: &str) -> Vec<String> {
+    if is_js_identifier(name) {
+        vec![name.to_string()]
+    } else {
+        vec![name.to_string(), sanitize(name)]
+    }
+}
+
 /// Render a tool's parameter list.
 ///
 /// A tool with no properties takes no argument at all, and one whose
@@ -265,6 +278,17 @@ mod tests {
     fn server_name_is_sanitized() {
         let out = render_server("sea-orm", &[tool("t", &json!({}))]);
         assert!(out.starts_with("declare const sea_orm: {"), "got:\n{out}");
+    }
+
+    /// The keys used to build the runtime namespace must match the ones the
+    /// declarations advertise, or a model would call a name that is not there.
+    #[test]
+    fn binding_keys_match_the_declared_names() {
+        assert_eq!(binding_keys("query"), vec!["query".to_string()]);
+        assert_eq!(
+            binding_keys("get-sum"),
+            vec!["get-sum".to_string(), "get_sum".to_string()]
+        );
     }
 
     // -- documentation and shared types --

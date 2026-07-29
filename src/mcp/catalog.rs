@@ -17,7 +17,8 @@ use rmcp::model::Tool;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use super::declarations::{ToolDecl, render_server};
+use super::declarations::{ToolDecl, binding_keys, render_server};
+use super::dispatch::{Binding, Namespace};
 use super::resolve::ResolvedServer;
 use super::supervisor::{RestartPolicy, Supervisor};
 
@@ -216,6 +217,56 @@ impl Catalog {
         out
     }
 
+    /// The namespaces a script sees, one per server.
+    ///
+    /// Building these needs each server's tool list, so this starts the
+    /// servers that are not already running.
+    pub async fn namespaces(&self) -> (Vec<Namespace>, Vec<String>) {
+        let mut namespaces = Vec::new();
+        let mut problems = Vec::new();
+
+        for entry in &self.entries {
+            let tools = {
+                let mut supervisor = entry.supervisor.lock().await;
+                supervisor.list_tools().await
+            };
+            let tools = match tools {
+                Ok(tools) => tools,
+                Err(e) => {
+                    problems.push(format!("{}: {e}", entry.resolved.name()));
+                    continue;
+                }
+            };
+
+            let bindings: Vec<Binding> = tools
+                .iter()
+                .filter(|t| entry.resolved.exposes(t.name.as_ref()))
+                .filter(|t| !self.read_only || is_read_only(t))
+                .flat_map(|t| {
+                    // Both spellings reach the same wire name, so a model can
+                    // use whichever the declarations showed it.
+                    binding_keys(t.name.as_ref())
+                        .into_iter()
+                        .map(move |key| Binding {
+                            key,
+                            wire_name: t.name.to_string(),
+                        })
+                })
+                .collect();
+
+            if bindings.is_empty() {
+                continue;
+            }
+            namespaces.push(Namespace {
+                key: namespace_key(entry.resolved.name()),
+                server: entry.resolved.name().to_string(),
+                bindings,
+            });
+        }
+
+        (namespaces, problems)
+    }
+
     /// Call a tool on a backing server, honoring its filters.
     pub async fn call(&self, server: &str, tool: &str, args: Value) -> Result<Value, String> {
         let Some(entry) = self.entries.iter().find(|e| e.resolved.name() == server) else {
@@ -253,6 +304,18 @@ impl Catalog {
             .max()
             .unwrap_or_default()
     }
+}
+
+/// A server's name as a JavaScript global.
+fn namespace_key(server: &str) -> String {
+    let mut out: String = server
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
 }
 
 fn query_narrows(query: &Query) -> bool {
@@ -354,6 +417,15 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The global a script uses must be a legal identifier even when the
+    /// server's declared name is not.
+    #[test]
+    fn namespace_keys_are_identifiers() {
+        assert_eq!(namespace_key("sqlx"), "sqlx");
+        assert_eq!(namespace_key("sea-orm"), "sea_orm");
+        assert_eq!(namespace_key("2fa"), "_2fa");
+    }
 
     #[test]
     fn detail_defaults_to_names() {

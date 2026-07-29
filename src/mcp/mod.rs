@@ -7,6 +7,7 @@
 //! See the [MCP meta-server RFD](../../md/rfds/mcp-meta-server/README.md).
 
 pub mod declarations;
+pub mod normalize;
 pub mod sandbox;
 pub mod schema_to_ts;
 

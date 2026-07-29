@@ -23,6 +23,8 @@ use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx};
 use serde::Serialize;
 use serde_json::Value;
 
+use super::normalize;
+
 /// Extra room beyond the JavaScript stack limit for the interpreter's own
 /// frames. Without it a script that hits the JS limit would instead overflow
 /// the OS thread stack, which is a crash rather than an exception.
@@ -98,8 +100,22 @@ impl Sandbox {
     /// thread lets the stack be sized against the configured limit. A fresh
     /// runtime per call means no state survives from one script to the next.
     pub async fn eval(&self, script: &str) -> Result<Value, SandboxError> {
+        self.eval_inner(script, None).await
+    }
+
+    /// Run a model-written script.
+    ///
+    /// The source is handed to the engine as a value rather than spliced into
+    /// program text.
+    pub async fn run_script(&self, source: &str) -> Result<Value, SandboxError> {
+        self.eval_inner(normalize::PROGRAM, Some(&normalize::prepare(source)))
+            .await
+    }
+
+    async fn eval_inner(&self, script: &str, source: Option<&str>) -> Result<Value, SandboxError> {
         let limits = self.limits;
         let script = script.to_string();
+        let source = source.map(str::to_string);
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let spawned = std::thread::Builder::new()
@@ -110,7 +126,7 @@ impl Sandbox {
                     .enable_time()
                     .build()
                 {
-                    Ok(rt) => rt.block_on(run(&script, limits)),
+                    Ok(rt) => rt.block_on(run(&script, source.as_deref(), limits)),
                     Err(e) => Err(SandboxError::Internal {
                         message: format!("could not start sandbox runtime: {e}"),
                     }),
@@ -140,7 +156,7 @@ impl Sandbox {
     }
 }
 
-async fn run(script: &str, limits: Limits) -> Result<Value, SandboxError> {
+async fn run(script: &str, source: Option<&str>, limits: Limits) -> Result<Value, SandboxError> {
     let runtime = AsyncRuntime::new().map_err(internal)?;
     runtime.set_memory_limit(limits.memory_bytes).await;
     runtime.set_max_stack_size(limits.stack_bytes).await;
@@ -153,7 +169,8 @@ async fn run(script: &str, limits: Limits) -> Result<Value, SandboxError> {
         .await;
 
     let context = AsyncContext::full(&runtime).await.map_err(internal)?;
-    let outcome = AsyncContext::async_with(&context, async |ctx| evaluate(ctx, script).await).await;
+    let outcome =
+        AsyncContext::async_with(&context, async |ctx| evaluate(ctx, script, source).await).await;
 
     // Settle any promises the script left pending before deciding the result.
     runtime.idle().await;
@@ -165,7 +182,14 @@ async fn run(script: &str, limits: Limits) -> Result<Value, SandboxError> {
     Err(classify(message, deadline, limits, allocated))
 }
 
-async fn evaluate<'js>(ctx: Ctx<'js>, script: &str) -> Result<Value, String> {
+async fn evaluate<'js>(ctx: Ctx<'js>, script: &str, source: Option<&str>) -> Result<Value, String> {
+    if let Some(source) = source {
+        ctx.globals()
+            .set(normalize::SOURCE_GLOBAL, source)
+            .catch(&ctx)
+            .map_err(|e| e.to_string())?;
+    }
+
     // Evaluated as a plain script rather than a module: scripts arrive
     // normalized into a self-calling async function, so the value is already a
     // promise and top-level `await` is never needed.

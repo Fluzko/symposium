@@ -164,12 +164,21 @@ async fn main() -> ExitCode {
                     rejection.reason
                 );
             }
-            let names = resolution
-                .servers
-                .iter()
-                .map(|s| s.name().to_string())
-                .collect();
-            match symposium::mcp::server::serve(names).await {
+            let catalog = std::sync::Arc::new(symposium::mcp::catalog::Catalog::new(
+                resolution.servers,
+                symposium::mcp::supervisor::RestartPolicy {
+                    max_restarts: sym.config.mcp.max_server_restarts,
+                    stable_reset: std::time::Duration::from_secs(
+                        sym.config.mcp.restart_stable_reset_secs,
+                    ),
+                    shutdown_grace: std::time::Duration::from_secs(
+                        sym.config.mcp.shutdown_grace_secs,
+                    ),
+                    ..Default::default()
+                },
+                sym.config.mcp.read_only,
+            ));
+            match symposium::mcp::server::serve(catalog).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
                     eprintln!("Error: {err:#}");

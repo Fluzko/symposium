@@ -40,12 +40,13 @@ pub fn render_server(server: &str, tools: &[ToolDecl]) -> String {
         };
 
         for (index, key) in std::iter::once(&primary).chain(alias.iter()).enumerate() {
-            if let Some(doc) = tool.description.and_then(jsdoc_text) {
-                methods.push_str(&format!("  /** {doc} */\n"));
-            }
-            // The alias is the same tool reached by a different spelling; say
-            // so rather than leaving the reader to infer it.
-            if index == 1 {
+            if index == 0 {
+                if let Some(doc) = tool.description.and_then(jsdoc_text) {
+                    methods.push_str(&format!("  /** {doc} */\n"));
+                }
+            } else {
+                // The alias is the same tool under a different spelling.
+                // Repeating the description would double it in the output.
                 methods.push_str(&format!("  /** Alias for {}. */\n", tool.name));
             }
             methods.push_str(&format!("  {key}({params}): Promise<unknown>;\n"));
@@ -210,6 +211,26 @@ mod tests {
         assert!(
             out.contains("  get_sum(): Promise<unknown>;"),
             "a dotted alias should also work, got:\n{out}"
+        );
+        assert!(out.contains("/** Alias for get-sum. */"), "got:\n{out}");
+    }
+
+    /// The alias carries only its cross-reference; repeating the description
+    /// would print it twice for one tool.
+    #[test]
+    fn alias_does_not_repeat_the_description() {
+        let out = render_server(
+            "s",
+            &[ToolDecl {
+                name: "get-sum",
+                description: Some("Adds numbers"),
+                input_schema: None,
+            }],
+        );
+        assert_eq!(
+            out.matches("Adds numbers").count(),
+            1,
+            "description should appear once, got:\n{out}"
         );
         assert!(out.contains("/** Alias for get-sum. */"), "got:\n{out}");
     }

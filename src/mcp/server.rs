@@ -29,16 +29,18 @@ pub const LIST_TOOLS: &str = "list_tools";
 pub const EXECUTE: &str = "execute";
 
 /// Serves the two meta-tools over stdio.
-#[derive(Debug, Default, Clone)]
+#[derive(Clone)]
 pub struct MetaServer {
-    /// Names of the backing servers this workspace makes available.
+    catalog: Arc<super::catalog::Catalog>,
+    /// Names of the backing servers, cached for the tool descriptions.
     servers: Arc<Vec<String>>,
 }
 
 impl MetaServer {
-    pub fn new(servers: Vec<String>) -> Self {
+    pub fn new(catalog: Arc<super::catalog::Catalog>) -> Self {
         Self {
-            servers: Arc::new(servers),
+            servers: Arc::new(catalog.server_names()),
+            catalog,
         }
     }
 
@@ -156,15 +158,13 @@ impl ServerHandler for MetaServer {
     ) -> Result<CallToolResponse, McpError> {
         match request.name.as_ref() {
             LIST_TOOLS => {
-                let body = if self.servers.is_empty() {
-                    "No MCP servers apply to this workspace.".to_string()
-                } else {
-                    format!("Servers in scope: {}.", self.servers.join(", "))
-                };
+                let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+                let query = super::catalog::Query::from_arguments(&args);
+                let body = self.catalog.describe(&query).await;
                 Ok(CallToolResult::success(vec![ContentBlock::text(body)]).into())
             }
             EXECUTE => Ok(CallToolResult::error(vec![ContentBlock::text(
-                "No MCP servers apply to this workspace, so there is nothing to call.",
+                "`execute` is not wired up yet.",
             )])
             .into()),
             other => Err(McpError::invalid_params(
@@ -183,21 +183,36 @@ fn object_schema(value: Value) -> Map<String, Value> {
 }
 
 /// Serve until the client disconnects.
-pub async fn serve(servers: Vec<String>) -> anyhow::Result<()> {
-    let service = MetaServer::new(servers)
+pub async fn serve(catalog: Arc<super::catalog::Catalog>) -> anyhow::Result<()> {
+    let service = MetaServer::new(Arc::clone(&catalog))
         .serve(rmcp::transport::io::stdio())
         .await?;
-    service.waiting().await?;
+    let outcome = service.waiting().await;
+    // Backing servers outlive the connection otherwise; their process groups
+    // die with this process, but a clean close lets them exit on their own.
+    catalog.shutdown().await;
+    outcome?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::catalog::Catalog;
+    use crate::mcp::supervisor::RestartPolicy;
+
+    /// A server with no backing processes; enough to inspect what it
+    /// advertises.
+    fn test_server(names: &[&str]) -> MetaServer {
+        let catalog = Catalog::new(Vec::new(), RestartPolicy::default(), false);
+        let mut server = MetaServer::new(Arc::new(catalog));
+        server.servers = Arc::new(names.iter().map(|n| n.to_string()).collect());
+        server
+    }
 
     #[test]
     fn advertises_exactly_two_tools() {
-        let names: Vec<String> = MetaServer::default()
+        let names: Vec<String> = test_server(&[])
             .tool_definitions()
             .iter()
             .map(|t| t.name.to_string())
@@ -209,7 +224,7 @@ mod tests {
     /// running arbitrary code is safe.
     #[test]
     fn execute_is_annotated_as_destructive() {
-        let tools = MetaServer::default().tool_definitions();
+        let tools = test_server(&[]).tool_definitions();
         let execute = tools.iter().find(|t| t.name == EXECUTE).unwrap();
         let annotations = execute.annotations.as_ref().expect("annotations");
         assert_eq!(annotations.read_only_hint, Some(false));
@@ -219,7 +234,7 @@ mod tests {
 
     #[test]
     fn list_tools_is_annotated_read_only() {
-        let tools = MetaServer::default().tool_definitions();
+        let tools = test_server(&[]).tool_definitions();
         let list = tools.iter().find(|t| t.name == LIST_TOOLS).unwrap();
         assert_eq!(
             list.annotations.as_ref().and_then(|a| a.read_only_hint),
@@ -231,7 +246,7 @@ mod tests {
     /// discovery round trip.
     #[test]
     fn execute_description_names_servers_in_scope() {
-        let server = MetaServer::new(vec!["sqlx".into(), "sea_orm".into()]);
+        let server = test_server(&["sqlx", "sea_orm"]);
         let text = server.execute_description();
         assert!(text.contains("Servers in scope: sqlx, sea_orm."), "{text}");
         assert!(text.contains(LIST_TOOLS), "should point at the detail tool");
@@ -239,7 +254,7 @@ mod tests {
 
     #[test]
     fn execute_description_is_explicit_when_nothing_applies() {
-        let text = MetaServer::default().execute_description();
+        let text = test_server(&[]).execute_description();
         assert!(text.contains("No MCP servers apply"), "{text}");
     }
 
@@ -247,7 +262,7 @@ mod tests {
     /// to reply in TypeScript.
     #[test]
     fn execute_description_warns_against_type_annotations() {
-        let text = MetaServer::default().execute_description();
+        let text = test_server(&[]).execute_description();
         assert!(text.contains("no type annotations"), "{text}");
     }
 }

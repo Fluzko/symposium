@@ -12,17 +12,22 @@ use crate::skills::skill_origin_hash;
 use symposium_install::Source;
 
 use sacp::schema::McpServer;
+use std::collections::BTreeMap;
 
 /// An MCP server entry in a plugin manifest.
-pub type McpServerEntry = McpServer;
-
-/// An MCP server entry with optional activation predicates.
 ///
-/// The server's `depends-on` and `predicates` fields are merged into one
-/// [`PredicateSet`](crate::predicate::PredicateSet); the server is only
-/// registered when that set holds (ANDed with the plugin-level set).
+/// Deliberately our own type rather than ACP's `McpServer`. That is a wire
+/// type for ACP session setup, and using it as a manifest schema forced
+/// authors to write `args = []` and `env = []` on every entry — neither field
+/// carries a serde default, and because the type was flattened, omitting one
+/// surfaced as `data did not match any variant of untagged enum McpServer`
+/// rather than naming the field. No MCP client in the ecosystem requires
+/// either.
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginMcpServer {
+    /// Name the server is known by, both to a script and in agent config.
+    pub name: String,
+
     #[serde(
         default,
         skip_serializing_if = "crate::predicate::PredicateSet::is_empty"
@@ -33,8 +38,105 @@ pub struct PluginMcpServer {
     #[serde(flatten)]
     pub overrides: McpServerOverrides,
 
-    #[serde(flatten)]
-    pub server: McpServerEntry,
+    pub transport: McpTransport,
+
+    /// Installations to acquire before this server is first started.
+    ///
+    /// The way a package-runner server pre-fetches: an installation carrying
+    /// only `install_commands` warms a cache without the download landing on
+    /// the first tool call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<String>,
+}
+
+/// How to reach a server.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpTransport {
+    Stdio(StdioServer),
+    Http(RemoteServer),
+    Sse(RemoteServer),
+}
+
+/// A server run as a child process.
+#[derive(Debug, Clone, Serialize)]
+pub struct StdioServer {
+    pub command: StdioCommand,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Environment for the child.
+    ///
+    /// A map, matching every MCP client's config format — and the form we have
+    /// to write into agent configuration anyway. Ordered so written output is
+    /// deterministic.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Directory to run in, resolved against the workspace root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+}
+
+/// Where a stdio server's executable comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StdioCommand {
+    /// A command resolved through `PATH`, or an absolute path.
+    Path(PathBuf),
+    /// The name of an `[[installations]]` entry, acquired before first use.
+    Installation(String),
+}
+
+/// A server reached over HTTP.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteServer {
+    pub url: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+}
+
+impl PluginMcpServer {
+    /// The entry as ACP models it, for writing into agent configuration.
+    ///
+    /// One direction only: ACP's shape is an output format here, not our
+    /// source of truth.
+    pub fn to_acp_entry(&self) -> McpServer {
+        match &self.transport {
+            McpTransport::Stdio(stdio) => McpServer::Stdio(
+                sacp::schema::McpServerStdio::new(
+                    self.name.clone(),
+                    match &stdio.command {
+                        StdioCommand::Path(path) => path.clone(),
+                        // An unacquired installation has no path yet; the name
+                        // is the best available placeholder.
+                        StdioCommand::Installation(name) => PathBuf::from(name),
+                    },
+                )
+                .args(stdio.args.clone())
+                .env(
+                    stdio
+                        .env
+                        .iter()
+                        .map(|(name, value)| sacp::schema::EnvVariable::new(name, value))
+                        .collect(),
+                ),
+            ),
+            McpTransport::Http(remote) => McpServer::Http(
+                sacp::schema::McpServerHttp::new(self.name.clone(), remote.url.clone())
+                    .headers(header_list(&remote.headers)),
+            ),
+            McpTransport::Sse(remote) => McpServer::Sse(
+                sacp::schema::McpServerSse::new(self.name.clone(), remote.url.clone())
+                    .headers(header_list(&remote.headers)),
+            ),
+        }
+    }
+}
+
+fn header_list(headers: &BTreeMap<String, String>) -> Vec<sacp::schema::HttpHeader> {
+    headers
+        .iter()
+        .map(|(name, value)| sacp::schema::HttpHeader::new(name, value))
+        .collect()
 }
 
 /// Per-server settings a plugin author may set, overriding the user's `[mcp]`
@@ -97,8 +199,16 @@ impl McpServerOverrides {
     }
 }
 
+/// The manifest form: what a plugin author writes.
+///
+/// `args`, `env`, `headers` and `cwd` all default, so the minimum entry is a
+/// name and a command. `deny_unknown_fields` means a typo names the key
+/// instead of being swallowed.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawPluginMcpServer {
+    name: String,
+
     #[serde(default, rename = "depends-on")]
     depends_on: Option<crate::predicate::DependsOnList>,
     /// Rejected: renamed to `depends-on`.
@@ -107,9 +217,6 @@ struct RawPluginMcpServer {
     #[serde(default)]
     predicates: crate::predicate::PredicateSet,
 
-    // Override fields are named siblings rather than a second `flatten`:
-    // two flattened fields make serde hand the same residual map to both, and
-    // the untagged `McpServer` enum cannot deserialize from it.
     #[serde(default, rename = "startup-timeout-secs")]
     startup_timeout_secs: Option<u64>,
     #[serde(default, rename = "tool-call-timeout-secs")]
@@ -119,35 +226,104 @@ struct RawPluginMcpServer {
     #[serde(default, rename = "disabled-tools")]
     disabled_tools: Option<Vec<String>>,
 
-    #[serde(flatten)]
-    server: McpServerEntry,
+    /// Executable to run, resolved through `PATH` unless absolute.
+    #[serde(default)]
+    command: Option<PathBuf>,
+    /// An `[[installations]]` entry providing the executable. Acquired before
+    /// the server is first started.
+    #[serde(default)]
+    installation: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+
+    /// Reached over HTTP instead of as a child process.
+    #[serde(default)]
+    url: Option<String>,
+    /// `http` (the default for a `url`) or `sse`.
+    #[serde(default)]
+    transport: Option<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+
+    /// Installations to acquire before first use.
+    #[serde(default)]
+    requirements: Vec<String>,
 }
 
 impl RawPluginMcpServer {
     fn validate(self) -> Result<PluginMcpServer> {
         reject_crates_field(&self.crates)?;
+        let name = self.name;
+
         let overrides = McpServerOverrides {
             startup_timeout_secs: self.startup_timeout_secs,
             tool_call_timeout_secs: self.tool_call_timeout_secs,
             enabled_tools: self.enabled_tools,
             disabled_tools: self.disabled_tools,
         };
-        overrides.validate(server_name(&self.server))?;
+        overrides.validate(&name)?;
+
+        let is_remote = self.url.is_some();
+        let is_local = self.command.is_some() || self.installation.is_some();
+        if is_remote && is_local {
+            bail!(
+                "mcp server `{name}` sets both `url` and a local command; \
+                 a server is reached one way or the other"
+            );
+        }
+
+        let transport = if let Some(url) = self.url {
+            if !self.args.is_empty() || !self.env.is_empty() || self.cwd.is_some() {
+                bail!(
+                    "mcp server `{name}` sets `args`, `env` or `cwd` alongside `url`; \
+                     those apply only to a server run as a child process"
+                );
+            }
+            let remote = RemoteServer {
+                url,
+                headers: self.headers,
+            };
+            match self.transport.as_deref() {
+                None | Some("http") => McpTransport::Http(remote),
+                Some("sse") => McpTransport::Sse(remote),
+                Some(other) => bail!(
+                    "mcp server `{name}` has unknown transport `{other}`; expected `http` or `sse`"
+                ),
+            }
+        } else {
+            if !self.headers.is_empty() {
+                bail!("mcp server `{name}` sets `headers` without a `url`");
+            }
+            let command = match (self.command, self.installation) {
+                (Some(_), Some(_)) => bail!(
+                    "mcp server `{name}` sets both `command` and `installation`; \
+                     use one or the other"
+                ),
+                (Some(path), None) => StdioCommand::Path(path),
+                (None, Some(installation)) => StdioCommand::Installation(installation),
+                (None, None) => {
+                    bail!("mcp server `{name}` needs a `command`, an `installation`, or a `url`")
+                }
+            };
+            McpTransport::Stdio(StdioServer {
+                command,
+                args: self.args,
+                env: self.env,
+                cwd: self.cwd,
+            })
+        };
+
         Ok(PluginMcpServer {
+            name,
             predicates: crate::predicate::PredicateSet::merged(self.depends_on, self.predicates),
             overrides,
-            server: self.server,
+            transport,
+            requirements: self.requirements,
         })
-    }
-}
-
-/// Name of an MCP server entry, whatever its transport.
-fn server_name(server: &McpServerEntry) -> &str {
-    match server {
-        McpServer::Stdio(s) => &s.name,
-        McpServer::Http(s) => &s.name,
-        McpServer::Sse(s) => &s.name,
-        _ => "<unknown>",
     }
 }
 
@@ -617,10 +793,10 @@ impl Plugin {
     pub fn applicable_mcp_servers(
         &self,
         ctx: &mut crate::predicate::PredicateContext,
-    ) -> Vec<McpServerEntry> {
+    ) -> Vec<McpServer> {
         self.applicable_mcp_entries(ctx)
             .into_iter()
-            .map(|s| s.server.clone())
+            .map(PluginMcpServer::to_acp_entry)
             .collect()
     }
 
@@ -1483,8 +1659,15 @@ fn load_registry_impl(
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to load plugin");
                             warnings.push(LoadWarning {
-                                path: dir.join("<unknown>.toml"),
-                                message: format!("failed to load plugin: {e}"),
+                                // The source directory, not a fabricated file
+                                // name: the failing path is already in the
+                                // error's context.
+                                path: dir.clone(),
+                                // `{e:#}` walks the whole chain. Plain `{e}`
+                                // printed only the outermost context — which
+                                // named the file and nothing about what was
+                                // wrong with it.
+                                message: format!("failed to load plugin: {e:#}"),
                             });
                         }
                     }
@@ -2749,7 +2932,6 @@ mod tests {
                 name = "server"
                 command = "/usr/bin/true"
                 args = ["--stdio"]
-                env = []
                 crates = ["serde"]
             "#},
         ] {
@@ -3435,6 +3617,42 @@ mod tests {
         );
     }
 
+    /// A failed manifest has to say what was wrong with it. The outermost
+    /// context names the file; the cause is what an author can act on.
+    #[test]
+    fn manifest_load_errors_carry_their_cause() {
+        use crate::test_utils::{File, instantiate_fixture};
+        let tmp = instantiate_fixture(&[File(
+            "broken/SYMPOSIUM.toml",
+            indoc! {r#"
+                name = "broken"
+                depends-on = ["*"]
+
+                [[mcp_servers]]
+                name = "s"
+                command = "x"
+                startup_timeout_secs = 30
+            "#},
+        )]);
+
+        let contents = scan_source_dir(tmp.path(), "test").expect("scan");
+        let err = contents
+            .plugins
+            .into_iter()
+            .find_map(Result::err)
+            .expect("the manifest should have failed");
+
+        let chained = format!("{err:#}");
+        assert!(
+            chained.contains("SYMPOSIUM.toml"),
+            "should name the file, got: {chained}"
+        );
+        assert!(
+            chained.contains("startup_timeout_secs"),
+            "should name the offending key, got: {chained}"
+        );
+    }
+
     #[test]
     fn parse_manifest_with_no_mcp_servers() {
         let plugin = from_str(SAMPLE).expect("parse");
@@ -3450,8 +3668,6 @@ mod tests {
             [[mcp_servers]]
             name = "sqlx"
             command = "/usr/bin/true"
-            args = []
-            env = []
         "#})
         .expect("parse");
         assert_eq!(
@@ -3471,8 +3687,6 @@ mod tests {
             [[mcp_servers]]
             name = "sqlx"
             command = "/usr/bin/true"
-            args = []
-            env = []
             startup-timeout-secs = 45
             tool-call-timeout-secs = 90
             enabled-tools = ["query", "explain"]
@@ -3499,8 +3713,6 @@ mod tests {
             [[mcp_servers]]
             name = "sqlx"
             command = "/usr/bin/true"
-            args = []
-            env = []
             enabled-tools = []
         "#})
         .expect("parse");
@@ -3516,8 +3728,6 @@ mod tests {
             [[mcp_servers]]
             name = "sqlx"
             command = "/usr/bin/true"
-            args = []
-            env = []
             enabled-tools = ["query"]
             disabled-tools = ["drop"]
         "#})
@@ -3535,10 +3745,8 @@ mod tests {
             depends-on = ["*"]
 
             [[mcp_servers]]
-            type = "http"
             name = "remote"
             url = "http://localhost:8080/mcp"
-            headers = []
             tool-call-timeout-secs = 15
         "#})
         .expect("parse");
@@ -3548,15 +3756,175 @@ mod tests {
         );
     }
 
+    fn mcp_entry(toml_src: &str) -> Result<PluginMcpServer> {
+        toml::from_str::<RawPluginMcpServer>(toml_src)?.validate()
+    }
+
+    /// The minimum an author should have to write. Previously this needed
+    /// `args = []` and `env = []` as well, because the manifest flattened a
+    /// wire type whose fields carry no serde defaults.
     #[test]
-    fn mcp_entry_stdio() {
-        let entry: McpServerEntry = toml::from_str(indoc! {r#"
+    fn mcp_entry_needs_only_a_name_and_command() {
+        let entry = mcp_entry(indoc! {r#"
+            name = "sqlx"
+            command = "sqlx-mcp"
+        "#})
+        .expect("parse");
+
+        assert_eq!(entry.name, "sqlx");
+        let McpTransport::Stdio(stdio) = &entry.transport else {
+            panic!("expected stdio, got {:#?}", entry.transport);
+        };
+        assert_eq!(stdio.command, StdioCommand::Path("sqlx-mcp".into()));
+        assert!(stdio.args.is_empty());
+        assert!(stdio.env.is_empty());
+        assert_eq!(stdio.cwd, None);
+    }
+
+    /// A map, matching every MCP client's config format, and written as an
+    /// inline table so it stays visibly per-server.
+    #[test]
+    fn mcp_entry_reads_env_as_a_map() {
+        let entry = mcp_entry(indoc! {r#"
+            name = "sqlx"
+            command = "sqlx-mcp"
+            args = ["--stdio"]
+            env = { RUST_LOG = "debug", API_KEY = "x" }
+            cwd = "crates/db"
+        "#})
+        .expect("parse");
+
+        let McpTransport::Stdio(stdio) = &entry.transport else {
+            panic!("expected stdio");
+        };
+        assert_eq!(stdio.args, vec!["--stdio".to_string()]);
+        assert_eq!(stdio.env.get("RUST_LOG").map(String::as_str), Some("debug"));
+        assert_eq!(stdio.env.get("API_KEY").map(String::as_str), Some("x"));
+        assert_eq!(stdio.cwd, Some("crates/db".into()));
+    }
+
+    #[test]
+    fn mcp_entry_accepts_an_installation_instead_of_a_command() {
+        let entry = mcp_entry(indoc! {r#"
+            name = "sqlx"
+            installation = "sqlx-mcp"
+        "#})
+        .expect("parse");
+
+        let McpTransport::Stdio(stdio) = &entry.transport else {
+            panic!("expected stdio");
+        };
+        assert_eq!(
+            stdio.command,
+            StdioCommand::Installation("sqlx-mcp".to_string())
+        );
+    }
+
+    #[test]
+    fn mcp_entry_rejects_both_command_and_installation() {
+        let err = mcp_entry(indoc! {r#"
+            name = "sqlx"
+            command = "sqlx-mcp"
+            installation = "sqlx-mcp"
+        "#})
+        .expect_err("both should be rejected");
+        assert!(err.to_string().contains("one or the other"), "got: {err}");
+    }
+
+    #[test]
+    fn mcp_entry_needs_some_way_to_reach_the_server() {
+        let err = mcp_entry(indoc! {r#"
+            name = "sqlx"
+        "#})
+        .expect_err("no transport should be rejected");
+        assert!(err.to_string().contains("needs a `command`"), "got: {err}");
+    }
+
+    /// A typo should name the key, not report a mismatch on a type the author
+    /// never mentioned.
+    #[test]
+    fn mcp_entry_rejects_an_unknown_key_by_name() {
+        let err = toml::from_str::<RawPluginMcpServer>(indoc! {r#"
+            name = "sqlx"
+            command = "sqlx-mcp"
+            startup_timeout_secs = 30
+        "#})
+        .expect_err("misspelled key should not parse");
+        assert!(
+            err.to_string().contains("startup_timeout_secs"),
+            "got: {err}"
+        );
+    }
+
+    // -- remote transports --
+
+    #[test]
+    fn mcp_entry_defaults_a_url_to_http() {
+        let entry = mcp_entry(indoc! {r#"
+            name = "remote"
+            url = "http://localhost:8080/mcp"
+            headers = { Authorization = "Bearer x" }
+        "#})
+        .expect("parse");
+
+        let McpTransport::Http(remote) = &entry.transport else {
+            panic!("expected http, got {:#?}", entry.transport);
+        };
+        assert_eq!(remote.url, "http://localhost:8080/mcp");
+        assert_eq!(
+            remote.headers.get("Authorization").map(String::as_str),
+            Some("Bearer x")
+        );
+    }
+
+    #[test]
+    fn mcp_entry_accepts_sse_transport() {
+        let entry = mcp_entry(indoc! {r#"
+            name = "remote"
+            url = "http://localhost:8080/sse"
+            transport = "sse"
+        "#})
+        .expect("parse");
+        assert!(matches!(entry.transport, McpTransport::Sse(_)));
+    }
+
+    #[test]
+    fn mcp_entry_rejects_child_process_fields_on_a_url() {
+        let err = mcp_entry(indoc! {r#"
+            name = "remote"
+            url = "http://localhost:8080/mcp"
+            args = ["--stdio"]
+        "#})
+        .expect_err("args make no sense for a url");
+        assert!(err.to_string().contains("child process"), "got: {err}");
+    }
+
+    #[test]
+    fn mcp_entry_rejects_a_url_and_a_command_together() {
+        let err = mcp_entry(indoc! {r#"
+            name = "remote"
+            url = "http://localhost:8080/mcp"
+            command = "thing"
+        "#})
+        .expect_err("one way or the other");
+        assert!(
+            err.to_string().contains("one way or the other"),
+            "got: {err}"
+        );
+    }
+
+    /// Agent configuration is still written in ACP's shape, so the
+    /// conversion out of our own type has to be exercised.
+    #[test]
+    fn mcp_entry_converts_to_the_acp_shape() {
+        let entry = mcp_entry(indoc! {r#"
             name = "my-server"
             command = "/usr/local/bin/my-server"
             args = ["--stdio"]
-            env = []
+            env = { API_KEY = "x" }
         "#})
         .expect("parse");
+
         expect_test::expect![[r#"
             Stdio(
                 McpServerStdio {
@@ -3565,53 +3933,17 @@ mod tests {
                     args: [
                         "--stdio",
                     ],
-                    env: [],
+                    env: [
+                        EnvVariable {
+                            name: "API_KEY",
+                            value: "x",
+                            meta: None,
+                        },
+                    ],
                     meta: None,
                 },
             )"#]]
-        .assert_eq(&format!("{entry:#?}"));
-    }
-
-    #[test]
-    fn mcp_entry_http() {
-        let entry: McpServerEntry = toml::from_str(indoc! {r#"
-            type = "http"
-            name = "my-server"
-            url = "http://localhost:8080/mcp"
-            headers = []
-        "#})
-        .expect("parse");
-        expect_test::expect![[r#"
-            Http(
-                McpServerHttp {
-                    name: "my-server",
-                    url: "http://localhost:8080/mcp",
-                    headers: [],
-                    meta: None,
-                },
-            )"#]]
-        .assert_eq(&format!("{entry:#?}"));
-    }
-
-    #[test]
-    fn mcp_entry_sse() {
-        let entry: McpServerEntry = toml::from_str(indoc! {r#"
-            type = "sse"
-            name = "my-server"
-            url = "http://localhost:8080/sse"
-            headers = []
-        "#})
-        .expect("parse");
-        expect_test::expect![[r#"
-            Sse(
-                McpServerSse {
-                    name: "my-server",
-                    url: "http://localhost:8080/sse",
-                    headers: [],
-                    meta: None,
-                },
-            )"#]]
-        .assert_eq(&format!("{entry:#?}"));
+        .assert_eq(&format!("{:#?}", entry.to_acp_entry()));
     }
 
     /// Cargo-installed binary referenced by name as the hook's command.

@@ -173,7 +173,7 @@ fn workspace_with_backing_server() -> Workspace {
         format!(
             "name = \"db-plugin\"\ndepends-on = [\"*\"]\n\n\
              [[mcp_servers]]\nname = \"sqlx\"\ncommand = {:?}\n\
-             args = [\"--config\", {:?}]\nenv = []\n",
+             args = [\"--config\", {:?}]\n",
             mock_binary().display().to_string(),
             mock_config.display().to_string(),
         ),

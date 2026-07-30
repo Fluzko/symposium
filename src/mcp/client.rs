@@ -29,6 +29,9 @@ pub struct SpawnSpec {
     pub command: PathBuf,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// Directory to run in. A server that reads the project it serves needs
+    /// this; four of the seven client config formats have it.
+    pub cwd: Option<PathBuf>,
     pub startup_timeout: Duration,
 }
 
@@ -92,6 +95,9 @@ impl BackingServer {
         command.args(&spec.args);
         for (key, value) in &spec.env {
             command.env(key, value);
+        }
+        if let Some(cwd) = &spec.cwd {
+            command.current_dir(cwd);
         }
 
         // Stderr is captured from spawn rather than after the handshake:
@@ -169,7 +175,7 @@ impl BackingServer {
         let params = CallToolRequestParams::new(tool.to_string());
         let params = match args {
             Value::Object(map) => params.with_arguments(map),
-            Value::Null => params,
+            Value::Null => params.with_arguments(Map::new()),
             // A non-object argument has no place in the wire form.
             other => params.with_arguments(Map::from_iter([("value".to_string(), other)])),
         };

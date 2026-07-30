@@ -254,6 +254,7 @@ mod tests {
             command: mock_binary(),
             args: vec!["--config".to_string(), fixture.config.display().to_string()],
             env: Vec::new(),
+            cwd: None,
             startup_timeout,
         }
     }
@@ -383,6 +384,7 @@ mod tests {
                 command: "true".into(),
                 args: vec![],
                 env: vec![],
+                cwd: None,
                 startup_timeout: Duration::from_secs(1),
             },
             RestartPolicy {
@@ -433,6 +435,26 @@ mod tests {
             "cold",
             "the dead process should be dropped, not reused"
         );
+        sup.shutdown().await;
+    }
+
+    /// A tool with no parameters must still be sent an object. The spec makes
+    /// `arguments` optional, but zod-based servers reject an absent field, and
+    /// those are a large share of what is published.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_taking_no_arguments_is_sent_an_empty_object() {
+        let f = fixture(json!({
+            "name": "mock",
+            "tools": [{"name": "ping", "behavior": {"kind": "echo"}}]
+        }));
+        let mut sup = Supervisor::new(spec(&f, Duration::from_secs(10)), fast_policy());
+
+        // `echo` returns whatever arguments it received.
+        let out = sup
+            .call("ping", Value::Null, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(out, json!({}), "an object, not null");
         sup.shutdown().await;
     }
 

@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use sacp::schema::McpServer;
+use crate::plugins::{McpTransport, StdioCommand};
 
 use crate::config::Symposium;
 use crate::mcp::client::SpawnSpec;
@@ -99,7 +99,7 @@ fn build(
     let mut claimed: Vec<(String, String)> = Vec::new();
 
     for (entry, owner) in entries {
-        let name = server_name(&entry.server).to_string();
+        let name = entry.name.clone();
 
         // The meta-server's own tools live in the same namespace as the
         // servers it exposes; a backing server taking one would shadow it.
@@ -121,10 +121,19 @@ fn build(
             continue;
         }
 
-        let McpServer::Stdio(stdio) = &entry.server else {
+        let McpTransport::Stdio(stdio) = &entry.transport else {
             resolution.rejected.push(Rejection {
                 server: name,
                 reason: "only stdio servers are supported".to_string(),
+            });
+            continue;
+        };
+        let StdioCommand::Path(command) = &stdio.command else {
+            // Resolving an installation needs the acquire pipeline, which the
+            // caller runs before building specs.
+            resolution.rejected.push(Rejection {
+                server: name,
+                reason: "installation-backed servers are resolved before this point".to_string(),
             });
             continue;
         };
@@ -133,13 +142,14 @@ fn build(
         resolution.servers.push(ResolvedServer {
             spec: SpawnSpec {
                 name: name.clone(),
-                command: stdio.command.clone(),
+                command: command.clone(),
                 args: stdio.args.clone(),
                 env: stdio
                     .env
                     .iter()
-                    .map(|v| (v.name.clone(), v.value.clone()))
+                    .map(|(name, value)| (name.clone(), value.clone()))
                     .collect(),
+                cwd: stdio.cwd.clone(),
                 startup_timeout: Duration::from_secs(
                     entry.overrides.startup_timeout_secs.unwrap_or(30),
                 ),
@@ -168,26 +178,23 @@ fn call_timeout(overrides: &McpServerOverrides, script_timeout_secs: u64) -> Dur
     Duration::from_secs(requested.min(ceiling))
 }
 
-fn server_name(server: &McpServer) -> &str {
-    match server {
-        McpServer::Stdio(s) => &s.name,
-        McpServer::Http(s) => &s.name,
-        McpServer::Sse(s) => &s.name,
-        _ => "<unknown>",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::plugins::PluginMcpServer;
-    use sacp::schema::McpServerStdio;
 
     fn stdio(name: &str) -> PluginMcpServer {
         PluginMcpServer {
+            name: name.to_string(),
             predicates: Default::default(),
             overrides: McpServerOverrides::default(),
-            server: McpServer::Stdio(McpServerStdio::new(name, "/usr/bin/true")),
+            transport: McpTransport::Stdio(crate::plugins::StdioServer {
+                command: StdioCommand::Path("/usr/bin/true".into()),
+                args: Vec::new(),
+                env: Default::default(),
+                cwd: None,
+            }),
+            requirements: Vec::new(),
         }
     }
 
@@ -216,12 +223,14 @@ mod tests {
     #[test]
     fn http_servers_are_refused_with_a_reason() {
         let entry = PluginMcpServer {
+            name: "remote".to_string(),
             predicates: Default::default(),
             overrides: McpServerOverrides::default(),
-            server: McpServer::Http(sacp::schema::McpServerHttp::new(
-                "remote",
-                "http://localhost:8080/mcp",
-            )),
+            transport: McpTransport::Http(crate::plugins::RemoteServer {
+                url: "http://localhost:8080/mcp".to_string(),
+                headers: Default::default(),
+            }),
+            requirements: Vec::new(),
         };
         let out = resolve_all(vec![(&entry, "p")], 120);
 

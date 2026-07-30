@@ -572,7 +572,7 @@ pub fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
     let mcp_servers: Vec<sacp::schema::McpServer> = registry
         .plugins
         .iter()
-        .flat_map(|p| p.plugin.mcp_servers.iter().map(|s| s.server.clone()))
+        .flat_map(|p| p.plugin.mcp_servers.iter().map(|s| s.to_acp_entry()))
         .collect();
 
     let server_names: Vec<&str> = mcp_servers

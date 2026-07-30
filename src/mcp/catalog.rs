@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 
 use super::declarations::{ToolBinding, ToolDecl, binding_table, render_server};
 use super::dispatch::Namespace;
-use super::resolve::{Rejection, Resolution, ResolvedServer};
+use super::resolve::{Rejection, Resolution, ResolvedServer, ServerCommand};
 use super::supervisor::{RestartPolicy, Supervisor};
 
 /// How much to say about each tool.
@@ -98,19 +98,29 @@ impl Query {
     }
 }
 
-/// The workspace's backing servers, described on demand.
-pub struct Catalog {
+/// What the workspace resolved to, swapped as a whole so a refresh is never
+/// observed half-applied.
+struct CatalogState {
     entries: Vec<Entry>,
-    read_only: bool,
     /// Servers that could not be used at all. Reported to the model rather
     /// than only logged: a server silently missing looks like a workspace
     /// that never declared it.
     rejected: Vec<Rejection>,
+    /// Filter entries the caller named that match no server.
+    known_names: Vec<String>,
+}
+
+/// The workspace's backing servers, described on demand.
+pub struct Catalog {
+    state: std::sync::RwLock<Arc<CatalogState>>,
+    read_only: bool,
     policy: RestartPolicy,
     /// Needed to acquire an installation-backed server on first use.
     sym: Arc<Symposium>,
-    /// Filter entries the caller named that match no server.
-    known_names: Vec<String>,
+    /// Where the session is running, so the workspace can be resolved again.
+    cwd: std::path::PathBuf,
+    /// Modification time of `Cargo.lock` when the state was last built.
+    resolved_at: std::sync::Mutex<Option<std::time::SystemTime>>,
 }
 
 struct Entry {
@@ -118,7 +128,9 @@ struct Entry {
     /// Absent until first use. Building it may acquire an installation, which
     /// must not happen at startup — a client may spawn a throwaway copy of the
     /// meta-server just to probe it.
-    supervisor: Mutex<Option<Supervisor>>,
+    ///
+    /// Shared so a refresh can carry a running server into the new state.
+    supervisor: Arc<Mutex<Option<Supervisor>>>,
 }
 
 impl Catalog {
@@ -127,23 +139,65 @@ impl Catalog {
         resolution: Resolution,
         policy: RestartPolicy,
         read_only: bool,
+        cwd: std::path::PathBuf,
     ) -> Self {
-        let Resolution { servers, rejected } = resolution;
-        let known_names = servers.iter().map(|s| s.name.clone()).collect();
-        let entries = servers
-            .into_iter()
-            .map(|resolved| Entry {
-                supervisor: Mutex::new(None),
-                resolved,
-            })
-            .collect();
+        let resolved_at = cargo_lock_mtime(&cwd);
         Self {
-            entries,
+            state: std::sync::RwLock::new(Arc::new(CatalogState::new(resolution, &[]))),
             read_only,
-            rejected,
             policy,
             sym,
-            known_names,
+            cwd,
+            resolved_at: std::sync::Mutex::new(resolved_at),
+        }
+    }
+
+    fn state(&self) -> Arc<CatalogState> {
+        Arc::clone(&self.state.read().expect("catalog state lock"))
+    }
+
+    /// Rebuild the server set when the workspace changed under us, so a
+    /// dependency added mid-session exposes its tools without a restart.
+    ///
+    /// Servers whose spawn is unchanged are carried across still running.
+    async fn refresh_if_stale(&self) {
+        if !self.sym.config.auto_sync {
+            return;
+        }
+        let Some(mtime) = cargo_lock_mtime(&self.cwd) else {
+            return;
+        };
+        {
+            let seen = self.resolved_at.lock().expect("catalog mtime lock");
+            if *seen == Some(mtime) {
+                return;
+            }
+        }
+
+        let resolution = crate::mcp::resolve::resolve(&self.sym, &self.cwd);
+        let previous = self.state();
+        let next = Arc::new(CatalogState::new(resolution, &previous.entries));
+
+        // Anything the new state did not adopt is no longer applicable.
+        let dropped: Vec<Arc<Mutex<Option<Supervisor>>>> = previous
+            .entries
+            .iter()
+            .filter(|old| {
+                !next
+                    .entries
+                    .iter()
+                    .any(|new| Arc::ptr_eq(&new.supervisor, &old.supervisor))
+            })
+            .map(|old| Arc::clone(&old.supervisor))
+            .collect();
+
+        *self.state.write().expect("catalog state lock") = next;
+        *self.resolved_at.lock().expect("catalog mtime lock") = Some(mtime);
+
+        for supervisor in dropped {
+            if let Some(running) = supervisor.lock().await.as_mut() {
+                running.shutdown().await;
+            }
         }
     }
 
@@ -165,29 +219,31 @@ impl Catalog {
     }
 
     pub fn server_names(&self) -> Vec<String> {
-        self.known_names.clone()
+        self.state().known_names.clone()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.state().entries.is_empty()
     }
 
     /// Describe the matching tools.
     pub async fn describe(&self, query: &Query) -> String {
-        if self.entries.is_empty() && self.rejected.is_empty() {
+        self.refresh_if_stale().await;
+        let state = self.state();
+        if state.entries.is_empty() && state.rejected.is_empty() {
             return "No MCP servers apply to this workspace.".to_string();
         }
 
         let mut sections = Vec::new();
         // Refusals first: they explain an absence the model would otherwise
         // have to infer.
-        let mut problems: Vec<String> = self
+        let mut problems: Vec<String> = state
             .rejected
             .iter()
             .map(|r| format!("{}: {}", r.server, r.reason))
             .collect();
 
-        for entry in &self.entries {
+        for entry in &state.entries {
             if !query.wants_server(entry.resolved.name.as_str()) {
                 continue;
             }
@@ -239,10 +295,10 @@ impl Catalog {
         // rather than answering with silence.
         if let Some(requested) = &query.servers {
             for name in requested {
-                if !self.known_names.iter().any(|k| k == name) {
+                if !state.known_names.iter().any(|k| k == name) {
                     problems.push(format!(
                         "no server named `{name}`. Available: {}",
-                        self.known_names.join(", ")
+                        state.known_names.join(", ")
                     ));
                 }
             }
@@ -267,11 +323,11 @@ impl Catalog {
 
     /// The namespaces a script sees, one per server.
     ///
-    /// Nothing is started here. Each namespace resolves its tools when the
-    /// script first calls one, so a script that touches one server does not
-    /// wait on -- or fail because of -- the others.
-    pub fn namespaces(&self) -> (Vec<Namespace>, Vec<String>) {
-        let namespaces = self
+    /// Nothing is started here; a namespace resolves its tools on first call.
+    pub async fn namespaces(&self) -> (Vec<Namespace>, Vec<String>) {
+        self.refresh_if_stale().await;
+        let state = self.state();
+        let namespaces = state
             .entries
             .iter()
             .map(|entry| Namespace {
@@ -281,8 +337,8 @@ impl Catalog {
             .collect();
 
         // A refused server never becomes a namespace, so its absence needs a
-        // reason here rather than at call time.
-        let problems = self
+        // reason here.
+        let problems = state
             .rejected
             .iter()
             .map(|r| format!("{}: {}", r.server, r.reason))
@@ -293,13 +349,14 @@ impl Catalog {
 
     /// Call a tool on a backing server, honoring its filters.
     /// `key` is the property name the script used, which may be a sanitized
-    /// alias. Resolving it here rather than when the namespace was built is
-    /// what lets a server stay cold until something calls it.
+    /// alias. Resolving it needs the tool list, so this is what starts the
+    /// server.
     pub async fn call(&self, server: &str, key: &str, args: Value) -> Result<Value, String> {
-        let Some(entry) = self.entries.iter().find(|e| e.resolved.name == server) else {
+        let state = self.state();
+        let Some(entry) = state.entries.iter().find(|e| e.resolved.name == server) else {
             return Err(format!(
                 "no server named `{server}`. Available: {}",
-                self.known_names.join(", ")
+                state.known_names.join(", ")
             ));
         };
 
@@ -315,8 +372,7 @@ impl Catalog {
             .map(|t| t.name.as_ref())
             .collect();
 
-        // The same table the declarations are rendered from, so every name
-        // the model was shown resolves.
+        // The same table the declarations are rendered from.
         let table = binding_table(visible);
         let Some(binding) = table.iter().find(|b| b.keys.iter().any(|k| k == key)) else {
             return Err(unknown_tool(server, key, &table));
@@ -331,7 +387,7 @@ impl Catalog {
 
     /// Close every running server.
     pub async fn shutdown(&self) {
-        for entry in &self.entries {
+        for entry in &self.state().entries {
             if let Some(supervisor) = entry.supervisor.lock().await.as_mut() {
                 supervisor.shutdown().await;
             }
@@ -340,7 +396,8 @@ impl Catalog {
 
     /// How long a script may run against this catalog's servers.
     pub fn max_call_timeout(&self) -> Duration {
-        self.entries
+        self.state()
+            .entries
             .iter()
             .map(|e| e.resolved.tool_call_timeout)
             .max()
@@ -364,10 +421,66 @@ fn query_narrows(query: &Query) -> bool {
     query.tools.is_some() || query.pattern.is_some()
 }
 
-/// Report a name the script used that no tool answers to.
+impl CatalogState {
+    /// Adopts any still-matching server from `previous`, so a running child
+    /// survives a refresh.
+    fn new(resolution: Resolution, previous: &[Entry]) -> Self {
+        let Resolution { servers, rejected } = resolution;
+        let known_names = servers.iter().map(|s| s.name.clone()).collect();
+        let entries = servers
+            .into_iter()
+            .map(|resolved| {
+                let supervisor = previous
+                    .iter()
+                    .find(|old| same_spawn(&old.resolved, &resolved))
+                    .map(|old| Arc::clone(&old.supervisor))
+                    .unwrap_or_default();
+                Entry {
+                    resolved,
+                    supervisor,
+                }
+            })
+            .collect();
+        Self {
+            entries,
+            rejected,
+            known_names,
+        }
+    }
+}
+
+/// Whether two resolutions describe the same child process. Only the spawn
+/// matters; anything else that moved in the manifest does not.
+fn same_spawn(a: &ResolvedServer, b: &ResolvedServer) -> bool {
+    a.name == b.name
+        && a.args == b.args
+        && a.env == b.env
+        && a.cwd == b.cwd
+        && match (&a.command, &b.command) {
+            (ServerCommand::Path(x), ServerCommand::Path(y)) => x == y,
+            (ServerCommand::Installation(x), ServerCommand::Installation(y)) => x.name == y.name,
+            _ => false,
+        }
+}
+
+/// `Cargo.lock`'s modification time, searched upward from `cwd`. Walked
+/// rather than asked of cargo: this runs on every describe.
+fn cargo_lock_mtime(cwd: &std::path::Path) -> Option<std::time::SystemTime> {
+    let mut dir = Some(cwd);
+    while let Some(current) = dir {
+        let candidate = current.join("Cargo.lock");
+        if let Ok(meta) = std::fs::metadata(&candidate) {
+            return meta.modified().ok();
+        }
+        dir = current.parent();
+    }
+    None
+}
+
+/// Report a name no tool answers to.
 ///
-/// The proxy hands back a callable for any property, so this is where a typo
-/// surfaces. Naming the nearest match makes it recoverable inside the script.
+/// The proxy answers any property, so a typo only surfaces here. Naming the
+/// nearest match makes it recoverable inside the script.
 fn unknown_tool(server: &str, key: &str, table: &[ToolBinding]) -> String {
     let mut names: Vec<&str> = table
         .iter()
@@ -387,8 +500,8 @@ fn unknown_tool(server: &str, key: &str, table: &[ToolBinding]) -> String {
     }
 }
 
-/// The candidate sharing the longest prefix with `key`, which catches the
-/// mistakes a model actually makes: a wrong suffix or a dropped separator.
+/// The candidate sharing the longest prefix with `key`: a wrong suffix or a
+/// dropped separator.
 fn closest<'a>(key: &str, candidates: &[&'a str]) -> Option<&'a str> {
     let normalize = |s: &str| s.to_ascii_lowercase().replace(['-', '_'], "");
     let target = normalize(key);

@@ -1,7 +1,7 @@
 //! Reaching backing servers from inside the sandbox.
 //!
-//! A script calls `await sqlx.query({...})`. That name is an object installed
-//! by the host, whose methods are Rust closures. Each closure hands the call
+//! A script calls `await sqlx.query({...})`. That name is a proxy installed
+//! by the host; a property lookup yields a Rust closure that hands the call
 //! to whoever is driving the sandbox and waits for the answer.
 //!
 //! The call crosses a runtime boundary. The engine runs on its own thread
@@ -12,6 +12,9 @@
 //! Namespaces are built through the object API rather than by generating
 //! JavaScript, so server and tool names — which come from plugin manifests —
 //! never reach a code position.
+//!
+//! Nothing is known about a server until a script names one of its tools, so
+//! a script does not wait on servers it never mentions.
 
 use rquickjs::function::{Async, Constructor, Opt};
 use rquickjs::{CatchResultExt, Ctx, Function, Object};
@@ -23,8 +26,8 @@ use tokio::sync::{mpsc, oneshot};
 pub struct ToolCall {
     /// Server name as declared by the plugin, not the sanitized spelling.
     pub server: String,
-    /// The property name the script used. May be a sanitized alias, so the
-    /// host resolves it against the server's tool list before dispatching.
+    /// The property name the script used. May be a sanitized alias; the host
+    /// resolves it against the server's tool list.
     pub tool: String,
     /// The single argument the script passed, or null.
     pub args: Value,
@@ -51,14 +54,9 @@ pub struct Namespace {
 
 /// Install one global per namespace.
 ///
-/// Each is a proxy rather than an object of functions, so nothing has to be
-/// known about a server before a script runs. A server starts when a script
-/// calls one of its tools, not when the script begins — otherwise one
-/// unreachable server delays, or fails, a script that never mentions it.
-///
-/// The cost is that a property lookup cannot say whether a tool exists: the
-/// proxy hands back a callable for any plausible name and the host resolves
-/// it on call.
+/// A proxy answers any property with a callable, so nothing about a server
+/// need be known here. The cost is that a lookup cannot say whether a tool
+/// exists; the host decides that when the call arrives.
 pub fn install<'js>(
     ctx: &Ctx<'js>,
     namespaces: &[Namespace],
@@ -98,10 +96,9 @@ pub fn install<'js>(
 
 /// Property names the proxy must not answer to.
 ///
-/// `then` is the load-bearing one: the engine looks for it on any value that
-/// is awaited or resolved, so answering it makes the namespace itself a
-/// thenable and `await sqlx` hangs on a tool call named `then`. The rest are
-/// names the runtime or a serializer reaches for on its own.
+/// `then` is why this exists: the engine looks for it on anything awaited, so
+/// answering makes the namespace a thenable and `await sqlx` dispatches a
+/// tool call named `then`. The rest the runtime reaches for on its own.
 fn is_reserved_property(key: &str) -> bool {
     matches!(
         key,
@@ -365,9 +362,8 @@ mod tests {
         assert_eq!(asked[0].2, Value::Null);
     }
 
-    /// Both spellings reach the host, each carrying the name the script
-    /// wrote. Mapping an alias to its wire name needs the server's tool list,
-    /// so it happens where that list lives.
+    /// Both spellings reach the host as written; mapping an alias to its
+    /// wire name needs the tool list, so it happens where that list is.
     #[tokio::test]
     async fn both_spellings_reach_the_host_as_written() {
         let (out, asked) = run_with(
@@ -386,9 +382,8 @@ mod tests {
         assert_eq!(keys, vec!["migrate-status", "migrate_status"]);
     }
 
-    /// The engine looks for `then` on anything awaited. A namespace that
-    /// answers it becomes a thenable, and `await sqlx` dispatches a tool call
-    /// named `then` instead of resolving.
+    /// A namespace that answers `then` becomes a thenable, and `await sqlx`
+    /// dispatches a tool call named `then` instead of resolving.
     #[tokio::test]
     async fn a_namespace_is_not_a_thenable() {
         let (out, asked) = run_with(
@@ -402,9 +397,8 @@ mod tests {
         assert!(asked.is_empty(), "awaiting a namespace called: {asked:?}");
     }
 
-    /// Nothing is installed per tool, so a name the script invents still
-    /// reaches the host, which is where it can be reported against the real
-    /// tool list.
+    /// A name the script invents still reaches the host, which is where it
+    /// can be checked against the real tool list.
     #[tokio::test]
     async fn an_unknown_name_reaches_the_host() {
         let (_, asked) = run_with(

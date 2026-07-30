@@ -178,6 +178,7 @@ async fn main() -> ExitCode {
                     ..Default::default()
                 },
                 sym.config.mcp.read_only,
+                cwd.clone(),
             ));
             let limits = symposium::mcp::sandbox::Limits {
                 timeout: std::time::Duration::from_secs(sym.config.mcp.script_timeout_secs),

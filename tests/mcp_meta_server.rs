@@ -352,9 +352,8 @@ async fn a_declared_name_reaches_the_tool_it_was_declared_for() {
     let _ = client.cancel().await;
 }
 
-/// A script that touches one server must not start the others. Building
-/// namespaces used to need every server's tool list, so a script paid for
-/// -- and could be blocked by -- servers it never mentioned.
+/// A script that touches one server must not start the others, or it pays
+/// for -- and can be blocked by -- servers it never mentions.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_script_starts_only_the_servers_it_calls() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -434,6 +433,117 @@ async fn a_script_starts_only_the_servers_it_calls() {
     assert!(
         !log.contains("unused"),
         "a server the script never named was started: {log}"
+    );
+    let _ = client.cancel().await;
+}
+
+/// A dependency added mid-session exposes its tools without a restart, and a
+/// server that is still applicable is carried across rather than restarted --
+/// its startup log must still show a single start.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dependency_added_mid_session_appears() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let base = dir.path().to_path_buf();
+    let home = base.join("home");
+    let root = base.join("ws");
+    let started = base.join("started.log");
+    std::fs::create_dir_all(home.join("plugins/db")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+
+    let mut manifest = String::from("name = \"db-plugin\"\ndepends-on = [\"*\"]\n");
+    for (name, dep) in [("always", "serde"), ("later", "regex")] {
+        let config = base.join(format!("{name}.json"));
+        std::fs::write(
+            &config,
+            serde_json::json!({
+                "name": name,
+                "startup_log": started,
+                "tools": [
+                    {"name": "ping", "description": "answer",
+                     "behavior": {"kind": "text", "text": name}}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        manifest.push_str(&format!(
+            "\n[[mcp_servers]]\nname = {:?}\ndepends-on = [{:?}]\ncommand = {:?}\n\
+             args = [\"--config\", {:?}]\n",
+            name,
+            dep,
+            mock_binary().display().to_string(),
+            config.display().to_string(),
+        ));
+    }
+    std::fs::write(home.join("plugins/db/SYMPOSIUM.toml"), manifest).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        "hook-scope = \"project\"\n[defaults]\nsymposium-recommendations = false\n",
+    )
+    .unwrap();
+
+    let cargo_toml = root.join("Cargo.toml");
+    std::fs::write(
+        &cargo_toml,
+        "[package]\nname = \"e2e\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         [dependencies]\nserde = \"1\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/lib.rs"), "// lib\n").unwrap();
+
+    let workspace = Workspace {
+        _dir: dir,
+        home,
+        root: root.clone(),
+    };
+    let client = connect_in(&workspace).await;
+
+    let first = text_of(
+        &client
+            .call_tool(CallToolRequestParams::new("list_tools"))
+            .await
+            .expect("list_tools"),
+    );
+    assert!(first.contains("always"), "got: {first}");
+    assert!(
+        !first.contains("later"),
+        "not a dependency yet, got: {first}"
+    );
+
+    // Add the dependency the second server is gated on, exactly as `cargo
+    // add` would, and let cargo rewrite the lock file.
+    std::fs::write(
+        &cargo_toml,
+        "[package]\nname = \"e2e\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         [dependencies]\nserde = \"1\"\nregex = \"1\"\n",
+    )
+    .unwrap();
+    let generated = std::process::Command::new("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(&root)
+        .output();
+    if !generated.map(|o| o.status.success()).unwrap_or(false) {
+        eprintln!("skipping: cargo could not resolve `regex` offline");
+        let _ = client.cancel().await;
+        return;
+    }
+
+    let second = text_of(
+        &client
+            .call_tool(CallToolRequestParams::new("list_tools"))
+            .await
+            .expect("list_tools"),
+    );
+    assert!(
+        second.contains("later"),
+        "a newly applicable server should appear, got: {second}"
+    );
+
+    let log = std::fs::read_to_string(&started).unwrap_or_default();
+    assert_eq!(
+        log.matches("always").count(),
+        1,
+        "the still-applicable server was restarted: {log}"
     );
     let _ = client.cancel().await;
 }

@@ -50,8 +50,8 @@ struct Config {
     /// Protocol version to report. Older versions predate structured output.
     #[serde(default)]
     protocol_version: Option<String>,
-    /// File to append a line to on every start. Lets a test assert that a
-    /// server was *not* started, which process counting cannot do reliably.
+    /// Appended to on every start, so a test can assert a server did *not*
+    /// start.
     #[serde(default)]
     startup_log: Option<PathBuf>,
     #[serde(default)]

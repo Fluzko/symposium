@@ -32,23 +32,17 @@ pub const EXECUTE: &str = "execute";
 #[derive(Clone)]
 pub struct MetaServer {
     catalog: Arc<super::catalog::Catalog>,
-    /// Names of the backing servers, cached for the tool descriptions.
-    servers: Arc<Vec<String>>,
     limits: super::sandbox::Limits,
 }
 
 impl MetaServer {
     pub fn new(catalog: Arc<super::catalog::Catalog>, limits: super::sandbox::Limits) -> Self {
-        Self {
-            servers: Arc::new(catalog.server_names()),
-            catalog,
-            limits,
-        }
+        Self { catalog, limits }
     }
 
     /// Run a model-written script with the workspace's tools in scope.
     async fn execute(&self, script: &str) -> CallToolResult {
-        let (namespaces, problems) = self.catalog.namespaces();
+        let (namespaces, problems) = self.catalog.namespaces().await;
         if namespaces.is_empty() {
             let mut message =
                 String::from("No MCP tools are in scope, so there is nothing to call.");
@@ -98,6 +92,8 @@ impl MetaServer {
     /// small workspace needs no discovery call at all. Their tools are not
     /// listed here, so the cost grows with servers rather than with schemas.
     fn execute_description(&self) -> String {
+        // Read rather than cached: the set can change mid-session.
+        let servers = self.catalog.server_names();
         let mut text = String::from(
             "Run a JavaScript program with the workspace's MCP tools in scope.\n\n\
              Each server is an object whose methods return promises, so a program \
@@ -108,14 +104,14 @@ impl MetaServer {
              Write an async arrow function or a statement body that returns a value. \
              Write plain JavaScript: no type annotations, interfaces, or generics.\n\n",
         );
-        if self.servers.is_empty() {
+        if servers.is_empty() {
             text.push_str(
                 "No MCP servers apply to this workspace. Nothing is in scope for `execute`.",
             );
         } else {
             text.push_str(&format!(
                 "Servers in scope: {}.\nCall `{LIST_TOOLS}` for their tools and signatures.",
-                self.servers.join(", ")
+                servers.join(", ")
             ));
         }
         text
@@ -292,10 +288,32 @@ mod tests {
     fn test_server(names: &[&str]) -> MetaServer {
         let tmp = tempfile::tempdir().expect("temp dir");
         let sym = Arc::new(crate::config::Symposium::from_dir(tmp.path()));
-        let catalog = Catalog::new(sym, Default::default(), RestartPolicy::default(), false);
-        let mut server = MetaServer::new(Arc::new(catalog), crate::mcp::sandbox::Limits::default());
-        server.servers = Arc::new(names.iter().map(|n| n.to_string()).collect());
-        server
+        let resolution = crate::mcp::resolve::Resolution {
+            servers: names
+                .iter()
+                .map(|name| crate::mcp::resolve::ResolvedServer {
+                    name: name.to_string(),
+                    command: crate::mcp::resolve::ServerCommand::Path("/usr/bin/true".into()),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    cwd: None,
+                    startup_timeout: std::time::Duration::from_secs(30),
+                    tool_call_timeout: std::time::Duration::from_secs(60),
+                    enabled_tools: None,
+                    disabled_tools: None,
+                    requirements: Vec::new(),
+                })
+                .collect(),
+            rejected: Vec::new(),
+        };
+        let catalog = Catalog::new(
+            sym,
+            resolution,
+            RestartPolicy::default(),
+            false,
+            tmp.path().to_path_buf(),
+        );
+        MetaServer::new(Arc::new(catalog), crate::mcp::sandbox::Limits::default())
     }
 
     #[test]

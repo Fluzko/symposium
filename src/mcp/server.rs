@@ -290,7 +290,7 @@ mod tests {
     fn test_server(names: &[&str]) -> MetaServer {
         let tmp = tempfile::tempdir().expect("temp dir");
         let sym = Arc::new(crate::config::Symposium::from_dir(tmp.path()));
-        let catalog = Catalog::new(sym, Vec::new(), RestartPolicy::default(), false);
+        let catalog = Catalog::new(sym, Default::default(), RestartPolicy::default(), false);
         let mut server = MetaServer::new(Arc::new(catalog), crate::mcp::sandbox::Limits::default());
         server.servers = Arc::new(names.iter().map(|n| n.to_string()).collect());
         server

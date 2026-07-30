@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 
 use super::declarations::{ToolDecl, binding_keys, render_server};
 use super::dispatch::{Binding, Namespace};
-use super::resolve::ResolvedServer;
+use super::resolve::{Rejection, Resolution, ResolvedServer};
 use super::supervisor::{RestartPolicy, Supervisor};
 
 /// How much to say about each tool.
@@ -102,6 +102,10 @@ impl Query {
 pub struct Catalog {
     entries: Vec<Entry>,
     read_only: bool,
+    /// Servers that could not be used at all. Reported to the model rather
+    /// than only logged: a server silently missing looks like a workspace
+    /// that never declared it.
+    rejected: Vec<Rejection>,
     policy: RestartPolicy,
     /// Needed to acquire an installation-backed server on first use.
     sym: Arc<Symposium>,
@@ -120,10 +124,11 @@ struct Entry {
 impl Catalog {
     pub fn new(
         sym: Arc<Symposium>,
-        servers: Vec<ResolvedServer>,
+        resolution: Resolution,
         policy: RestartPolicy,
         read_only: bool,
     ) -> Self {
+        let Resolution { servers, rejected } = resolution;
         let known_names = servers.iter().map(|s| s.name.clone()).collect();
         let entries = servers
             .into_iter()
@@ -135,6 +140,7 @@ impl Catalog {
         Self {
             entries,
             read_only,
+            rejected,
             policy,
             sym,
             known_names,
@@ -168,12 +174,18 @@ impl Catalog {
 
     /// Describe the matching tools.
     pub async fn describe(&self, query: &Query) -> String {
-        if self.entries.is_empty() {
+        if self.entries.is_empty() && self.rejected.is_empty() {
             return "No MCP servers apply to this workspace.".to_string();
         }
 
         let mut sections = Vec::new();
-        let mut problems = Vec::new();
+        // Refusals first: they explain an absence the model would otherwise
+        // have to infer.
+        let mut problems: Vec<String> = self
+            .rejected
+            .iter()
+            .map(|r| format!("{}: {}", r.server, r.reason))
+            .collect();
 
         for entry in &self.entries {
             if !query.wants_server(entry.resolved.name.as_str()) {

@@ -373,3 +373,88 @@ async fn stdout_carries_only_json_rpc() {
             .unwrap_or_else(|e| panic!("stdout line is not JSON ({e}): {line}"));
     }
 }
+
+/// An `install_commands` entry runs a shell command, and the documented
+/// warmup pattern for a package-runner server is `npx -y <server> --help` —
+/// which prints. Inheriting our stdout would put that prose between two
+/// JSON-RPC frames and end the session.
+#[tokio::test(flavor = "multi_thread")]
+async fn install_command_output_stays_off_stdout() {
+    const MARKER: &str = "SYMPOSIUM-INSTALL-STDOUT-MARKER";
+
+    let home = isolated_home();
+    let plugin_dir = home.path().join("plugins").join("noisy");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir");
+    std::fs::write(
+        plugin_dir.join("SYMPOSIUM.toml"),
+        format!(
+            "name = \"noisy\"\n\
+             depends-on = [\"*\"]\n\
+             \n\
+             [[installations]]\n\
+             name = \"warmup\"\n\
+             install_commands = [\"echo {MARKER}\"]\n\
+             \n\
+             [[mcp_servers]]\n\
+             name = \"noisy-server\"\n\
+             depends-on = [\"*\"]\n\
+             command = \"/usr/bin/true\"\n\
+             requirements = [\"warmup\"]\n"
+        ),
+    )
+    .expect("write manifest");
+
+    // Server resolution needs a Rust workspace to condition on.
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
+    std::fs::create_dir_all(workspace.path().join("src")).expect("src dir");
+    std::fs::write(workspace.path().join("src/lib.rs"), "").expect("write lib.rs");
+
+    let mut child = tokio::process::Command::new(binary())
+        .arg("mcp-serve")
+        .current_dir(workspace.path())
+        .env("SYMPOSIUM_HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn");
+
+    use tokio::io::AsyncWriteExt;
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin
+        .write_all(
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                "\n",
+                // Starting the server is what acquires its requirements.
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_tools","arguments":{"detail":"full"}}}"#,
+                "\n",
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write");
+    drop(stdin);
+
+    let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .expect("server should exit on stdin close")
+        .expect("output");
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(
+        !stdout.contains(MARKER),
+        "install command output reached the protocol stream:\n{stdout}"
+    );
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        serde_json::from_str::<serde_json::Value>(line)
+            .unwrap_or_else(|e| panic!("stdout line is not JSON ({e}): {line}"));
+    }
+}

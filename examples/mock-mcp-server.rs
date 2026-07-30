@@ -50,6 +50,10 @@ struct Config {
     /// Protocol version to report. Older versions predate structured output.
     #[serde(default)]
     protocol_version: Option<String>,
+    /// File to append a line to on every start. Lets a test assert that a
+    /// server was *not* started, which process counting cannot do reliably.
+    #[serde(default)]
+    startup_log: Option<PathBuf>,
     #[serde(default)]
     tools: Vec<ToolConfig>,
 }
@@ -229,6 +233,17 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let config: Config = serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
+
+    if let Some(path) = &config.startup_log {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{}", config.name);
+        }
+    }
 
     if should_fail_startup(&config_path, config.fail_startup_times) {
         eprintln!("mock-mcp-server: failing startup on purpose");

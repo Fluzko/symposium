@@ -506,10 +506,6 @@ mod tests {
         let namespaces = vec![dispatch::Namespace {
             key: "srv".to_string(),
             server: "srv".to_string(),
-            bindings: vec![dispatch::Binding {
-                key: "go".to_string(),
-                wire_name: "go".to_string(),
-            }],
         }];
 
         let started = Instant::now();

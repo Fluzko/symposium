@@ -13,7 +13,7 @@
 //! JavaScript, so server and tool names — which come from plugin manifests —
 //! never reach a code position.
 
-use rquickjs::function::{Async, Opt};
+use rquickjs::function::{Async, Constructor, Opt};
 use rquickjs::{CatchResultExt, Ctx, Function, Object};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
@@ -23,7 +23,8 @@ use tokio::sync::{mpsc, oneshot};
 pub struct ToolCall {
     /// Server name as declared by the plugin, not the sanitized spelling.
     pub server: String,
-    /// Tool name as it goes on the wire.
+    /// The property name the script used. May be a sanitized alias, so the
+    /// host resolves it against the server's tool list before dispatching.
     pub tool: String,
     /// The single argument the script passed, or null.
     pub args: Value,
@@ -39,16 +40,6 @@ pub fn channel() -> (CallSender, CallReceiver) {
     mpsc::unbounded_channel()
 }
 
-/// One tool reachable on a namespace.
-#[derive(Debug, Clone)]
-pub struct Binding {
-    /// Property name in JavaScript. A tool whose wire name is not an
-    /// identifier is bound twice, under the quoted name and a sanitized one.
-    pub key: String,
-    /// Name to send to the backing server.
-    pub wire_name: String,
-}
-
 /// One backing server as the script sees it.
 #[derive(Debug, Clone)]
 pub struct Namespace {
@@ -56,34 +47,109 @@ pub struct Namespace {
     pub key: String,
     /// Server name to send with each call.
     pub server: String,
-    pub bindings: Vec<Binding>,
 }
 
-/// Install one global object per namespace.
+/// Install one global per namespace.
+///
+/// Each is a proxy rather than an object of functions, so nothing has to be
+/// known about a server before a script runs. A server starts when a script
+/// calls one of its tools, not when the script begins — otherwise one
+/// unreachable server delays, or fails, a script that never mentions it.
+///
+/// The cost is that a property lookup cannot say whether a tool exists: the
+/// proxy hands back a callable for any plausible name and the host resolves
+/// it on call.
 pub fn install<'js>(
     ctx: &Ctx<'js>,
     namespaces: &[Namespace],
     calls: &CallSender,
 ) -> Result<(), String> {
+    let proxy: Constructor = ctx
+        .globals()
+        .get("Proxy")
+        .catch(ctx)
+        .map_err(|e| e.to_string())?;
+
     for namespace in namespaces {
-        let object = Object::new(ctx.clone())
+        let target = Object::new(ctx.clone())
             .catch(ctx)
             .map_err(|e| e.to_string())?;
 
-        for binding in &namespace.bindings {
-            let function = tool_function(ctx, &namespace.server, &binding.wire_name, calls)?;
-            object
-                .set(binding.key.as_str(), function)
-                .catch(ctx)
-                .map_err(|e| e.to_string())?;
-        }
+        let handler = Object::new(ctx.clone())
+            .catch(ctx)
+            .map_err(|e| e.to_string())?;
+        handler
+            .set("get", get_trap(ctx, &namespace.server, calls)?)
+            .catch(ctx)
+            .map_err(|e| e.to_string())?;
+
+        let installed: Object = proxy
+            .construct((target, handler))
+            .catch(ctx)
+            .map_err(|e| e.to_string())?;
 
         ctx.globals()
-            .set(namespace.key.as_str(), object)
+            .set(namespace.key.as_str(), installed)
             .catch(ctx)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Property names the proxy must not answer to.
+///
+/// `then` is the load-bearing one: the engine looks for it on any value that
+/// is awaited or resolved, so answering it makes the namespace itself a
+/// thenable and `await sqlx` hangs on a tool call named `then`. The rest are
+/// names the runtime or a serializer reaches for on its own.
+fn is_reserved_property(key: &str) -> bool {
+    matches!(
+        key,
+        "then"
+            | "catch"
+            | "finally"
+            | "constructor"
+            | "prototype"
+            | "__proto__"
+            | "toJSON"
+            | "toString"
+            | "valueOf"
+            | "inspect"
+    )
+}
+
+fn get_trap<'js>(
+    ctx: &Ctx<'js>,
+    server: &str,
+    calls: &CallSender,
+) -> Result<Function<'js>, String> {
+    let server = server.to_string();
+    let calls = calls.clone();
+
+    Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>,
+              _target: rquickjs::Value<'js>,
+              property: rquickjs::Value<'js>|
+              -> rquickjs::Result<rquickjs::Value<'js>> {
+            let undefined = rquickjs::Value::new_undefined(ctx.clone());
+
+            // A symbol key is the runtime asking about the object itself.
+            let Some(name) = property.as_string() else {
+                return Ok(undefined);
+            };
+            let key = name.to_string()?;
+            if is_reserved_property(&key) {
+                return Ok(undefined);
+            }
+
+            let function = tool_function(&ctx, &server, &key, &calls)
+                .map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))?;
+            Ok(function.into_value())
+        },
+    )
+    .catch(ctx)
+    .map_err(|e| e.to_string())
 }
 
 fn tool_function<'js>(
@@ -165,17 +231,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    fn namespace(server: &str, tools: &[&str]) -> Namespace {
+    fn namespace(server: &str) -> Namespace {
         Namespace {
             key: server.to_string(),
             server: server.to_string(),
-            bindings: tools
-                .iter()
-                .map(|t| Binding {
-                    key: t.to_string(),
-                    wire_name: t.to_string(),
-                })
-                .collect(),
         }
     }
 
@@ -220,7 +279,7 @@ mod tests {
     async fn script_calls_a_tool_and_receives_its_result() {
         let (out, asked) = run_with(
             r#"await sqlx.query({ sql: "SELECT 1" })"#,
-            vec![namespace("sqlx", &["query"])],
+            vec![namespace("sqlx")],
             |_| Ok(json!({"rows": [{"n": 1}]})),
         )
         .await;
@@ -251,7 +310,7 @@ mod tests {
             }
             return out;
             "#,
-            vec![namespace("sqlx", &["query", "explain"])],
+            vec![namespace("sqlx")],
             |call| match call.tool.as_str() {
                 "query" => Ok(json!({"rows": [{"n": 1}, {"n": 2}, {"n": 3}]})),
                 _ => Ok(json!({"plan": call.args["n"]})),
@@ -274,7 +333,7 @@ mod tests {
               return "caught: " + e.message;
             }
             "#,
-            vec![namespace("sqlx", &["query"])],
+            vec![namespace("sqlx")],
             |_| Err("table not found".to_string()),
         )
         .await;
@@ -286,11 +345,9 @@ mod tests {
     /// value the model might mistake for success.
     #[tokio::test]
     async fn uncaught_tool_failure_fails_the_script() {
-        let (out, _) = run_with(
-            r#"await sqlx.query({})"#,
-            vec![namespace("sqlx", &["query"])],
-            |_| Err("boom".to_string()),
-        )
+        let (out, _) = run_with(r#"await sqlx.query({})"#, vec![namespace("sqlx")], |_| {
+            Err("boom".to_string())
+        })
         .await;
 
         let err = out.unwrap_err();
@@ -299,58 +356,73 @@ mod tests {
 
     #[tokio::test]
     async fn calling_without_arguments_sends_null() {
-        let (out, asked) = run_with(
-            "await clock.now()",
-            vec![namespace("clock", &["now"])],
-            |_| Ok(json!(123)),
-        )
+        let (out, asked) = run_with("await clock.now()", vec![namespace("clock")], |_| {
+            Ok(json!(123))
+        })
         .await;
 
         assert_eq!(out.unwrap(), json!(123));
         assert_eq!(asked[0].2, Value::Null);
     }
 
-    /// A tool whose wire name is not a JavaScript identifier is reachable
-    /// under both spellings, and both dispatch to the same wire name.
+    /// Both spellings reach the host, each carrying the name the script
+    /// wrote. Mapping an alias to its wire name needs the server's tool list,
+    /// so it happens where that list lives.
     #[tokio::test]
-    async fn both_spellings_dispatch_to_the_wire_name() {
-        let ns = Namespace {
-            key: "sqlx".to_string(),
-            server: "sqlx".to_string(),
-            bindings: vec![
-                Binding {
-                    key: "migrate-status".to_string(),
-                    wire_name: "migrate-status".to_string(),
-                },
-                Binding {
-                    key: "migrate_status".to_string(),
-                    wire_name: "migrate-status".to_string(),
-                },
-            ],
-        };
+    async fn both_spellings_reach_the_host_as_written() {
         let (out, asked) = run_with(
             r#"
             const a = await sqlx["migrate-status"]();
             const b = await sqlx.migrate_status();
             return [a, b];
             "#,
-            vec![ns],
+            vec![namespace("sqlx")],
             |_| Ok(json!("ok")),
         )
         .await;
 
         assert_eq!(out.unwrap(), json!(["ok", "ok"]));
-        assert!(
-            asked.iter().all(|(_, tool, _)| tool == "migrate-status"),
-            "both spellings must send the wire name, got: {asked:?}"
-        );
+        let keys: Vec<&str> = asked.iter().map(|(_, tool, _)| tool.as_str()).collect();
+        assert_eq!(keys, vec!["migrate-status", "migrate_status"]);
+    }
+
+    /// The engine looks for `then` on anything awaited. A namespace that
+    /// answers it becomes a thenable, and `await sqlx` dispatches a tool call
+    /// named `then` instead of resolving.
+    #[tokio::test]
+    async fn a_namespace_is_not_a_thenable() {
+        let (out, asked) = run_with(
+            "const v = await sqlx; return typeof v;",
+            vec![namespace("sqlx")],
+            |_| Ok(json!("ok")),
+        )
+        .await;
+
+        assert_eq!(out.unwrap(), json!("object"));
+        assert!(asked.is_empty(), "awaiting a namespace called: {asked:?}");
+    }
+
+    /// Nothing is installed per tool, so a name the script invents still
+    /// reaches the host, which is where it can be reported against the real
+    /// tool list.
+    #[tokio::test]
+    async fn an_unknown_name_reaches_the_host() {
+        let (_, asked) = run_with(
+            "try { await sqlx.nonexistent(); } catch (e) {} return 1;",
+            vec![namespace("sqlx")],
+            |_| Err("no such tool".to_string()),
+        )
+        .await;
+
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].1, "nonexistent");
     }
 
     #[tokio::test]
     async fn several_servers_are_separate_namespaces() {
         let (out, asked) = run_with(
             "return [await a.ping(), await b.ping()];",
-            vec![namespace("a", &["ping"]), namespace("b", &["ping"])],
+            vec![namespace("a"), namespace("b")],
             |call| Ok(json!(call.server)),
         )
         .await;
@@ -362,10 +434,7 @@ mod tests {
     /// Nothing beyond the declared namespaces appears.
     #[tokio::test]
     async fn undeclared_servers_are_absent() {
-        let (out, _) = run_with("typeof other", vec![namespace("sqlx", &["query"])], |_| {
-            Ok(Value::Null)
-        })
-        .await;
+        let (out, _) = run_with("typeof other", vec![namespace("sqlx")], |_| Ok(Value::Null)).await;
         assert_eq!(out.unwrap(), json!("undefined"));
     }
 }

@@ -352,6 +352,92 @@ async fn a_declared_name_reaches_the_tool_it_was_declared_for() {
     let _ = client.cancel().await;
 }
 
+/// A script that touches one server must not start the others. Building
+/// namespaces used to need every server's tool list, so a script paid for
+/// -- and could be blocked by -- servers it never mentioned.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_script_starts_only_the_servers_it_calls() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let base = dir.path().to_path_buf();
+    let home = base.join("home");
+    let root = base.join("ws");
+    let started = base.join("started.log");
+    std::fs::create_dir_all(home.join("plugins/db")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+
+    let mut configs = Vec::new();
+    for name in ["used", "unused"] {
+        let path = base.join(format!("{name}.json"));
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "name": name,
+                "startup_log": started,
+                "tools": [
+                    {"name": "ping", "description": "answer",
+                     "behavior": {"kind": "text", "text": name}}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        configs.push(path);
+    }
+
+    let mut manifest = String::from("name = \"db-plugin\"\ndepends-on = [\"*\"]\n");
+    for (name, config) in ["used", "unused"].iter().zip(&configs) {
+        manifest.push_str(&format!(
+            "\n[[mcp_servers]]\nname = {:?}\ncommand = {:?}\nargs = [\"--config\", {:?}]\n",
+            name,
+            mock_binary().display().to_string(),
+            config.display().to_string(),
+        ));
+    }
+    std::fs::write(home.join("plugins/db/SYMPOSIUM.toml"), manifest).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        "hook-scope = \"project\"\n[defaults]\nsymposium-recommendations = false\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"e2e\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         [dependencies]\nserde = \"1\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/lib.rs"), "// lib\n").unwrap();
+
+    let workspace = Workspace {
+        _dir: dir,
+        home,
+        root,
+    };
+    let client = connect_in(&workspace).await;
+
+    let result = client
+        .call_tool(CallToolRequestParams::new("execute").with_arguments(
+            serde_json::Map::from_iter([(
+                "script".to_string(),
+                serde_json::json!("return await used.ping();"),
+            )]),
+        ))
+        .await
+        .expect("execute");
+    let text = text_of(&result);
+    assert!(text.contains("used"), "got: {text}");
+
+    let log = std::fs::read_to_string(&started).unwrap_or_default();
+    assert!(
+        log.contains("used"),
+        "the called server should have started"
+    );
+    assert!(
+        !log.contains("unused"),
+        "a server the script never named was started: {log}"
+    );
+    let _ = client.cancel().await;
+}
+
 /// A limit the script exceeded is reported in a form it can act on, rather
 /// than as prose it has to interpret.
 #[tokio::test(flavor = "multi_thread")]

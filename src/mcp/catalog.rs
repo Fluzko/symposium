@@ -20,8 +20,8 @@ use rmcp::model::Tool;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use super::declarations::{ToolDecl, binding_table, render_server};
-use super::dispatch::{Binding, Namespace};
+use super::declarations::{ToolBinding, ToolDecl, binding_table, render_server};
+use super::dispatch::Namespace;
 use super::resolve::{Rejection, Resolution, ResolvedServer};
 use super::supervisor::{RestartPolicy, Supervisor};
 
@@ -267,79 +267,64 @@ impl Catalog {
 
     /// The namespaces a script sees, one per server.
     ///
-    /// Building these needs each server's tool list, so this starts the
-    /// servers that are not already running.
-    pub async fn namespaces(&self) -> (Vec<Namespace>, Vec<String>) {
-        let mut namespaces = Vec::new();
-        let mut problems = Vec::new();
-
-        for entry in &self.entries {
-            let tools = match self.supervisor_for(entry).await {
-                Ok(mut guard) => match guard.as_mut() {
-                    Some(supervisor) => supervisor.list_tools().await.map_err(|e| e.to_string()),
-                    None => unreachable!("supervisor_for leaves it present"),
-                },
-                Err(e) => Err(e),
-            };
-            let tools = match tools {
-                Ok(tools) => tools,
-                Err(e) => {
-                    problems.push(format!("{}: {e}", entry.resolved.name.as_str()));
-                    continue;
-                }
-            };
-
-            // The table the declarations are rendered from, so every name the
-            // model was shown dispatches.
-            let visible: Vec<&str> = tools
-                .iter()
-                .filter(|t| entry.resolved.exposes(t.name.as_ref()))
-                .filter(|t| !self.read_only || is_read_only(t))
-                .map(|t| t.name.as_ref())
-                .collect();
-
-            let bindings: Vec<Binding> = binding_table(visible)
-                .into_iter()
-                .flat_map(|b| {
-                    b.keys.into_iter().map(move |key| Binding {
-                        key,
-                        wire_name: b.wire_name.clone(),
-                    })
-                })
-                .collect();
-
-            if bindings.is_empty() {
-                continue;
-            }
-            namespaces.push(Namespace {
+    /// Nothing is started here. Each namespace resolves its tools when the
+    /// script first calls one, so a script that touches one server does not
+    /// wait on -- or fail because of -- the others.
+    pub fn namespaces(&self) -> (Vec<Namespace>, Vec<String>) {
+        let namespaces = self
+            .entries
+            .iter()
+            .map(|entry| Namespace {
                 key: namespace_key(entry.resolved.name.as_str()),
                 server: entry.resolved.name.as_str().to_string(),
-                bindings,
-            });
-        }
+            })
+            .collect();
+
+        // A refused server never becomes a namespace, so its absence needs a
+        // reason here rather than at call time.
+        let problems = self
+            .rejected
+            .iter()
+            .map(|r| format!("{}: {}", r.server, r.reason))
+            .collect();
 
         (namespaces, problems)
     }
 
     /// Call a tool on a backing server, honoring its filters.
-    pub async fn call(&self, server: &str, tool: &str, args: Value) -> Result<Value, String> {
+    /// `key` is the property name the script used, which may be a sanitized
+    /// alias. Resolving it here rather than when the namespace was built is
+    /// what lets a server stay cold until something calls it.
+    pub async fn call(&self, server: &str, key: &str, args: Value) -> Result<Value, String> {
         let Some(entry) = self.entries.iter().find(|e| e.resolved.name == server) else {
             return Err(format!(
                 "no server named `{server}`. Available: {}",
                 self.known_names.join(", ")
             ));
         };
-        if !entry.resolved.exposes(tool) {
-            return Err(format!(
-                "`{server}.{tool}` is not exposed by this workspace"
-            ));
-        }
 
         let timeout = entry.resolved.tool_call_timeout;
         let mut guard = self.supervisor_for(entry).await?;
         let supervisor = guard.as_mut().expect("supervisor_for leaves it present");
+
+        let tools = supervisor.list_tools().await.map_err(|e| e.to_string())?;
+        let visible: Vec<&str> = tools
+            .iter()
+            .filter(|t| entry.resolved.exposes(t.name.as_ref()))
+            .filter(|t| !self.read_only || is_read_only(t))
+            .map(|t| t.name.as_ref())
+            .collect();
+
+        // The same table the declarations are rendered from, so every name
+        // the model was shown resolves.
+        let table = binding_table(visible);
+        let Some(binding) = table.iter().find(|b| b.keys.iter().any(|k| k == key)) else {
+            return Err(unknown_tool(server, key, &table));
+        };
+        let wire_name = binding.wire_name.clone();
+
         supervisor
-            .call(tool, args, timeout)
+            .call(&wire_name, args, timeout)
             .await
             .map_err(|e| e.to_string())
     }
@@ -377,6 +362,52 @@ fn namespace_key(server: &str) -> String {
 
 fn query_narrows(query: &Query) -> bool {
     query.tools.is_some() || query.pattern.is_some()
+}
+
+/// Report a name the script used that no tool answers to.
+///
+/// The proxy hands back a callable for any property, so this is where a typo
+/// surfaces. Naming the nearest match makes it recoverable inside the script.
+fn unknown_tool(server: &str, key: &str, table: &[ToolBinding]) -> String {
+    let mut names: Vec<&str> = table
+        .iter()
+        .flat_map(|b| b.keys.iter().map(String::as_str))
+        .collect();
+    names.sort_unstable();
+
+    match closest(key, &names) {
+        Some(nearest) => format!(
+            "`{server}` has no tool `{key}`. Closest match: `{nearest}`. Call `{list}` for the full list.",
+            list = crate::mcp::server::LIST_TOOLS
+        ),
+        None => format!(
+            "`{server}` exposes no tools. Call `{list}` to see what is available.",
+            list = crate::mcp::server::LIST_TOOLS
+        ),
+    }
+}
+
+/// The candidate sharing the longest prefix with `key`, which catches the
+/// mistakes a model actually makes: a wrong suffix or a dropped separator.
+fn closest<'a>(key: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    let normalize = |s: &str| s.to_ascii_lowercase().replace(['-', '_'], "");
+    let target = normalize(key);
+    candidates
+        .iter()
+        .copied()
+        .max_by_key(|candidate| {
+            let other = normalize(candidate);
+            let shared = target
+                .chars()
+                .zip(other.chars())
+                .take_while(|(a, b)| a == b)
+                .count();
+            (shared, usize::MAX - other.len())
+        })
+        .filter(|candidate| {
+            let other = normalize(candidate);
+            target.chars().next() == other.chars().next()
+        })
 }
 
 fn is_read_only(tool: &Tool) -> bool {

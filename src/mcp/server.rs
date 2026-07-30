@@ -48,7 +48,7 @@ impl MetaServer {
 
     /// Run a model-written script with the workspace's tools in scope.
     async fn execute(&self, script: &str) -> CallToolResult {
-        let (namespaces, problems) = self.catalog.namespaces().await;
+        let (namespaces, problems) = self.catalog.namespaces();
         if namespaces.is_empty() {
             let mut message =
                 String::from("No MCP tools are in scope, so there is nothing to call.");

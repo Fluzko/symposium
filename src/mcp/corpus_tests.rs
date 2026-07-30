@@ -116,14 +116,9 @@ fn sequentialthinking_server() {
     ));
 }
 
-/// The constructs the captured corpus happens not to contain, and which the
-/// RFD cites as the reason for hand-rolling the mapping in the first place:
-/// `$ref`/`$defs`, the composition keywords, tuples, and type-less schemas.
-///
-/// Hand-built rather than captured. That is a weakness — a real payload
-/// cannot be argued with — but every one of these shapes is what pydantic,
-/// zod or schemars emits for an ordinary Rust or Python model, and none of
-/// them appear in anything we managed to capture.
+/// `$ref`/`$defs`, the composition keywords, tuples and type-less schemas —
+/// what pydantic, zod and schemars emit for an ordinary model, and the one
+/// payload here that is hand-built rather than captured.
 #[test]
 fn construct_coverage() {
     expect_file!["testdata/constructs.d.ts"].assert_eq(&render_corpus(
@@ -132,27 +127,21 @@ fn construct_coverage() {
     ));
 }
 
-/// The generated declarations have to be valid TypeScript.
+/// The generated declarations have to parse: `expect_file!` locks the bytes,
+/// not whether a compiler accepts them.
 ///
-/// Nothing else checks this: `expect_file!` locks the bytes we emit, not
-/// whether a compiler accepts them, so a snapshot can be reviewed, approved
-/// and still be a parse error. What the model receives is only useful if it
-/// parses.
+/// `tsc` stops at syntax errors and never reaches type checking, so a
+/// declaration that parses with the wrong shape passes here — the snapshots
+/// above are what cover that.
 ///
-/// Note what this does *not* catch: `tsc` stops at the first syntax errors
-/// and never reaches type checking, so a declaration that parses but
-/// describes the wrong shape passes here. The snapshots above are what cover
-/// that. Neither check subsumes the other.
-///
-/// Skips when no TypeScript is reachable, so an offline `cargo test` still
-/// runs; CI installs Node so it does not skip there.
+/// Skips when no TypeScript is reachable; CI installs Node so it does not
+/// skip there.
 #[test]
 fn declarations_type_check() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut files = Vec::new();
     for (payload, server) in CORPUS {
-        // One file per server: a name collision between two servers' types is
-        // theirs to have, not an error we should invent.
+        // One file per server: two servers may legitimately name a type alike.
         let name = format!("{server}.d.ts");
         std::fs::write(dir.path().join(&name), render_corpus(payload, server))
             .expect("write declarations");
@@ -183,9 +172,8 @@ fn declarations_type_check() {
         String::from_utf8_lossy(&output.stderr),
     );
 
-    // tsc reports every complaint as `error TS<code>`. A failure carrying
-    // none of those is the toolchain not running — no network for the
-    // download, say — and must not be reported as a type error.
+    // A failure carrying no `error TS<code>` is the toolchain not running
+    // (no network for the download, say), not a type error.
     if !output.status.success() && !report.contains("error TS") {
         eprintln!("skipping declarations_type_check: tsc did not run:\n{report}");
         return;

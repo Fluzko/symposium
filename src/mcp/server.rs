@@ -73,12 +73,9 @@ impl MetaServer {
         let outcome = super::sandbox::Sandbox::new(self.limits)
             .run_script_with(script, &namespaces, calls)
             .await;
-        // Aborted rather than awaited. The sandbox owns the only senders, so
-        // waiting for the channel to close means waiting on the engine thread
-        // — and if that thread is wedged, this would never return and the
-        // request would go unanswered entirely. Once the script is over there
-        // is nothing left worth pumping: anything still queued is a call the
-        // script never awaited, past a deadline that has already expired.
+        // Aborted, not awaited: the sandbox owns the only senders, so waiting
+        // for the channel to close means waiting on the engine thread. Once
+        // the script is over, anything still queued is past its deadline.
         pump.abort();
 
         match outcome {

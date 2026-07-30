@@ -33,22 +33,18 @@ pub struct ToolBinding {
 
 /// Assign JavaScript keys to a server's tools.
 ///
-/// The single source of both the declarations and the runtime bindings.
-/// Rendering and dispatch derived their names separately once, and disagreed:
-/// only the renderer disambiguated collisions, so it could advertise a name
-/// that nothing bound while a colliding pair silently overwrote each other.
-/// A name the model is shown has to be a name it can call.
+/// The single source of both the declarations and the runtime bindings, so a
+/// name the model is shown is one it can call.
 ///
-/// Primaries are assigned before aliases, so a tool keeps its own spelling
+/// Two passes: primaries before aliases, so a tool keeps its own spelling
 /// rather than losing it to another tool's sanitized form.
 pub fn binding_table<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<ToolBinding> {
     let mut used: Vec<String> = Vec::new();
     let mut table: Vec<ToolBinding> = Vec::new();
 
     for name in names {
-        // Tool names are unique per server by the protocol. A server that
-        // advertises one twice leaves the second unaddressable on the wire
-        // regardless, so declaring it again would only be a duplicate member.
+        // Tool names are unique per server by the protocol; a repeat is
+        // unaddressable on the wire either way.
         if table.iter().any(|b| b.wire_name == name) {
             continue;
         }
@@ -321,8 +317,7 @@ mod tests {
         assert!(out.starts_with("declare const sea_orm: {"), "got:\n{out}");
     }
 
-    /// Every key the declarations advertise has to be one dispatch binds.
-    /// These were derived separately once and disagreed.
+    /// The method names in a rendered declaration block.
     fn declared_keys(out: &str) -> Vec<String> {
         out.lines()
             .filter_map(|line| line.trim().strip_suffix("): Promise<unknown>;"))
@@ -346,9 +341,7 @@ mod tests {
         );
     }
 
-    /// The case that was broken: the renderer disambiguated and dispatch did
-    /// not, so the declarations advertised `get_sum_2`, nothing bound it, and
-    /// `get_sum` was bound twice with one silently shadowing the other.
+    /// `get-sum` sanitizes to `get_sum`, which another tool already owns.
     #[test]
     fn a_colliding_alias_never_shadows_a_real_tool() {
         let table = binding_table(["get-sum", "get_sum"]);
@@ -373,8 +366,7 @@ mod tests {
         assert_eq!(before, keys.len(), "every key must be distinct: {keys:?}");
     }
 
-    /// The renderer and the dispatcher read the same table, so what is
-    /// declared is exactly what is bound.
+    /// A name the model is shown must be one dispatch binds.
     #[test]
     fn declared_names_are_the_bound_names() {
         let schema = json!({});
@@ -393,9 +385,7 @@ mod tests {
         assert_eq!(declared_keys(&out), bound, "got:\n{out}");
     }
 
-    /// A server advertising one name twice would otherwise emit a duplicate
-    /// member, which is a TypeScript error. The second is unreachable on the
-    /// wire either way.
+    /// Two members of the same name is a TypeScript error (TS2300).
     #[test]
     fn a_repeated_wire_name_is_declared_once() {
         let schema = json!({});

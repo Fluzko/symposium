@@ -229,9 +229,8 @@ struct Candidate<'a> {
 
 /// Turn applicable manifest entries into runnable servers.
 ///
-/// `root` anchors a relative `cwd`. A plugin author writing `cwd =
-/// "crates/db"` means the workspace's `crates/db`; they cannot know what
-/// directory the agent happened to be launched from.
+/// `root` anchors a relative `cwd`: a plugin author cannot know what
+/// directory the agent was launched from.
 fn build(entries: Vec<Candidate<'_>>, root: &Path, script_timeout_secs: u64) -> Resolution {
     let mut resolution = Resolution::default();
     // Which plugin claimed each name, so a clash can name both sides.
@@ -425,8 +424,6 @@ mod tests {
         )
     }
 
-    /// A plugin author writes `cwd` against the workspace, not against
-    /// whatever directory the agent happened to start in.
     #[test]
     fn relative_cwd_resolves_against_the_workspace_root() {
         let mut entry = stdio("sqlx");
@@ -442,7 +439,6 @@ mod tests {
         );
     }
 
-    /// An absolute `cwd` is the author being explicit; leave it alone.
     #[test]
     fn absolute_cwd_is_left_as_written() {
         let mut entry = stdio("sqlx");

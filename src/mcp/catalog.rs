@@ -289,8 +289,8 @@ impl Catalog {
                 }
             };
 
-            // The same table the declarations are rendered from, so every
-            // name the model was shown is a name that dispatches.
+            // The table the declarations are rendered from, so every name the
+            // model was shown dispatches.
             let visible: Vec<&str> = tools
                 .iter()
                 .filter(|t| entry.resolved.exposes(t.name.as_ref()))

@@ -66,16 +66,9 @@ impl TypeRenderer {
 
     /// The named type declarations collected so far, in name order.
     ///
-    /// Always a type alias, never an `interface`. Choosing between them meant
-    /// deciding whether a body was a single object literal, and that was done
-    /// by testing its first character — which a union or intersection of
-    /// object types also passes, producing `interface Shape { … } | { … }`.
-    /// That is a syntax error, and since the declarations are one file, it
-    /// took every other type down with it. A serde externally-tagged enum is
-    /// exactly that shape, so it was reachable from any ordinary Rust server.
-    ///
-    /// An alias is valid for every body, object literals included, so the
-    /// choice is not worth the failure mode.
+    /// Always an alias: a body may be a union or intersection of objects (a
+    /// serde externally-tagged enum, say), and `interface` accepts only a
+    /// single object literal.
     pub fn declarations(&self) -> String {
         let mut out = String::new();
         for (name, body) in &self.named {
@@ -172,9 +165,7 @@ fn render_ref(cx: &mut Cx, pointer: &str, depth: usize) -> String {
     let body = render_at(cx, &target.clone(), 0, depth + 1);
     cx.in_progress.pop();
 
-    // `type A = A` is a circular alias, which TypeScript rejects outright
-    // (TS2456). It is what `{"$ref": "#"}` produces, and what is left of a
-    // union whose only other members were self-references.
+    // `type A = A` is circular (TS2456); `{"$ref": "#"}` produces it.
     let body = if body == name {
         UNKNOWN.to_string()
     } else {
@@ -215,9 +206,7 @@ fn type_name_for(pointer: &str) -> Option<String> {
     if cleaned.is_empty() {
         return None;
     }
-    // A type name may not start with a digit, and may not be a reserved word
-    // or a built-in type: `#/$defs/default` would declare `type default =`,
-    // and `#/$defs/string` is rejected as a redeclaration.
+    // A type name may not start with a digit, nor be a reserved word.
     if cleaned.starts_with(|c: char| c.is_ascii_digit()) || is_reserved_type_name(&cleaned) {
         Some(format!("_{cleaned}"))
     } else {
@@ -225,12 +214,8 @@ fn type_name_for(pointer: &str) -> Option<String> {
     }
 }
 
-/// Names TypeScript will not accept as a declared type.
-///
-/// Both halves matter and fail differently: a keyword is a parse error, while
-/// a built-in type name is rejected as a redeclaration. `$defs` keys come
-/// from the server's own field names, so `default`, `object` and `string` are
-/// all plausible.
+/// Names TypeScript will not accept as a declared type. `$defs` keys are the
+/// server's own field names, so `default` and `string` are both plausible.
 fn is_reserved_type_name(name: &str) -> bool {
     const RESERVED: &[&str] = &[
         // Built-in and intrinsic types.
@@ -441,13 +426,11 @@ fn render_intersection(cx: &mut Cx, members: &[Value], indent: usize, depth: usi
     }
 }
 
-/// Whether a rendered member is the very type currently being defined.
+/// Whether a rendered member is the type currently being defined.
 ///
-/// `type A = A | string` is a circular alias TypeScript rejects (TS2456),
-/// and a member that *is* the whole type constrains nothing, so dropping it
-/// is both legal and faithful. Only a bare name counts: `type Json = string |
-/// Json[]` is legitimate recursion, because the reference sits inside an
-/// array rather than being the alternative itself.
+/// `type A = A | string` is circular (TS2456), and a member that *is* the
+/// whole type constrains nothing. Only a bare name counts: `type Json =
+/// string | Json[]` is legitimate recursion.
 fn is_direct_self_reference(cx: &Cx, rendered: &str) -> bool {
     cx.in_progress.iter().any(|name| name == rendered)
 }
@@ -480,11 +463,7 @@ fn join_union(parts: Vec<String>) -> String {
 
 /// Parenthesize a composite so it binds correctly inside a larger type.
 ///
-/// `A | B[]` parses as `A | (B[])`, and `A & B[]` as `A & (B[])`, so both
-/// need wrapping before a suffix is attached. Only unions were guarded
-/// before, which left an array of an intersection meaning the wrong thing
-/// while still being valid syntax — the kind of error nothing downstream
-/// reports.
+/// `A | B[]` parses as `A | (B[])`, and `A & B[]` as `A & (B[])`.
 fn parenthesize_if_composite(rendered: String) -> String {
     let composite = rendered.contains(" | ") || rendered.contains(" & ");
     if composite && !rendered.starts_with('(') {

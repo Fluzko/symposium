@@ -179,14 +179,10 @@ impl Sandbox {
                     .enable_time()
                     .build()
                 {
-                    // The middle deadline, and the one that keeps this thread
-                    // from outliving the call. The interrupt handler only
-                    // fires while the interpreter is running, so a script that
-                    // settles into an unresolvable promise — `return new
-                    // Promise(() => {})`, or a tool call left un-awaited —
-                    // parks here with nothing to interrupt. Abandoning the
-                    // future drops the runtime, and with it the tool-call
-                    // sender the caller's dispatch pump is waiting on.
+                    // The interrupt only fires while the interpreter runs, so
+                    // a script parked on an unresolved promise has nothing to
+                    // interrupt. Abandoning the future drops the runtime, and
+                    // with it the tool-call sender the caller's pump awaits.
                     Ok(rt) => rt.block_on(async {
                         let bounded = tokio::time::timeout(
                             limits.timeout + OUTER_GRACE,
@@ -219,10 +215,8 @@ impl Sandbox {
             });
         }
 
-        // The outermost layer, and a backstop rather than the working
-        // deadline: the in-thread bound above should already have reported.
-        // This catches a thread that died without sending, and is given room
-        // to lose that race so the precise error wins.
+        // Backstop for a thread that died without reporting. Given room to
+        // lose the race, so the precise error above wins.
         match tokio::time::timeout(limits.timeout + OUTER_GRACE * 2, rx).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => Err(SandboxError::Internal {
@@ -462,9 +456,7 @@ mod tests {
         );
     }
 
-    /// The interrupt handler only fires while the interpreter is running, so
-    /// a script that parks on a promise nothing will ever settle leaves
-    /// nothing to interrupt. Only the surrounding deadlines can end it.
+    /// Nothing to interrupt: the deadline is the only thing that can end it.
     #[tokio::test]
     async fn a_promise_that_never_settles_still_reports() {
         let started = Instant::now();
@@ -484,10 +476,8 @@ mod tests {
         );
     }
 
-    /// The engine thread owns the only tool-call sender, so a thread that
-    /// outlives its script keeps the caller's dispatch pump alive forever —
-    /// which is what left `execute` never answering. Observing the channel
-    /// close is how we know the thread actually went away.
+    /// The engine thread owns the only tool-call sender, so the channel
+    /// closing is how a caller knows the thread went away.
     #[tokio::test]
     async fn a_wedged_script_releases_the_dispatch_channel() {
         let (calls, mut receiver) = dispatch::channel();
@@ -509,9 +499,7 @@ mod tests {
         );
     }
 
-    /// A tool call the script never awaited must not keep the engine past its
-    /// deadline: the reply can only come from a pump the caller stops driving
-    /// once the script is over.
+    /// An un-awaited call must not keep the engine past its deadline.
     #[tokio::test]
     async fn an_unawaited_tool_call_does_not_outlive_the_deadline() {
         let (calls, _receiver) = dispatch::channel();
@@ -544,14 +532,10 @@ mod tests {
 
     // -- memory --
 
-    /// Guards against the limit silently becoming a no-op: rquickjs documents
-    /// `set_memory_limit` as inert when a custom allocator is in use, and
-    /// feature unification means a transitive dependency could enable
-    /// `rquickjs/rust-alloc` without any other visible effect.
-    ///
-    /// The assertion has to be `MemoryExhausted` alone. Accepting a timeout
-    /// too would let exactly that regression pass: with the limit inert, the
-    /// loop simply runs until the deadline.
+    /// `set_memory_limit` is inert under a custom allocator, and feature
+    /// unification means a transitive dependency could enable
+    /// `rquickjs/rust-alloc` invisibly. `MemoryExhausted` alone: a timeout
+    /// would also be reached with the limit inert.
     #[tokio::test]
     async fn allocation_is_bounded() {
         let sandbox = Sandbox::new(Limits {

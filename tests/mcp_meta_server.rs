@@ -293,10 +293,8 @@ async fn a_script_composes_calls_in_one_round_trip() {
     let _ = client.cancel().await;
 }
 
-/// Every name in the declarations has to dispatch to the tool it was
-/// declared for. Rendering and dispatch derived their names separately once:
-/// only the renderer disambiguated, so it advertised a name nothing bound
-/// while the colliding pair silently overwrote each other.
+/// Every name in the declarations has to dispatch to the tool it was declared
+/// for, including a sanitized alias that collided with a real tool's name.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_declared_name_reaches_the_tool_it_was_declared_for() {
     let workspace = workspace_serving(serde_json::json!({
@@ -319,8 +317,6 @@ async fn a_declared_name_reaches_the_tool_it_was_declared_for() {
             .expect("list_tools"),
     );
 
-    // Whatever spelling the alias ended up with, calling it must reach the
-    // hyphenated tool, and the plain name must reach the underscored one.
     let script = r#"
         return {
             viaAlias: await sqlx.get_sum_2(),
@@ -385,11 +381,8 @@ async fn exceeding_a_limit_reports_a_tagged_error() {
     let _ = client.cancel().await;
 }
 
-/// A script can end with work outstanding — a promise nothing settles, or a
-/// tool call it forgot to await. The engine thread owns the only tool-call
-/// sender, so waiting for the dispatch pump to drain means waiting on that
-/// thread, and the request goes unanswered rather than reporting a timeout.
-/// Forgetting an `await` is an ordinary mistake, so this has to hold.
+/// A script can end with work outstanding: a promise nothing settles, or a
+/// tool call it forgot to await. Both must still produce a reply.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_script_left_pending_still_answers() {
     let workspace = workspace_with_backing_server();
@@ -403,8 +396,7 @@ async fn a_script_left_pending_still_answers() {
 
     for script in [
         "return new Promise(() => {});",
-        // Dispatched but never awaited, so its reply is still outstanding
-        // when the script's value is already decided.
+        // Dispatched but never awaited.
         "sqlx.query({ sql: \"SELECT 1\" }); return \"done\";",
     ] {
         let result = tokio::time::timeout(
@@ -477,10 +469,7 @@ async fn stdout_carries_only_json_rpc() {
     }
 }
 
-/// An `install_commands` entry runs a shell command, and the documented
-/// warmup pattern for a package-runner server is `npx -y <server> --help` —
-/// which prints. Inheriting our stdout would put that prose between two
-/// JSON-RPC frames and end the session.
+/// An install command prints, and under `mcp-serve` stdout is the protocol.
 #[tokio::test(flavor = "multi_thread")]
 async fn install_command_output_stays_off_stdout() {
     const MARKER: &str = "SYMPOSIUM-INSTALL-STDOUT-MARKER";

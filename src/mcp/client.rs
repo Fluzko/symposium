@@ -38,8 +38,7 @@ pub struct SpawnSpec {
 /// Why talking to a backing server failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientError {
-    /// Spawn or handshake did not finish in time. `detail` carries whatever
-    /// the server managed to say on stderr before it stalled.
+    /// Spawn or handshake did not finish in time; `detail` is the stderr tail.
     StartupTimeout {
         server: String,
         limit_secs: u64,
@@ -135,8 +134,7 @@ impl BackingServer {
                 });
             }
             Err(_) => {
-                // A server that hung mid-handshake has usually said why on
-                // stderr, and the timeout alone does not carry that.
+                // A server that hung mid-handshake usually said why on stderr.
                 let detail = drain(stderr).await.filter(|tail| !tail.is_empty());
                 return Err(ClientError::StartupTimeout {
                     server: spec.name.clone(),

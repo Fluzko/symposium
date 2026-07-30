@@ -15,12 +15,9 @@ use symposium_install::{Runnable, acquire_source, make_executable};
 /// Run a list of post-install shell commands sequentially. Stops at the first
 /// failure.
 ///
-/// Output is captured rather than inherited. Under `mcp-serve` our stdout is
-/// the JSON-RPC channel, so a command as ordinary as the documented `npx -y
-/// <server> --help` warmup would write a line of prose into the middle of the
-/// protocol stream and end the session. Nothing is lost by capturing: install
-/// chatter is never the user's answer, and on failure the tail below is a
-/// better account than interleaved output was.
+/// Output is captured, not inherited: under `mcp-serve` stdout is the
+/// JSON-RPC channel, and a warmup as ordinary as `npx -y <server> --help`
+/// prints there.
 pub async fn run_install_commands(commands: &[String]) -> Result<()> {
     for cmd in commands {
         let output = tokio::process::Command::new("sh")
@@ -39,11 +36,8 @@ pub async fn run_install_commands(commands: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The most useful trailing output from a failed install command.
-///
-/// stderr first, since that is where a shell puts its complaint; stdout only
-/// when stderr said nothing. Bounded so a verbose build does not become the
-/// error message.
+/// Trailing output from a failed install command: stderr first, stdout as
+/// fallback, bounded so a verbose build does not become the error message.
 fn failure_tail(output: &std::process::Output) -> Option<String> {
     const MAX: usize = 2000;
     let pick = [&output.stderr, &output.stdout]
@@ -213,8 +207,7 @@ pub fn resolve_runnable(installation: AcquiredInstallation, label: &str) -> Resu
 mod tests {
     use super::*;
 
-    /// Capturing output must not cost the diagnosis: when an install command
-    /// fails, what it printed is the only account of why.
+    /// What a failing command printed is the only account of why.
     #[tokio::test]
     async fn a_failing_install_command_reports_its_stderr() {
         let err = run_install_commands(&["echo trouble-here >&2; exit 3".to_string()])
@@ -224,7 +217,6 @@ mod tests {
         assert!(message.contains("trouble-here"), "got: {message}");
     }
 
-    /// stdout is the fallback when the command said nothing on stderr.
     #[tokio::test]
     async fn a_failing_install_command_falls_back_to_stdout() {
         let err = run_install_commands(&["echo only-on-stdout; exit 1".to_string()])
@@ -233,7 +225,6 @@ mod tests {
         assert!(err.to_string().contains("only-on-stdout"), "got: {err}");
     }
 
-    /// A quiet failure still names the command rather than reporting nothing.
     #[tokio::test]
     async fn a_silent_failure_still_names_the_command() {
         let err = run_install_commands(&["exit 7".to_string()])

@@ -16,9 +16,12 @@ use crate::hook;
 use crate::init::{self, InitOpts};
 use crate::output::Output;
 use crate::plugins::Audience;
+use crate::search_command;
 use crate::self_update;
+use crate::status_command;
 use crate::subcommand_dispatch::dispatch_external;
 use crate::sync;
+use crate::use_command;
 
 /// Parsed CLI arguments.
 #[derive(Debug, Parser)]
@@ -76,6 +79,29 @@ pub enum Commands {
 
     /// Synchronize skills with workspace dependencies
     Sync,
+
+    /// Search configured registries for plugins
+    Search {
+        /// Name (or name fragment) to look for
+        query: String,
+    },
+
+    /// Enable a plugin by name and sync it into the workspace
+    Use {
+        /// Plugin (crate) name to enable
+        name: String,
+
+        /// Enable for every workspace instead of just the current one
+        #[arg(long)]
+        global: bool,
+
+        /// Remove a previously recorded enablement instead of adding one
+        #[arg(long)]
+        remove: bool,
+    },
+
+    /// Show which plugins are enabled for this workspace, and why
+    Status,
 
     /// Hook entry point invoked by your agent (internal)
     #[command(hide = true)]
@@ -143,7 +169,9 @@ pub enum TelemetryCommand {
 /// this only covers the static `Commands` variants above.
 pub fn builtin_audience(name: &str) -> Option<Audience> {
     match name {
-        "init" | "sync" | "self-update" | "plugin" | "telemetry" => Some(Audience::Humans),
+        "init" | "sync" | "search" | "use" | "status" | "self-update" | "plugin" | "telemetry" => {
+            Some(Audience::Humans)
+        }
         "crate-info" => Some(Audience::Agents),
         _ => None,
     }
@@ -221,6 +249,22 @@ pub async fn run(
             discovery::prompt_for_consent(sym, &deps, out).await?;
             sync::sync(sym, &deps, update).await
         }
+
+        Commands::Search { query } => search_command::search(sym, &query).await,
+
+        Commands::Use {
+            name,
+            global,
+            remove,
+        } => {
+            if remove {
+                use_command::remove_plugin(sym, cwd, &name, global, update).await
+            } else {
+                use_command::use_plugin(sym, cwd, &name, global, update).await
+            }
+        }
+
+        Commands::Status => status_command::status(sym, cwd).await,
 
         Commands::SelfUpdate => self_update::self_update(sym, out),
 

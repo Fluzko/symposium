@@ -138,6 +138,20 @@ fn mock_binary() -> PathBuf {
 }
 
 fn workspace_with_backing_server() -> Workspace {
+    workspace_serving(serde_json::json!({
+        "name": "sqlx",
+        "tools": [
+            {"name": "query", "description": "Run a SQL query",
+             "inputSchema": {"type": "object",
+                "properties": {"sql": {"type": "string"}}, "required": ["sql"]},
+             "behavior": {"kind": "echo"}},
+            {"name": "migrate-status", "description": "Show migrations",
+             "behavior": {"kind": "text", "text": "up to date"}}
+        ]
+    }))
+}
+
+fn workspace_serving(mock: serde_json::Value) -> Workspace {
     let dir = tempfile::tempdir().expect("temp dir");
     let base = dir.path().to_path_buf();
     let home = base.join("home");
@@ -146,22 +160,7 @@ fn workspace_with_backing_server() -> Workspace {
     std::fs::create_dir_all(root.join("src")).unwrap();
 
     let mock_config = base.join("mock.json");
-    std::fs::write(
-        &mock_config,
-        serde_json::json!({
-            "name": "sqlx",
-            "tools": [
-                {"name": "query", "description": "Run a SQL query",
-                 "inputSchema": {"type": "object",
-                    "properties": {"sql": {"type": "string"}}, "required": ["sql"]},
-                 "behavior": {"kind": "echo"}},
-                {"name": "migrate-status", "description": "Show migrations",
-                 "behavior": {"kind": "text", "text": "up to date"}}
-            ]
-        })
-        .to_string(),
-    )
-    .unwrap();
+    std::fs::write(&mock_config, mock.to_string()).unwrap();
 
     std::fs::write(
         home.join("config.toml"),
@@ -290,6 +289,69 @@ async fn a_script_composes_calls_in_one_round_trip() {
     assert!(
         text.contains("console:") && text.contains("intermediate"),
         "console output should be reported, got: {text}"
+    );
+    let _ = client.cancel().await;
+}
+
+/// Every name in the declarations has to dispatch to the tool it was
+/// declared for. Rendering and dispatch derived their names separately once:
+/// only the renderer disambiguated, so it advertised a name nothing bound
+/// while the colliding pair silently overwrote each other.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declared_name_reaches_the_tool_it_was_declared_for() {
+    let workspace = workspace_serving(serde_json::json!({
+        "name": "sqlx",
+        "tools": [
+            {"name": "get-sum", "description": "hyphenated",
+             "behavior": {"kind": "text", "text": "FROM-HYPHENATED"}},
+            {"name": "get_sum", "description": "underscored",
+             "behavior": {"kind": "text", "text": "FROM-UNDERSCORED"}}
+        ]
+    }));
+    let client = connect_in(&workspace).await;
+
+    let declarations = text_of(
+        &client
+            .call_tool(CallToolRequestParams::new("list_tools").with_arguments(
+                serde_json::Map::from_iter([("detail".to_string(), serde_json::json!("full"))]),
+            ))
+            .await
+            .expect("list_tools"),
+    );
+
+    // Whatever spelling the alias ended up with, calling it must reach the
+    // hyphenated tool, and the plain name must reach the underscored one.
+    let script = r#"
+        return {
+            viaAlias: await sqlx.get_sum_2(),
+            viaQuoted: await sqlx["get-sum"](),
+            viaOwnName: await sqlx.get_sum(),
+        };
+    "#;
+    let result = client
+        .call_tool(CallToolRequestParams::new("execute").with_arguments(
+            serde_json::Map::from_iter([("script".to_string(), serde_json::json!(script))]),
+        ))
+        .await
+        .expect("execute");
+    let text = text_of(&result);
+
+    assert!(
+        declarations.contains("get_sum_2"),
+        "the alias should be declared, got: {declarations}"
+    );
+    assert_ne!(result.is_error, Some(true), "got: {text}");
+    assert!(
+        text.contains(r#""viaAlias":"FROM-HYPHENATED""#),
+        "the declared alias must reach the hyphenated tool, got: {text}"
+    );
+    assert!(
+        text.contains(r#""viaQuoted":"FROM-HYPHENATED""#),
+        "got: {text}"
+    );
+    assert!(
+        text.contains(r#""viaOwnName":"FROM-UNDERSCORED""#),
+        "a real tool must keep its own name, got: {text}"
     );
     let _ = client.cancel().await;
 }

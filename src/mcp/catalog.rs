@@ -20,7 +20,7 @@ use rmcp::model::Tool;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use super::declarations::{ToolDecl, binding_keys, render_server};
+use super::declarations::{ToolDecl, binding_table, render_server};
 use super::dispatch::{Binding, Namespace};
 use super::resolve::{Rejection, Resolution, ResolvedServer};
 use super::supervisor::{RestartPolicy, Supervisor};
@@ -289,19 +289,22 @@ impl Catalog {
                 }
             };
 
-            let bindings: Vec<Binding> = tools
+            // The same table the declarations are rendered from, so every
+            // name the model was shown is a name that dispatches.
+            let visible: Vec<&str> = tools
                 .iter()
                 .filter(|t| entry.resolved.exposes(t.name.as_ref()))
                 .filter(|t| !self.read_only || is_read_only(t))
-                .flat_map(|t| {
-                    // Both spellings reach the same wire name, so a model can
-                    // use whichever the declarations showed it.
-                    binding_keys(t.name.as_ref())
-                        .into_iter()
-                        .map(move |key| Binding {
-                            key,
-                            wire_name: t.name.to_string(),
-                        })
+                .map(|t| t.name.as_ref())
+                .collect();
+
+            let bindings: Vec<Binding> = binding_table(visible)
+                .into_iter()
+                .flat_map(|b| {
+                    b.keys.into_iter().map(move |key| Binding {
+                        key,
+                        wire_name: b.wire_name.clone(),
+                    })
                 })
                 .collect();
 

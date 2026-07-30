@@ -19,27 +19,68 @@ pub struct ToolDecl<'a> {
     pub input_schema: Option<&'a Value>,
 }
 
+/// The JavaScript keys one tool answers to, primary first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolBinding {
+    /// Name to send on the wire.
+    pub wire_name: String,
+    /// Property keys, as they appear on the namespace object. A wire name
+    /// that is already an identifier has one; anything else also gets a
+    /// sanitized alias, so `sqlx["migrate-status"]` and
+    /// `sqlx.migrate_status` both dispatch.
+    pub keys: Vec<String>,
+}
+
+/// Assign JavaScript keys to a server's tools.
+///
+/// The single source of both the declarations and the runtime bindings.
+/// Rendering and dispatch derived their names separately once, and disagreed:
+/// only the renderer disambiguated collisions, so it could advertise a name
+/// that nothing bound while a colliding pair silently overwrote each other.
+/// A name the model is shown has to be a name it can call.
+///
+/// Primaries are assigned before aliases, so a tool keeps its own spelling
+/// rather than losing it to another tool's sanitized form.
+pub fn binding_table<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<ToolBinding> {
+    let mut used: Vec<String> = Vec::new();
+    let mut table: Vec<ToolBinding> = Vec::new();
+
+    for name in names {
+        // Tool names are unique per server by the protocol. A server that
+        // advertises one twice leaves the second unaddressable on the wire
+        // regardless, so declaring it again would only be a duplicate member.
+        if table.iter().any(|b| b.wire_name == name) {
+            continue;
+        }
+        table.push(ToolBinding {
+            wire_name: name.to_string(),
+            keys: vec![unique(name.to_string(), &mut used)],
+        });
+    }
+
+    for binding in &mut table {
+        if !is_js_identifier(&binding.wire_name) {
+            binding
+                .keys
+                .push(unique(sanitize(&binding.wire_name), &mut used));
+        }
+    }
+
+    table
+}
+
 /// Render one server's tools as a declaration block.
 pub fn render_server(server: &str, tools: &[ToolDecl]) -> String {
     let mut types = TypeRenderer::new();
     let mut methods = String::new();
-    let mut used: Vec<String> = Vec::new();
 
-    for tool in tools {
+    for binding in binding_table(tools.iter().map(|t| t.name)) {
+        let Some(tool) = tools.iter().find(|t| t.name == binding.wire_name) else {
+            continue;
+        };
         let params = render_params(&mut types, tool.input_schema);
 
-        // A name that is already a valid identifier needs no alias. One that
-        // is not gets both spellings, so `sqlx["migrate-status"]` and
-        // `sqlx.migrate_status` both dispatch.
-        let quoted = format!("{:?}", tool.name);
-        let alias = (!is_js_identifier(tool.name)).then(|| unique(sanitize(tool.name), &mut used));
-        let primary = if alias.is_some() {
-            quoted
-        } else {
-            unique(tool.name.to_string(), &mut used)
-        };
-
-        for (index, key) in std::iter::once(&primary).chain(alias.iter()).enumerate() {
+        for (index, key) in binding.keys.iter().enumerate() {
             if index == 0 {
                 if let Some(doc) = tool.description.and_then(jsdoc_text) {
                     methods.push_str(&format!("  /** {doc} */\n"));
@@ -47,9 +88,13 @@ pub fn render_server(server: &str, tools: &[ToolDecl]) -> String {
             } else {
                 // The alias is the same tool under a different spelling.
                 // Repeating the description would double it in the output.
-                methods.push_str(&format!("  /** Alias for {}. */\n", tool.name));
+                let name = jsdoc_text(tool.name).unwrap_or_else(|| "the same tool".to_string());
+                methods.push_str(&format!("  /** Alias for {name}. */\n"));
             }
-            methods.push_str(&format!("  {key}({params}): Promise<unknown>;\n"));
+            methods.push_str(&format!(
+                "  {}({params}): Promise<unknown>;\n",
+                render_key(key)
+            ));
         }
     }
 
@@ -61,16 +106,12 @@ pub fn render_server(server: &str, tools: &[ToolDecl]) -> String {
     out
 }
 
-/// The keys a tool is reachable under in JavaScript.
-///
-/// A wire name that is already an identifier needs one key. One that is not
-/// gets two — the quoted wire name and a sanitized alias — so both
-/// `sqlx["migrate-status"]` and `sqlx.migrate_status` dispatch.
-pub fn binding_keys(name: &str) -> Vec<String> {
-    if is_js_identifier(name) {
-        vec![name.to_string()]
+/// A property key as it must be written in a type literal.
+fn render_key(key: &str) -> String {
+    if is_js_identifier(key) {
+        key.to_string()
     } else {
-        vec![name.to_string(), sanitize(name)]
+        format!("{key:?}")
     }
 }
 
@@ -280,14 +321,92 @@ mod tests {
         assert!(out.starts_with("declare const sea_orm: {"), "got:\n{out}");
     }
 
-    /// The keys used to build the runtime namespace must match the ones the
-    /// declarations advertise, or a model would call a name that is not there.
+    /// Every key the declarations advertise has to be one dispatch binds.
+    /// These were derived separately once and disagreed.
+    fn declared_keys(out: &str) -> Vec<String> {
+        out.lines()
+            .filter_map(|line| line.trim().strip_suffix("): Promise<unknown>;"))
+            .filter_map(|line| line.split('(').next())
+            .map(|key| key.trim_matches('"').to_string())
+            .collect()
+    }
+
     #[test]
-    fn binding_keys_match_the_declared_names() {
-        assert_eq!(binding_keys("query"), vec!["query".to_string()]);
+    fn an_identifier_name_needs_no_alias() {
+        let table = binding_table(["query"]);
+        assert_eq!(table[0].keys, vec!["query".to_string()]);
+    }
+
+    #[test]
+    fn a_hyphenated_name_is_bound_under_both_spellings() {
+        let table = binding_table(["get-sum"]);
         assert_eq!(
-            binding_keys("get-sum"),
+            table[0].keys,
             vec!["get-sum".to_string(), "get_sum".to_string()]
+        );
+    }
+
+    /// The case that was broken: the renderer disambiguated and dispatch did
+    /// not, so the declarations advertised `get_sum_2`, nothing bound it, and
+    /// `get_sum` was bound twice with one silently shadowing the other.
+    #[test]
+    fn a_colliding_alias_never_shadows_a_real_tool() {
+        let table = binding_table(["get-sum", "get_sum"]);
+
+        assert_eq!(table[0].wire_name, "get-sum");
+        assert_eq!(
+            table[0].keys,
+            vec!["get-sum".to_string(), "get_sum_2".to_string()],
+            "the alias must yield to the tool that owns the name"
+        );
+        assert_eq!(table[1].wire_name, "get_sum");
+        assert_eq!(
+            table[1].keys,
+            vec!["get_sum".to_string()],
+            "a real tool keeps its own spelling"
+        );
+
+        let mut keys: Vec<&String> = table.iter().flat_map(|b| &b.keys).collect();
+        let before = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(before, keys.len(), "every key must be distinct: {keys:?}");
+    }
+
+    /// The renderer and the dispatcher read the same table, so what is
+    /// declared is exactly what is bound.
+    #[test]
+    fn declared_names_are_the_bound_names() {
+        let schema = json!({});
+        let tools = [
+            tool("get-sum", &schema),
+            tool("get_sum", &schema),
+            tool("query", &schema),
+        ];
+        let out = render_server("s", &tools);
+
+        let bound: Vec<String> = binding_table(tools.iter().map(|t| t.name))
+            .into_iter()
+            .flat_map(|b| b.keys)
+            .collect();
+
+        assert_eq!(declared_keys(&out), bound, "got:\n{out}");
+    }
+
+    /// A server advertising one name twice would otherwise emit a duplicate
+    /// member, which is a TypeScript error. The second is unreachable on the
+    /// wire either way.
+    #[test]
+    fn a_repeated_wire_name_is_declared_once() {
+        let schema = json!({});
+        let tools = [tool("get-sum", &schema), tool("get-sum", &schema)];
+        let out = render_server("s", &tools);
+
+        assert_eq!(binding_table(tools.iter().map(|t| t.name)).len(), 1);
+        assert_eq!(
+            declared_keys(&out),
+            vec!["get-sum".to_string(), "get_sum".to_string()],
+            "got:\n{out}"
         );
     }
 

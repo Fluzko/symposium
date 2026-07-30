@@ -145,7 +145,15 @@ pub fn resolve(sym: &Symposium, cwd: &Path) -> Resolution {
         return Resolution::default();
     };
     let loaded = loaded.clone();
-    let registry = crate::plugins::load_registry_with_workspace(sym, Some(&loaded));
+    resolve_loaded(sym, &loaded)
+}
+
+/// Resolve against a workspace already loaded by the caller.
+pub fn resolve_loaded(
+    sym: &Symposium,
+    loaded: &symposium_sdk::workspace::LoadedWorkspace,
+) -> Resolution {
+    let registry = crate::plugins::load_registry_with_workspace(sym, Some(loaded));
 
     let dep_ids = crate::pm::CargoPm.list_deps(&loaded.crates);
     let mut ctx = crate::predicate::PredicateContext::new(&dep_ids);
@@ -165,6 +173,50 @@ pub fn resolve(sym: &Symposium, cwd: &Path) -> Resolution {
     }
 
     build(entries, sym.config.mcp.script_timeout_secs)
+}
+
+/// Acquire what applicable servers need, once per session.
+///
+/// Two different intents, treated differently:
+///
+/// * **`requirements`** are acquired eagerly. Declaring one *is* the author
+///   saying "warm this up" — it is how a package-runner server avoids paying
+///   its download on the first tool call.
+/// * **`installation`** commands are only refreshed if already present, as
+///   hooks are. Installing every declared server eagerly would fetch tools a
+///   session may never touch.
+///
+/// Best-effort throughout: a failure here only means the cost lands later.
+pub async fn prewarm(sym: &Symposium, resolution: &Resolution) {
+    let update = symposium_install::UpdateLevel::Check;
+
+    for server in &resolution.servers {
+        for requirement in &server.requirements {
+            if let Err(e) =
+                crate::installation::acquire_installation(sym, requirement, None, None, update)
+                    .await
+            {
+                tracing::debug!(
+                    server = %server.name,
+                    requirement = %requirement.name,
+                    error = %e,
+                    "prewarm: requirement acquisition failed"
+                );
+            }
+        }
+
+        if let ServerCommand::Installation(installation) = &server.command {
+            if let Err(e) =
+                crate::installation::refresh_installation_if_present(sym, installation, None).await
+            {
+                tracing::debug!(
+                    server = %server.name,
+                    error = %e,
+                    "prewarm: command refresh failed"
+                );
+            }
+        }
+    }
 }
 
 /// An applicable entry together with the plugin that declared it, whose
@@ -543,6 +595,47 @@ mod tests {
         assert_eq!(out.servers.len(), 1, "rejected: {:?}", out.rejected);
         assert_eq!(out.servers[0].requirements.len(), 1);
         assert_eq!(out.servers[0].requirements[0].name, "warmup");
+    }
+
+    /// A declared requirement is acquired eagerly: that is the author asking
+    /// for a warm cache, and the alternative is the download landing on the
+    /// agent's first tool call.
+    #[tokio::test]
+    async fn prewarm_runs_declared_requirements() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("warmed");
+        let sym = Symposium::from_dir(tmp.path());
+
+        let entry = installation_backed("sqlx", "sqlx-mcp", &["warmup"]);
+        let plugin = owner_plugin(vec![
+            installation("sqlx-mcp", vec![]),
+            installation("warmup", vec![format!("touch {}", marker.display())]),
+        ]);
+        let resolution = resolve_with(vec![&entry], &plugin, 120);
+
+        assert!(!marker.exists(), "resolving must not run anything");
+        prewarm(&sym, &resolution).await;
+        assert!(
+            marker.exists(),
+            "the warmup should have run at prewarm time"
+        );
+    }
+
+    /// A warmup that fails only means the cost lands later, so it must not
+    /// take the session with it.
+    #[tokio::test]
+    async fn prewarm_survives_a_failing_requirement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sym = Symposium::from_dir(tmp.path());
+
+        let entry = installation_backed("sqlx", "sqlx-mcp", &["warmup"]);
+        let plugin = owner_plugin(vec![
+            installation("sqlx-mcp", vec![]),
+            installation("warmup", vec!["exit 1".to_string()]),
+        ]);
+        let resolution = resolve_with(vec![&entry], &plugin, 120);
+
+        prewarm(&sym, &resolution).await;
     }
 
     // -- tool filters --

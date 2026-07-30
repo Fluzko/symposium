@@ -458,6 +458,54 @@ mod tests {
         sup.shutdown().await;
     }
 
+    /// A server that reads the project it serves needs to run inside it.
+    /// Four of the seven client config formats carry this for that reason.
+    ///
+    /// Proved with a *relative* config path: the server can only find its
+    /// config if the working directory was applied.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_server_runs_in_its_configured_directory() {
+        let f = fixture(json!({
+            "name": "mock",
+            "tools": [{"name": "echo", "behavior": {"kind": "echo"}}]
+        }));
+        let dir = f.config.parent().expect("fixture dir").to_path_buf();
+
+        let relative = SpawnSpec {
+            name: "mock".to_string(),
+            command: mock_binary(),
+            args: vec!["--config".to_string(), "mock.json".to_string()],
+            env: Vec::new(),
+            cwd: Some(dir.clone()),
+            startup_timeout: Duration::from_secs(10),
+        };
+        let mut sup = Supervisor::new(relative, fast_policy());
+        sup.call("echo", json!({"ok": 1}), Duration::from_secs(5))
+            .await
+            .expect("a relative config resolves only from the right directory");
+        sup.shutdown().await;
+
+        // Without it, the same relative path cannot be found.
+        let mut without_cwd = Supervisor::new(
+            SpawnSpec {
+                name: "mock".to_string(),
+                command: mock_binary(),
+                args: vec!["--config".to_string(), "mock.json".to_string()],
+                env: Vec::new(),
+                cwd: None,
+                startup_timeout: Duration::from_secs(10),
+            },
+            fast_policy(),
+        );
+        assert!(
+            without_cwd
+                .call("echo", json!({}), Duration::from_secs(5))
+                .await
+                .is_err(),
+            "the relative path should not resolve from the test's own directory"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hanging_tool_times_out() {
         let f = fixture(json!({

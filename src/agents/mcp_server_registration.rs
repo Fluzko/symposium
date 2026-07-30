@@ -33,12 +33,6 @@ fn server_name(server: &McpServer) -> &str {
     }
 }
 
-/// Convert an McpServer to the JSON value agents expect in their config.
-///
-/// Stdio: `{"command": "...", "args": [...], "env": [...]}`
-/// Http/Sse: `{"url": "...", "headers": [...]}`
-///
-/// `env` and `headers` are omitted when empty.
 /// Render name/value pairs as a JSON object.
 fn pairs_to_object<'a>(pairs: impl Iterator<Item = (&'a String, &'a String)>) -> serde_json::Value {
     serde_json::Value::Object(
@@ -48,6 +42,12 @@ fn pairs_to_object<'a>(pairs: impl Iterator<Item = (&'a String, &'a String)>) ->
     )
 }
 
+/// Convert an McpServer to the JSON value agents expect in their config.
+///
+/// Stdio: `{"command": "...", "args": [...], "env": {...}}`
+/// Http/Sse: `{"url": "...", "headers": {...}}`
+///
+/// `env` and `headers` are omitted when empty.
 fn server_to_json(server: &McpServer) -> serde_json::Value {
     match server {
         McpServer::Stdio(s) => {

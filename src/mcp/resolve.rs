@@ -172,7 +172,7 @@ pub fn resolve_loaded(
         }
     }
 
-    build(entries, sym.config.mcp.script_timeout_secs)
+    build(entries, &loaded.root, sym.config.mcp.script_timeout_secs)
 }
 
 /// Acquire what applicable servers need, once per session.
@@ -228,7 +228,11 @@ struct Candidate<'a> {
 }
 
 /// Turn applicable manifest entries into runnable servers.
-fn build(entries: Vec<Candidate<'_>>, script_timeout_secs: u64) -> Resolution {
+///
+/// `root` anchors a relative `cwd`. A plugin author writing `cwd =
+/// "crates/db"` means the workspace's `crates/db`; they cannot know what
+/// directory the agent happened to be launched from.
+fn build(entries: Vec<Candidate<'_>>, root: &Path, script_timeout_secs: u64) -> Resolution {
     let mut resolution = Resolution::default();
     // Which plugin claimed each name, so a clash can name both sides.
     let mut claimed: Vec<(String, String)> = Vec::new();
@@ -319,7 +323,7 @@ fn build(entries: Vec<Candidate<'_>>, script_timeout_secs: u64) -> Resolution {
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
-            cwd: stdio.cwd.clone(),
+            cwd: stdio.cwd.as_ref().map(|dir| root.join(dir)),
             startup_timeout: Duration::from_secs(
                 entry.overrides.startup_timeout_secs.unwrap_or(30),
             ),
@@ -398,6 +402,7 @@ mod tests {
                     plugin,
                 })
                 .collect(),
+            Path::new("/ws"),
             script_secs,
         )
     }
@@ -415,8 +420,37 @@ mod tests {
                     plugin: &plugin,
                 })
                 .collect(),
+            Path::new("/ws"),
             script_secs,
         )
+    }
+
+    /// A plugin author writes `cwd` against the workspace, not against
+    /// whatever directory the agent happened to start in.
+    #[test]
+    fn relative_cwd_resolves_against_the_workspace_root() {
+        let mut entry = stdio("sqlx");
+        if let McpTransport::Stdio(s) = &mut entry.transport {
+            s.cwd = Some("crates/db".into());
+        }
+        let out = resolve_all(vec![(&entry, "db-plugin")], 120);
+        assert_eq!(
+            out.servers[0].cwd.as_deref(),
+            Some(Path::new("/ws/crates/db")),
+            "got: {:?}",
+            out.servers[0].cwd
+        );
+    }
+
+    /// An absolute `cwd` is the author being explicit; leave it alone.
+    #[test]
+    fn absolute_cwd_is_left_as_written() {
+        let mut entry = stdio("sqlx");
+        if let McpTransport::Stdio(s) = &mut entry.transport {
+            s.cwd = Some("/opt/db".into());
+        }
+        let out = resolve_all(vec![(&entry, "db-plugin")], 120);
+        assert_eq!(out.servers[0].cwd.as_deref(), Some(Path::new("/opt/db")));
     }
 
     #[test]

@@ -38,8 +38,13 @@ pub struct SpawnSpec {
 /// Why talking to a backing server failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientError {
-    /// Spawn or handshake did not finish in time.
-    StartupTimeout { server: String, limit_secs: u64 },
+    /// Spawn or handshake did not finish in time. `detail` carries whatever
+    /// the server managed to say on stderr before it stalled.
+    StartupTimeout {
+        server: String,
+        limit_secs: u64,
+        detail: Option<String>,
+    },
     /// The process could not be started, or died during the handshake.
     StartupFailed { server: String, detail: String },
     /// A single call did not finish in time.
@@ -58,9 +63,14 @@ pub enum ClientError {
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::StartupTimeout { server, limit_secs } => {
-                write!(f, "{server} did not start within {limit_secs}s")
-            }
+            Self::StartupTimeout {
+                server,
+                limit_secs,
+                detail,
+            } => match detail {
+                Some(tail) => write!(f, "{server} did not start within {limit_secs}s: {tail}"),
+                None => write!(f, "{server} did not start within {limit_secs}s"),
+            },
             Self::StartupFailed { server, detail } => {
                 write!(f, "{server} failed to start: {detail}")
             }
@@ -125,9 +135,13 @@ impl BackingServer {
                 });
             }
             Err(_) => {
+                // A server that hung mid-handshake has usually said why on
+                // stderr, and the timeout alone does not carry that.
+                let detail = drain(stderr).await.filter(|tail| !tail.is_empty());
                 return Err(ClientError::StartupTimeout {
                     server: spec.name.clone(),
                     limit_secs: spec.startup_timeout.as_secs(),
+                    detail,
                 });
             }
         };

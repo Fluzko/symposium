@@ -188,11 +188,6 @@ pub struct McpConfig {
     #[serde(rename = "max-tool-calls")]
     pub max_tool_calls: u32,
 
-    /// Maximum tool calls in flight at once from one script. Also caps how
-    /// many cold backing servers may be spawned concurrently.
-    #[serde(rename = "max-concurrent-tool-calls")]
-    pub max_concurrent_tool_calls: u32,
-
     /// Ceiling on a serialized `execute` return value. Oversized results are
     /// truncated with a marker rather than rejected, so a script that already
     /// performed side effects does not lose its work.
@@ -202,11 +197,6 @@ pub struct McpConfig {
     /// Ceiling on captured `console` output for one `execute`.
     #[serde(rename = "max-console-bytes")]
     pub max_console_bytes: usize,
-
-    /// Backstop ceiling on a `list_tools` response. Not the primary size
-    /// control — `list_tools` returns an index by default.
-    #[serde(rename = "max-declaration-bytes")]
-    pub max_declaration_bytes: usize,
 
     /// Ceiling on spawning a backing server and completing its handshake.
     #[serde(rename = "server-startup-timeout-secs")]
@@ -231,16 +221,6 @@ pub struct McpConfig {
     #[serde(rename = "shutdown-grace-secs")]
     pub shutdown_grace_secs: u64,
 
-    /// How long a cached `tools/list` payload stays valid on disk, letting a
-    /// later session render declarations without spawning anything.
-    #[serde(rename = "declaration-cache-ttl-secs")]
-    pub declaration_cache_ttl_secs: u64,
-
-    /// Poll interval for re-fetching a backing server's tool list. 0 relies
-    /// solely on `notifications/tools/list_changed`.
-    #[serde(rename = "tool-discovery-interval-secs")]
-    pub tool_discovery_interval_secs: u64,
-
     /// Expose only tools annotated `readOnlyHint`, and reject the rest at
     /// dispatch. The annotation is self-declared by the backing server, so
     /// this is a guardrail against agent mistakes, not a security boundary.
@@ -256,17 +236,13 @@ impl Default for McpConfig {
             script_memory_limit_mb: 64,
             script_stack_limit_kb: 1024,
             max_tool_calls: 100,
-            max_concurrent_tool_calls: 4,
             max_result_bytes: 32 * 1024,
             max_console_bytes: 8 * 1024,
-            max_declaration_bytes: 64 * 1024,
             server_startup_timeout_secs: 30,
             tool_call_timeout_secs: 60,
             max_server_restarts: 5,
             restart_stable_reset_secs: 300,
             shutdown_grace_secs: 5,
-            declaration_cache_ttl_secs: 86_400,
-            tool_discovery_interval_secs: 0,
             read_only: false,
         }
     }
@@ -905,7 +881,7 @@ mod tests {
         assert_eq!(mcp.server_startup_timeout_secs, 30);
         assert_eq!(mcp.max_result_bytes, 32 * 1024);
         assert_eq!(mcp.max_server_restarts, 5);
-        assert_eq!(mcp.tool_discovery_interval_secs, 0);
+        assert_eq!(mcp.shutdown_grace_secs, 5);
     }
 
     /// An `[mcp]` table sets only the keys it names; the rest keep their defaults.

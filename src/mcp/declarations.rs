@@ -212,7 +212,7 @@ mod tests {
 
     // -- naming --
 
-    /// The protocol's own reference server names 17 of its 18 tools with
+    /// The protocol's own reference server names 12 of its 13 tools with
     /// hyphens, so this is the common case, not an edge case.
     #[test]
     fn hyphenated_tool_gets_both_spellings() {

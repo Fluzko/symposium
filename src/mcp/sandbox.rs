@@ -445,8 +445,13 @@ mod tests {
     // -- memory --
 
     /// Guards against the limit silently becoming a no-op: rquickjs documents
-    /// `set_memory_limit` as inert when a custom allocator is in use, which a
-    /// future feature change could enable without any other visible effect.
+    /// `set_memory_limit` as inert when a custom allocator is in use, and
+    /// feature unification means a transitive dependency could enable
+    /// `rquickjs/rust-alloc` without any other visible effect.
+    ///
+    /// The assertion has to be `MemoryExhausted` alone. Accepting a timeout
+    /// too would let exactly that regression pass: with the limit inert, the
+    /// loop simply runs until the deadline.
     #[tokio::test]
     async fn allocation_is_bounded() {
         let sandbox = Sandbox::new(Limits {
@@ -458,11 +463,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(
-                err,
-                SandboxError::MemoryExhausted { .. } | SandboxError::ScriptTimeout { .. }
-            ),
-            "unbounded allocation must not succeed, got: {err:?}"
+            matches!(err, SandboxError::MemoryExhausted { .. }),
+            "the memory limit must be what stops this, got: {err:?}"
         );
     }
 

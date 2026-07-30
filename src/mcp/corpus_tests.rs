@@ -63,7 +63,7 @@ fn every_tool_in_the_corpus_produces_a_declaration() {
     }
 }
 
-/// The protocol's own test server. Names 17 of its 18 tools with hyphens, so
+/// The protocol's own test server. Names 12 of its 13 tools with hyphens, so
 /// this is also the identifier-handling snapshot.
 #[test]
 fn everything_server() {

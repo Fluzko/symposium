@@ -323,6 +323,47 @@ async fn exceeding_a_limit_reports_a_tagged_error() {
     let _ = client.cancel().await;
 }
 
+/// A script can end with work outstanding — a promise nothing settles, or a
+/// tool call it forgot to await. The engine thread owns the only tool-call
+/// sender, so waiting for the dispatch pump to drain means waiting on that
+/// thread, and the request goes unanswered rather than reporting a timeout.
+/// Forgetting an `await` is an ordinary mistake, so this has to hold.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_script_left_pending_still_answers() {
+    let workspace = workspace_with_backing_server();
+    std::fs::write(
+        workspace.home.join("config.toml"),
+        "hook-scope = \"project\"\n[defaults]\nsymposium-recommendations = false\n\
+         [mcp]\nscript-timeout-secs = 2\ntool-call-timeout-secs = 1\n",
+    )
+    .unwrap();
+    let client = connect_in(&workspace).await;
+
+    for script in [
+        "return new Promise(() => {});",
+        // Dispatched but never awaited, so its reply is still outstanding
+        // when the script's value is already decided.
+        "sqlx.query({ sql: \"SELECT 1\" }); return \"done\";",
+    ] {
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            client.call_tool(CallToolRequestParams::new("execute").with_arguments(
+                serde_json::Map::from_iter([("script".to_string(), serde_json::json!(script))]),
+            )),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("execute never answered for: {script}"))
+        .expect("execute should answer, not fail");
+
+        let text = text_of(&result);
+        assert!(
+            text.contains("script_timeout") || result.is_error != Some(true),
+            "expected an answer either way, got: {text}"
+        );
+    }
+    let _ = client.cancel().await;
+}
+
 /// The transport is newline-delimited JSON, so anything else written to
 /// stdout corrupts the stream. Reporting output is the likely offender, since
 /// every other subcommand sends it there.

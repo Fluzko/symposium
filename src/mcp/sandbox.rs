@@ -30,10 +30,10 @@ use super::{console, dispatch, normalize};
 /// the OS thread stack, which is a crash rather than an exception.
 const STACK_HEADROOM: usize = 1 << 20;
 
-/// How long the outer deadline waits past the interrupt deadline.
+/// How long each deadline layer waits past the one inside it.
 ///
 /// The interrupt produces a precise error, so give it a moment to win before
-/// the blunt outer timeout fires.
+/// the blunter layers fire.
 const OUTER_GRACE: Duration = Duration::from_millis(250);
 
 /// Bounds on one script execution.
@@ -179,13 +179,32 @@ impl Sandbox {
                     .enable_time()
                     .build()
                 {
-                    Ok(rt) => rt.block_on(run(
-                        &script,
-                        source.as_deref(),
-                        &namespaces,
-                        calls.as_ref(),
-                        limits,
-                    )),
+                    // The middle deadline, and the one that keeps this thread
+                    // from outliving the call. The interrupt handler only
+                    // fires while the interpreter is running, so a script that
+                    // settles into an unresolvable promise — `return new
+                    // Promise(() => {})`, or a tool call left un-awaited —
+                    // parks here with nothing to interrupt. Abandoning the
+                    // future drops the runtime, and with it the tool-call
+                    // sender the caller's dispatch pump is waiting on.
+                    Ok(rt) => rt.block_on(async {
+                        let bounded = tokio::time::timeout(
+                            limits.timeout + OUTER_GRACE,
+                            run(
+                                &script,
+                                source.as_deref(),
+                                &namespaces,
+                                calls.as_ref(),
+                                limits,
+                            ),
+                        );
+                        match bounded.await {
+                            Ok(outcome) => outcome,
+                            Err(_) => Err(SandboxError::ScriptTimeout {
+                                limit_secs: limits.timeout.as_secs(),
+                            }),
+                        }
+                    }),
                     Err(e) => Err(SandboxError::Internal {
                         message: format!("could not start sandbox runtime: {e}"),
                     }),
@@ -200,10 +219,11 @@ impl Sandbox {
             });
         }
 
-        // The outer layer. A script awaiting a host call that never resolves
-        // leaves the interpreter idle, so the interrupt handler never runs and
-        // only this can end it.
-        match tokio::time::timeout(limits.timeout + OUTER_GRACE, rx).await {
+        // The outermost layer, and a backstop rather than the working
+        // deadline: the in-thread bound above should already have reported.
+        // This catches a thread that died without sending, and is given room
+        // to lose that race so the precise error wins.
+        match tokio::time::timeout(limits.timeout + OUTER_GRACE * 2, rx).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => Err(SandboxError::Internal {
                 message: "sandbox thread ended without reporting".to_string(),
@@ -435,6 +455,86 @@ mod tests {
     async fn deadline_is_enforced_promptly() {
         let started = Instant::now();
         let _ = eval("while (true) {}").await;
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The interrupt handler only fires while the interpreter is running, so
+    /// a script that parks on a promise nothing will ever settle leaves
+    /// nothing to interrupt. Only the surrounding deadlines can end it.
+    #[tokio::test]
+    async fn a_promise_that_never_settles_still_reports() {
+        let started = Instant::now();
+        let err = Sandbox::new(fast())
+            .run_script("return new Promise(() => {})")
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, SandboxError::ScriptTimeout { .. }),
+            "got: {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The engine thread owns the only tool-call sender, so a thread that
+    /// outlives its script keeps the caller's dispatch pump alive forever —
+    /// which is what left `execute` never answering. Observing the channel
+    /// close is how we know the thread actually went away.
+    #[tokio::test]
+    async fn a_wedged_script_releases_the_dispatch_channel() {
+        let (calls, mut receiver) = dispatch::channel();
+        let err = Sandbox::new(fast())
+            .run_script_with("return new Promise(() => {})", &[], calls)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SandboxError::ScriptTimeout { .. }),
+            "got: {err:?}"
+        );
+
+        let closed = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .expect("the sandbox thread must drop its sender, not hold it");
+        assert!(
+            closed.is_none(),
+            "channel should be closed, got: {closed:?}"
+        );
+    }
+
+    /// A tool call the script never awaited must not keep the engine past its
+    /// deadline: the reply can only come from a pump the caller stops driving
+    /// once the script is over.
+    #[tokio::test]
+    async fn an_unawaited_tool_call_does_not_outlive_the_deadline() {
+        let (calls, _receiver) = dispatch::channel();
+        let namespaces = vec![dispatch::Namespace {
+            key: "srv".to_string(),
+            server: "srv".to_string(),
+            bindings: vec![dispatch::Binding {
+                key: "go".to_string(),
+                wire_name: "go".to_string(),
+            }],
+        }];
+
+        let started = Instant::now();
+        // No `await`, and nothing is servicing the channel.
+        let err = Sandbox::new(fast())
+            .run_script_with("srv.go({}); return 1;", &namespaces, calls)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, SandboxError::ScriptTimeout { .. }),
+            "got: {err:?}"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "took {:?}",

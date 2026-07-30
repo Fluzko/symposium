@@ -4,12 +4,10 @@
 //! Discovery is the read side of the enablement axis. It runs in two phases:
 //!
 //! 1. list the workspace's dependencies ([`pm::workspace_dep_ids`]);
-//! 2. ask every package-manager instance what plugins it offers
-//!    ([`PackageManager::list_plugins`]) and keep the offers that
-//!    [recommend](crate::pm::PluginInfo::recommends) one of those
-//!    dependencies.
+//! 2. ask each *untrusted* instance — the cargo transport — for the plugins
+//!    its dependencies embed ([`PackageManager::active_plugins`]).
 //!
-//! Each surviving offer is then classified against the `[plugins]` config:
+//! Each such offer is then classified against the `[plugins]` config:
 //! already enabled, auto-enabled, declined, or a candidate still awaiting
 //! consent. Discovery itself neither fetches nor writes.
 //!
@@ -33,7 +31,7 @@
 //! [`Plugin::applies`]: crate::plugins::ParsedPlugin::applies
 //!
 //! [`pm::workspace_dep_ids`]: crate::pm::workspace_dep_ids
-//! [`PackageManager::list_plugins`]: crate::pm::PackageManager::list_plugins
+//! [`PackageManager::active_plugins`]: crate::pm::PackageManager::active_plugins
 
 use std::path::Path;
 
@@ -77,7 +75,8 @@ pub struct DiscoveredPlugin {
     pub id: PackageId,
     /// The dependency this offer is a plugin for.
     pub recommends: String,
-    /// What the offering PM says the package is, when it says anything.
+    /// A short human summary of what the plugin contributes, for the consent
+    /// prompt.
     pub description: Option<String>,
     /// How the `[plugins]` config decided this offer.
     pub enablement: Enablement,
@@ -113,7 +112,7 @@ impl Discovery {
 /// Discover the plugins offered for this workspace's dependencies.
 ///
 /// `workspace_root` scopes the `use` entries that count (an entry can be
-/// recorded for one workspace only). `list_plugins` fetches each dependency
+/// recorded for one workspace only). `active_plugins` fetches each dependency
 /// cache-only — for a workspace dependency, into the source `cargo metadata`
 /// already extracted (no probe, no network) — so every dependency-embedded
 /// plugin is discoverable, registry crates included.
@@ -131,12 +130,13 @@ pub async fn discover(sym: &Symposium, deps: &Arc<WorkspaceDeps>) -> Discovery {
     for inst in pms.instances().filter(|i| !i.trusted) {
         for plugin in inst.pm.active_plugins(&dep_ids).await {
             let name = plugin.canonical.name.clone();
+            let description = Some(describe_plugin(&plugin.plugin));
             let enablement = decide(sym, &name, &workspace_root);
             let discovered = DiscoveredPlugin {
                 registry: inst.name.clone(),
                 id: plugin.canonical,
                 recommends: name,
-                description: None,
+                description,
                 enablement,
             };
             match enablement {
@@ -293,9 +293,9 @@ pub async fn prompt_for_consent(
         let what = candidate
             .description
             .as_deref()
-            .unwrap_or("embedded agent plugin");
+            .unwrap_or("agent extensions");
         let answer = dialoguer::Select::new()
-            .with_prompt(format!("Dependency `{name}` has an {what}. Enable it?"))
+            .with_prompt(format!("Dependency `{name}` provides {what}. Enable it?"))
             .items(["Ask me later", "Enable", "No — don't ask again"])
             .default(0)
             .interact_opt()
@@ -310,10 +310,32 @@ pub async fn prompt_for_consent(
     apply_consent(sym, &approved, &declined)
 }
 
-/// Which workspace dependency an offer recommends a plugin for, if the
-/// workspace has it. Ecosystem-agnostic on purpose: `recommends` is a bare
-/// name, so an offer from one PM can recommend a plugin for another's
-/// package.
+/// A short human summary of what a discovered plugin contributes, for the
+/// consent prompt and status output. Emphasizes the facets that matter to a
+/// trust decision — a plugin that only ships skills is lower-stakes than one
+/// that runs a hook or an MCP server.
+fn describe_plugin(plugin: &crate::plugins::Plugin) -> String {
+    let parts: Vec<String> = [
+        count_phrase(plugin.skills.len(), "skill group", "skill groups"),
+        count_phrase(plugin.hooks.len(), "hook", "hooks"),
+        count_phrase(plugin.mcp_servers.len(), "MCP server", "MCP servers"),
+        count_phrase(plugin.subcommands.len(), "subcommand", "subcommands"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if parts.is_empty() {
+        "agent extensions".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// `"<n> <singular|plural>"`, or `None` when `n` is zero.
+fn count_phrase(n: usize, singular: &str, plural: &str) -> Option<String> {
+    (n > 0).then(|| format!("{n} {}", if n == 1 { singular } else { plural }))
+}
+
 /// Classify one offer against the `[plugins]` config. An explicit decision —
 /// `use`, then `disable` — outranks the standing `auto-enable`, so a name the
 /// user declined stays declined.
@@ -470,7 +492,7 @@ mod tests {
             "#},
         );
         let deps = [
-            // A registry dependency, invisible to `list_plugins`, is still
+            // A registry dependency, invisible to `active_plugins`, is still
             // enabled by name.
             PackageId::new(CARGO_PM, "serde", "1.0.210"),
             PackageId::new(CARGO_PM, "tokio", "1.0.0"),

@@ -65,15 +65,21 @@ impl TypeRenderer {
     }
 
     /// The named type declarations collected so far, in name order.
+    ///
+    /// Always a type alias, never an `interface`. Choosing between them meant
+    /// deciding whether a body was a single object literal, and that was done
+    /// by testing its first character — which a union or intersection of
+    /// object types also passes, producing `interface Shape { … } | { … }`.
+    /// That is a syntax error, and since the declarations are one file, it
+    /// took every other type down with it. A serde externally-tagged enum is
+    /// exactly that shape, so it was reachable from any ordinary Rust server.
+    ///
+    /// An alias is valid for every body, object literals included, so the
+    /// choice is not worth the failure mode.
     pub fn declarations(&self) -> String {
         let mut out = String::new();
         for (name, body) in &self.named {
-            // An object body is an interface; anything else is an alias.
-            if body.starts_with('{') {
-                out.push_str(&format!("interface {name} {body}\n\n"));
-            } else {
-                out.push_str(&format!("type {name} = {body};\n\n"));
-            }
+            out.push_str(&format!("type {name} = {body};\n\n"));
         }
         out
     }
@@ -165,6 +171,16 @@ fn render_ref(cx: &mut Cx, pointer: &str, depth: usize) -> String {
     cx.in_progress.push(name.clone());
     let body = render_at(cx, &target.clone(), 0, depth + 1);
     cx.in_progress.pop();
+
+    // `type A = A` is a circular alias, which TypeScript rejects outright
+    // (TS2456). It is what `{"$ref": "#"}` produces, and what is left of a
+    // union whose only other members were self-references.
+    let body = if body == name {
+        UNKNOWN.to_string()
+    } else {
+        body
+    };
+
     cx.named.insert(name.clone(), body);
     name
 }
@@ -199,12 +215,75 @@ fn type_name_for(pointer: &str) -> Option<String> {
     if cleaned.is_empty() {
         return None;
     }
-    // A type name may not start with a digit.
-    if cleaned.starts_with(|c: char| c.is_ascii_digit()) {
+    // A type name may not start with a digit, and may not be a reserved word
+    // or a built-in type: `#/$defs/default` would declare `type default =`,
+    // and `#/$defs/string` is rejected as a redeclaration.
+    if cleaned.starts_with(|c: char| c.is_ascii_digit()) || is_reserved_type_name(&cleaned) {
         Some(format!("_{cleaned}"))
     } else {
         Some(cleaned)
     }
+}
+
+/// Names TypeScript will not accept as a declared type.
+///
+/// Both halves matter and fail differently: a keyword is a parse error, while
+/// a built-in type name is rejected as a redeclaration. `$defs` keys come
+/// from the server's own field names, so `default`, `object` and `string` are
+/// all plausible.
+fn is_reserved_type_name(name: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        // Built-in and intrinsic types.
+        "any",
+        "bigint",
+        "boolean",
+        "never",
+        "null",
+        "number",
+        "object",
+        "string",
+        "symbol",
+        "undefined",
+        "unknown",
+        "void",
+        // Keywords that cannot begin a declaration name.
+        "break",
+        "case",
+        "catch",
+        "class",
+        "const",
+        "continue",
+        "debugger",
+        "default",
+        "delete",
+        "do",
+        "else",
+        "enum",
+        "export",
+        "extends",
+        "false",
+        "finally",
+        "for",
+        "function",
+        "if",
+        "import",
+        "in",
+        "instanceof",
+        "new",
+        "return",
+        "super",
+        "switch",
+        "this",
+        "throw",
+        "true",
+        "try",
+        "typeof",
+        "var",
+        "void",
+        "while",
+        "with",
+    ];
+    RESERVED.contains(&name)
 }
 
 /// Dispatch on whichever constraint keyword the schema uses, narrowest first.
@@ -333,17 +412,24 @@ fn render_struct(cx: &mut Cx, schema: &Map<String, Value>, indent: usize, depth:
 }
 
 fn render_union(cx: &mut Cx, members: &[Value], indent: usize, depth: usize) -> String {
-    let parts = members
-        .iter()
-        .map(|m| render_at(cx, m, indent, depth + 1))
-        .collect();
+    let mut parts = Vec::new();
+    for member in members {
+        let rendered = render_at(cx, member, indent, depth + 1);
+        if !is_direct_self_reference(cx, &rendered) {
+            parts.push(rendered);
+        }
+    }
     join_union(parts)
 }
 
 fn render_intersection(cx: &mut Cx, members: &[Value], indent: usize, depth: usize) -> String {
     let mut parts: Vec<String> = Vec::new();
     for member in members {
-        let rendered = parenthesize_if_composite(render_at(cx, member, indent, depth + 1));
+        let rendered = render_at(cx, member, indent, depth + 1);
+        if is_direct_self_reference(cx, &rendered) {
+            continue;
+        }
+        let rendered = parenthesize_if_composite(rendered);
         if !parts.contains(&rendered) {
             parts.push(rendered);
         }
@@ -353,6 +439,17 @@ fn render_intersection(cx: &mut Cx, members: &[Value], indent: usize, depth: usi
         1 => parts.pop().unwrap_or_default(),
         _ => parts.join(" & "),
     }
+}
+
+/// Whether a rendered member is the very type currently being defined.
+///
+/// `type A = A | string` is a circular alias TypeScript rejects (TS2456),
+/// and a member that *is* the whole type constrains nothing, so dropping it
+/// is both legal and faithful. Only a bare name counts: `type Json = string |
+/// Json[]` is legitimate recursion, because the reference sits inside an
+/// array rather than being the alternative itself.
+fn is_direct_self_reference(cx: &Cx, rendered: &str) -> bool {
+    cx.in_progress.iter().any(|name| name == rendered)
 }
 
 fn render_enum(values: &[Value]) -> String {
@@ -381,9 +478,16 @@ fn join_union(parts: Vec<String>) -> String {
     }
 }
 
-/// Parenthesize a union so it binds correctly inside a larger type.
+/// Parenthesize a composite so it binds correctly inside a larger type.
+///
+/// `A | B[]` parses as `A | (B[])`, and `A & B[]` as `A & (B[])`, so both
+/// need wrapping before a suffix is attached. Only unions were guarded
+/// before, which left an array of an intersection meaning the wrong thing
+/// while still being valid syntax — the kind of error nothing downstream
+/// reports.
 fn parenthesize_if_composite(rendered: String) -> String {
-    if rendered.contains(" | ") && !rendered.starts_with('(') {
+    let composite = rendered.contains(" | ") || rendered.contains(" & ");
+    if composite && !rendered.starts_with('(') {
         format!("({rendered})")
     } else {
         rendered
@@ -505,6 +609,24 @@ mod tests {
         assert_eq!(out, r#"("a" | "b")[]"#);
     }
 
+    /// The same hazard one keyword over: `A & B[]` parses as `A & (B[])`.
+    /// Unlike the union case this stayed valid syntax, so nothing downstream
+    /// reported it — the type was simply wrong.
+    #[test]
+    fn parenthesizes_intersection_array_elements() {
+        let out = render(json!({
+            "type": "array",
+            "items": {
+                "allOf": [
+                    {"type": "object", "properties": {"a": {"type": "string"}}},
+                    {"type": "object", "properties": {"b": {"type": "number"}}},
+                ],
+            },
+        }));
+        assert!(out.starts_with('('), "should be parenthesized, got: {out}");
+        assert!(out.ends_with(")[]"), "got: {out}");
+    }
+
     // -- enums --
 
     #[test]
@@ -535,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_ref_into_a_named_interface() {
+    fn resolves_ref_into_a_named_type() {
         let (expr, defs) = render_with_defs(json!({
             "type": "object",
             "properties": {"msg": {"$ref": "#/$defs/Message"}},
@@ -549,7 +671,111 @@ mod tests {
             },
         }));
         assert_eq!(expr, "{\n  msg: Message;\n}");
-        assert_eq!(defs, "interface Message {\n  text: string;\n}\n\n");
+        assert_eq!(defs, "type Message = {\n  text: string;\n};\n\n");
+    }
+
+    /// A serde externally-tagged enum — the most common schemars-generated
+    /// `$def`. Its body is a union of objects, so it starts with `{` without
+    /// being an object literal; declaring it as an `interface` produced
+    /// `interface Shape { … } | { … }`, a syntax error that took the whole
+    /// declaration file down with it.
+    #[test]
+    fn a_union_bodied_named_type_is_declared_as_an_alias() {
+        let (_, defs) = render_with_defs(json!({
+            "type": "object",
+            "properties": {"shape": {"$ref": "#/$defs/Shape"}},
+            "$defs": {
+                "Shape": {
+                    "oneOf": [
+                        {"type": "object", "properties": {"Circle": {"type": "number"}},
+                         "required": ["Circle"]},
+                        {"type": "object", "properties": {"Square": {"type": "number"}},
+                         "required": ["Square"]},
+                    ],
+                },
+            },
+        }));
+        assert!(defs.starts_with("type Shape = {"), "got:\n{defs}");
+        assert!(defs.contains("} | {"), "got:\n{defs}");
+        assert!(!defs.contains("interface"), "got:\n{defs}");
+    }
+
+    /// Same shape, one keyword over: an intersection body.
+    #[test]
+    fn an_intersection_bodied_named_type_is_declared_as_an_alias() {
+        let (_, defs) = render_with_defs(json!({
+            "type": "object",
+            "properties": {"merged": {"$ref": "#/$defs/Merged"}},
+            "$defs": {
+                "Merged": {
+                    "allOf": [
+                        {"type": "object", "properties": {"a": {"type": "string"}}},
+                        {"type": "object", "properties": {"b": {"type": "number"}}},
+                    ],
+                },
+            },
+        }));
+        assert!(defs.starts_with("type Merged = {"), "got:\n{defs}");
+        assert!(defs.contains("} & {"), "got:\n{defs}");
+    }
+
+    /// `type A = A | string` is a circular alias TypeScript rejects (TS2456).
+    /// A member that is the whole type constrains nothing, so it drops out.
+    #[test]
+    fn a_direct_self_reference_does_not_produce_a_circular_alias() {
+        let (_, defs) = render_with_defs(json!({
+            "type": "object",
+            "properties": {"a": {"$ref": "#/$defs/A"}},
+            "$defs": {
+                "A": {"anyOf": [{"$ref": "#/$defs/A"}, {"type": "string"}]},
+            },
+        }));
+        assert_eq!(defs, "type A = string;\n\n", "got:\n{defs}");
+    }
+
+    /// Recursion through a constructor is legitimate and must survive: the
+    /// reference sits inside an array rather than being the alternative.
+    #[test]
+    fn recursion_through_an_array_is_kept() {
+        let (_, defs) = render_with_defs(json!({
+            "type": "object",
+            "properties": {"tree": {"$ref": "#/$defs/Json"}},
+            "$defs": {
+                "Json": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"$ref": "#/$defs/Json"}},
+                    ],
+                },
+            },
+        }));
+        assert_eq!(defs, "type Json = string | Json[];\n\n", "got:\n{defs}");
+    }
+
+    /// A pointer to the whole document refers to itself and can only be
+    /// `unknown`.
+    #[test]
+    fn a_root_self_reference_degrades() {
+        let (_, defs) = render_with_defs(json!({"$ref": "#"}));
+        assert!(!defs.contains("_ = _"), "circular alias, got:\n{defs}");
+    }
+
+    /// `$defs` keys are the server's own field names, so a reserved word is
+    /// plausible. `type default =` is a parse error and `type string =` is a
+    /// redeclaration.
+    #[test]
+    fn reserved_words_are_not_used_as_type_names() {
+        for word in ["default", "string", "function", "enum"] {
+            let (_, defs) = render_with_defs(json!({
+                "type": "object",
+                "properties": {"v": {"$ref": format!("#/$defs/{word}")}},
+                "$defs": {word: {"type": "string"}},
+            }));
+            assert!(
+                defs.starts_with(&format!("type _{word} =")),
+                "`{word}` should be prefixed, got:\n{defs}"
+            );
+        }
     }
 
     /// The older dialect spells the same thing `definitions`.
@@ -595,8 +821,8 @@ mod tests {
                 "B": {"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}}},
             },
         }));
-        assert!(defs.contains("interface A"), "got:\n{defs}");
-        assert!(defs.contains("interface B"), "got:\n{defs}");
+        assert!(defs.contains("type A ="), "got:\n{defs}");
+        assert!(defs.contains("type B ="), "got:\n{defs}");
     }
 
     /// One deployed generator emits `description` beside `$ref`. Resolving the
@@ -628,7 +854,7 @@ mod tests {
             },
             "$defs": {"User": {"type": "object", "properties": {"id": {"type": "string"}}}},
         }));
-        assert_eq!(defs.matches("interface User").count(), 1, "got:\n{defs}");
+        assert_eq!(defs.matches("type User =").count(), 1, "got:\n{defs}");
     }
 
     #[test]

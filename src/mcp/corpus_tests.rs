@@ -139,10 +139,14 @@ fn construct_coverage() {
 /// and still be a parse error. What the model receives is only useful if it
 /// parses.
 ///
-/// Skips when no TypeScript is reachable, so a offline `cargo test` still
+/// Note what this does *not* catch: `tsc` stops at the first syntax errors
+/// and never reaches type checking, so a declaration that parses but
+/// describes the wrong shape passes here. The snapshots above are what cover
+/// that. Neither check subsumes the other.
+///
+/// Skips when no TypeScript is reachable, so an offline `cargo test` still
 /// runs; CI installs Node so it does not skip there.
 #[test]
-#[ignore = "declarations do not type-check yet; un-ignored by the commit that fixes the last one"]
 fn declarations_type_check() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut files = Vec::new();

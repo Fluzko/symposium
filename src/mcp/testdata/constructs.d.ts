@@ -1,20 +1,20 @@
-interface Config {
+type Config = {
   host: string;
-}
+};
 
 type Json = string | Json[];
 
-interface Merged {
+type Merged = {
   a?: string;
 } & {
   b?: number;
-}
+};
 
-interface Shape {
+type Shape = {
   Circle: number;
 } | {
   Square: number;
-}
+};
 
 declare const constructs: {
   /** Input is a $ref to a named model, the shape pydantic emits for a root model. */

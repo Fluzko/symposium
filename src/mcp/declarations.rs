@@ -436,9 +436,9 @@ mod tests {
             "$defs": {"User": {"type": "object", "properties": {"id": {"type": "string"}}}},
         });
         let out = render_server("s", &[tool("a", &schema), tool("b", &schema)]);
-        assert_eq!(out.matches("interface User").count(), 1, "got:\n{out}");
+        assert_eq!(out.matches("type User =").count(), 1, "got:\n{out}");
         assert!(
-            out.find("interface User") < out.find("declare const s"),
+            out.find("type User =") < out.find("declare const s"),
             "types must precede the server object, got:\n{out}"
         );
     }

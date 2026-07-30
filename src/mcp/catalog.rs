@@ -11,7 +11,10 @@
 //! servers it needs. Cold start is paid at first disclosure rather than at
 //! session start.
 
+use std::sync::Arc;
 use std::time::Duration;
+
+use crate::config::Symposium;
 
 use rmcp::model::Tool;
 use serde_json::Value;
@@ -99,30 +102,60 @@ impl Query {
 pub struct Catalog {
     entries: Vec<Entry>,
     read_only: bool,
+    policy: RestartPolicy,
+    /// Needed to acquire an installation-backed server on first use.
+    sym: Arc<Symposium>,
     /// Filter entries the caller named that match no server.
     known_names: Vec<String>,
 }
 
 struct Entry {
     resolved: ResolvedServer,
-    supervisor: Mutex<Supervisor>,
+    /// Absent until first use. Building it may acquire an installation, which
+    /// must not happen at startup — a client may spawn a throwaway copy of the
+    /// meta-server just to probe it.
+    supervisor: Mutex<Option<Supervisor>>,
 }
 
 impl Catalog {
-    pub fn new(servers: Vec<ResolvedServer>, policy: RestartPolicy, read_only: bool) -> Self {
-        let known_names = servers.iter().map(|s| s.name().to_string()).collect();
+    pub fn new(
+        sym: Arc<Symposium>,
+        servers: Vec<ResolvedServer>,
+        policy: RestartPolicy,
+        read_only: bool,
+    ) -> Self {
+        let known_names = servers.iter().map(|s| s.name.clone()).collect();
         let entries = servers
             .into_iter()
             .map(|resolved| Entry {
-                supervisor: Mutex::new(Supervisor::new(resolved.spec.clone(), policy)),
+                supervisor: Mutex::new(None),
                 resolved,
             })
             .collect();
         Self {
             entries,
             read_only,
+            policy,
+            sym,
             known_names,
         }
+    }
+
+    /// The supervisor for an entry, acquiring what it needs the first time.
+    async fn supervisor_for<'a>(
+        &self,
+        entry: &'a Entry,
+    ) -> Result<tokio::sync::MutexGuard<'a, Option<Supervisor>>, String> {
+        let mut guard = entry.supervisor.lock().await;
+        if guard.is_none() {
+            let spec = entry
+                .resolved
+                .spawn_spec(&self.sym)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+            *guard = Some(Supervisor::new(spec, self.policy));
+        }
+        Ok(guard)
     }
 
     pub fn server_names(&self) -> Vec<String> {
@@ -143,20 +176,23 @@ impl Catalog {
         let mut problems = Vec::new();
 
         for entry in &self.entries {
-            if !query.wants_server(entry.resolved.name()) {
+            if !query.wants_server(entry.resolved.name.as_str()) {
                 continue;
             }
 
-            let tools = {
-                let mut supervisor = entry.supervisor.lock().await;
-                supervisor.list_tools().await
+            let tools = match self.supervisor_for(entry).await {
+                Ok(mut guard) => match guard.as_mut() {
+                    Some(supervisor) => supervisor.list_tools().await.map_err(|e| e.to_string()),
+                    None => unreachable!("supervisor_for leaves it present"),
+                },
+                Err(e) => Err(e),
             };
             let tools = match tools {
                 Ok(tools) => tools,
                 Err(e) => {
                     // A server that will not start is reported in place, so
                     // the absence of its tools has a visible reason.
-                    problems.push(format!("{}: {e}", entry.resolved.name()));
+                    problems.push(format!("{}: {e}", entry.resolved.name.as_str()));
                     continue;
                 }
             };
@@ -173,7 +209,7 @@ impl Catalog {
                 if !tools.is_empty() && !query_narrows(query) {
                     problems.push(format!(
                         "{}: no tools visible ({} hidden by filters)",
-                        entry.resolved.name(),
+                        entry.resolved.name.as_str(),
                         tools.len()
                     ));
                 }
@@ -181,7 +217,7 @@ impl Catalog {
             }
 
             sections.push(render(
-                entry.resolved.name(),
+                entry.resolved.name.as_str(),
                 &visible,
                 query.effective_detail(),
             ));
@@ -226,14 +262,17 @@ impl Catalog {
         let mut problems = Vec::new();
 
         for entry in &self.entries {
-            let tools = {
-                let mut supervisor = entry.supervisor.lock().await;
-                supervisor.list_tools().await
+            let tools = match self.supervisor_for(entry).await {
+                Ok(mut guard) => match guard.as_mut() {
+                    Some(supervisor) => supervisor.list_tools().await.map_err(|e| e.to_string()),
+                    None => unreachable!("supervisor_for leaves it present"),
+                },
+                Err(e) => Err(e),
             };
             let tools = match tools {
                 Ok(tools) => tools,
                 Err(e) => {
-                    problems.push(format!("{}: {e}", entry.resolved.name()));
+                    problems.push(format!("{}: {e}", entry.resolved.name.as_str()));
                     continue;
                 }
             };
@@ -258,8 +297,8 @@ impl Catalog {
                 continue;
             }
             namespaces.push(Namespace {
-                key: namespace_key(entry.resolved.name()),
-                server: entry.resolved.name().to_string(),
+                key: namespace_key(entry.resolved.name.as_str()),
+                server: entry.resolved.name.as_str().to_string(),
                 bindings,
             });
         }
@@ -269,7 +308,7 @@ impl Catalog {
 
     /// Call a tool on a backing server, honoring its filters.
     pub async fn call(&self, server: &str, tool: &str, args: Value) -> Result<Value, String> {
-        let Some(entry) = self.entries.iter().find(|e| e.resolved.name() == server) else {
+        let Some(entry) = self.entries.iter().find(|e| e.resolved.name == server) else {
             return Err(format!(
                 "no server named `{server}`. Available: {}",
                 self.known_names.join(", ")
@@ -282,7 +321,8 @@ impl Catalog {
         }
 
         let timeout = entry.resolved.tool_call_timeout;
-        let mut supervisor = entry.supervisor.lock().await;
+        let mut guard = self.supervisor_for(entry).await?;
+        let supervisor = guard.as_mut().expect("supervisor_for leaves it present");
         supervisor
             .call(tool, args, timeout)
             .await
@@ -292,7 +332,9 @@ impl Catalog {
     /// Close every running server.
     pub async fn shutdown(&self) {
         for entry in &self.entries {
-            entry.supervisor.lock().await.shutdown().await;
+            if let Some(supervisor) = entry.supervisor.lock().await.as_mut() {
+                supervisor.shutdown().await;
+            }
         }
     }
 

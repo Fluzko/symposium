@@ -165,6 +165,7 @@ async fn main() -> ExitCode {
                 );
             }
             let catalog = std::sync::Arc::new(symposium::mcp::catalog::Catalog::new(
+                std::sync::Arc::new(sym.clone()),
                 resolution.servers,
                 symposium::mcp::supervisor::RestartPolicy {
                     max_restarts: sym.config.mcp.max_server_restarts,

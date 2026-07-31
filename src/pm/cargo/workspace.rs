@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 use std::{fmt::Write as _, fs};
 
@@ -21,19 +21,36 @@ pub struct WorkspaceCrate {
     pub name: String,
     /// The resolved version.
     pub version: semver::Version,
-    /// Local source path for path dependencies.
-    /// `None` for registry crates.
+    /// Local source path for path dependencies (unpublished, so `fetch` must
+    /// resolve them locally). `None` for registry crates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
+    /// The crate's extracted source directory, from `cargo metadata`'s
+    /// `manifest_path`. Populated for *every* resolved dependency — registry
+    /// crates included, since `cargo metadata` already extracted them — so the
+    /// source can be inspected or fetched without a fresh cargo probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_dir: Option<PathBuf>,
 }
 
 impl WorkspaceCrate {
+    /// A crate whose source lives at `path` (a path dependency), or a registry
+    /// crate when `path` is `None`. `source_dir` defaults to `path`; use
+    /// [`with_source_dir`](Self::with_source_dir) for a registry crate whose
+    /// extracted source is known.
     pub fn new(name: String, version: semver::Version, path: Option<PathBuf>) -> Self {
         Self {
             name,
             version,
+            source_dir: path.clone(),
             path,
         }
+    }
+
+    /// Set the extracted source directory (from `cargo metadata`).
+    pub fn with_source_dir(mut self, source_dir: Option<PathBuf>) -> Self {
+        self.source_dir = source_dir;
+        self
     }
 }
 
@@ -60,18 +77,19 @@ struct DiskCache {
     members: Vec<PathBuf>,
 }
 
-/// In-process cache for workspace dependency resolution.
+/// Lazy, cached workspace dependency resolver.
 ///
-/// First call to `load()` checks the disk cache (keyed on `Cargo.lock` mtime);
-/// on miss it runs `cargo metadata` (expensive) and writes through to disk.
-/// Subsequent in-process calls return the cached Arc directly.
+/// The first `load()` checks the disk cache (keyed on `Cargo.lock` mtime); on
+/// miss it runs `cargo metadata` (expensive) and writes through to disk. The
+/// result is memoized in a [`OnceLock`], so resolution happens at most once per
+/// instance and every method reads through a shared `&self` — which lets a
+/// single resolver be shared (held as an [`Arc`] by a
+/// [`CargoPm`](crate::pm::CargoPm), and read directly by core code that needs
+/// the workspace root or members) rather than each caller resolving its own.
 pub struct WorkspaceDeps {
     cwd: PathBuf,
     dirs: crate::dirs::SymposiumDirs,
-    /// Lazily resolved workspace-specific cache dir. `Some(Some(..))` = resolved,
-    /// `Some(None)` = resolved to "not in a workspace", `None` = not yet resolved.
-    resolved_cache_dir: Option<Option<PathBuf>>,
-    cached: Option<Arc<LoadedWorkspace>>,
+    cached: OnceLock<Option<Arc<LoadedWorkspace>>>,
 }
 
 impl WorkspaceDeps {
@@ -79,8 +97,39 @@ impl WorkspaceDeps {
         Self {
             cwd: cwd.into(),
             dirs: dirs.clone(),
-            resolved_cache_dir: None,
-            cached: None,
+            cached: OnceLock::new(),
+        }
+    }
+
+    /// A pre-resolved resolver for tests: skips `cargo metadata` and returns
+    /// exactly `crates` (rooted at `root`, no members).
+    #[cfg(test)]
+    pub(crate) fn fixture(root: impl Into<PathBuf>, crates: Vec<WorkspaceCrate>) -> Arc<Self> {
+        let root = root.into();
+        let cached = OnceLock::new();
+        let _ = cached.set(Some(Arc::new(LoadedWorkspace {
+            root: root.clone(),
+            crates,
+            members: Vec::new(),
+        })));
+        Arc::new(Self {
+            cwd: root,
+            dirs: crate::dirs::SymposiumDirs::new(PathBuf::new(), PathBuf::new(), None),
+            cached,
+        })
+    }
+
+    /// A resolver pre-set to "no workspace" — it never runs `cargo metadata`.
+    /// Backs [`detached_managers`](crate::config::Symposium::detached_managers)
+    /// for workspace-independent operations (registry listing, crates.io
+    /// search).
+    pub fn detached() -> Self {
+        let cached = OnceLock::new();
+        let _ = cached.set(None);
+        Self {
+            cwd: PathBuf::new(),
+            dirs: crate::dirs::SymposiumDirs::new(PathBuf::new(), PathBuf::new(), None),
+            cached,
         }
     }
 
@@ -91,50 +140,45 @@ impl WorkspaceDeps {
 
     /// Load (or return cached) workspace metadata.
     /// Returns `None` if not inside a Cargo workspace.
-    pub fn load(&mut self) -> Option<&Arc<LoadedWorkspace>> {
-        if self.cached.is_some() {
-            return self.cached.as_ref();
-        }
-
-        // Phase 2: try disk cache first.
-        if let Some(loaded) = self.try_disk_cache() {
-            self.cached = Some(Arc::new(loaded));
-            return self.cached.as_ref();
-        }
-
-        // Cache miss: run cargo metadata.
-        let loaded = load_workspace(&self.cwd, self.dirs.cargo_override.as_deref())?;
-
-        // Write through to disk cache.
-        self.write_disk_cache(&loaded);
-
-        self.cached = Some(Arc::new(loaded));
-        self.cached.as_ref()
+    pub fn load(&self) -> Option<&Arc<LoadedWorkspace>> {
+        self.cached.get_or_init(|| self.resolve()).as_ref()
     }
 
     /// Convenience: workspace root, or `None` if not in a workspace.
-    pub fn workspace_root(&mut self) -> Option<&Path> {
+    pub fn workspace_root(&self) -> Option<&Path> {
         self.load().map(|w| w.root.as_path())
     }
 
     /// Convenience: crate list (empty slice if not in a workspace).
-    pub fn crates(&mut self) -> &[WorkspaceCrate] {
+    pub fn crates(&self) -> &[WorkspaceCrate] {
         match self.load() {
             Some(w) => &w.crates,
             None => &[],
         }
     }
 
-    /// Resolve the workspace-specific cache directory (at most once per instance).
-    /// Uses `cargo locate-project --workspace` (~10ms) on first call.
-    fn resolve_workspace_cache_dir(&mut self) -> Option<&Path> {
-        if self.resolved_cache_dir.is_none() {
-            self.resolved_cache_dir = Some(self.compute_workspace_cache_dir());
+    /// The one-time resolution: disk cache, then `cargo metadata` on miss.
+    fn resolve(&self) -> Option<Arc<LoadedWorkspace>> {
+        let cache_dir = self.workspace_cache_dir();
+
+        if let Some(dir) = &cache_dir
+            && let Some(loaded) = try_disk_cache(dir)
+        {
+            return Some(Arc::new(loaded));
         }
-        self.resolved_cache_dir.as_ref().unwrap().as_deref()
+
+        let loaded = load_workspace(&self.cwd, self.dirs.cargo_override.as_deref())?;
+
+        if let Some(dir) = &cache_dir {
+            write_disk_cache(dir, &loaded);
+        }
+
+        Some(Arc::new(loaded))
     }
 
-    fn compute_workspace_cache_dir(&self) -> Option<PathBuf> {
+    /// The workspace-specific cache directory, via `cargo locate-project
+    /// --workspace` (~10ms, no dep resolution). `None` when not in a workspace.
+    fn workspace_cache_dir(&self) -> Option<PathBuf> {
         let root = locate_workspace_root(&self.cwd, self.dirs.cargo_override.as_deref())?;
         let canonical = fs::canonicalize(&root).unwrap_or(root);
         Some(
@@ -144,49 +188,45 @@ impl WorkspaceDeps {
                 .join(workspace_dir_name(&canonical)),
         )
     }
+}
 
-    fn try_disk_cache(&mut self) -> Option<LoadedWorkspace> {
-        let ws_cache_dir = self.resolve_workspace_cache_dir()?.to_path_buf();
-        let cache_file = ws_cache_dir.join("workspace-deps.json");
-        let contents = fs::read_to_string(&cache_file).ok()?;
-        let cached: DiskCache = serde_json::from_str(&contents).ok()?;
+fn try_disk_cache(ws_cache_dir: &Path) -> Option<LoadedWorkspace> {
+    let cache_file = ws_cache_dir.join("workspace-deps.json");
+    let contents = fs::read_to_string(&cache_file).ok()?;
+    let cached: DiskCache = serde_json::from_str(&contents).ok()?;
 
-        // Validate: Cargo.lock mtime must match.
-        let lock_path = cached.root.join("Cargo.lock");
-        let current_mtime = file_mtime(&lock_path)?;
-        if current_mtime != cached.lock_mtime {
-            return None;
-        }
-
-        Some(LoadedWorkspace {
-            root: cached.root,
-            crates: cached.crates,
-            members: cached.members,
-        })
+    // Validate: Cargo.lock mtime must match.
+    let lock_path = cached.root.join("Cargo.lock");
+    let current_mtime = file_mtime(&lock_path)?;
+    if current_mtime != cached.lock_mtime {
+        return None;
     }
 
-    fn write_disk_cache(&self, loaded: &LoadedWorkspace) {
-        let Some(Some(ws_cache_dir)) = &self.resolved_cache_dir else {
-            return;
-        };
-        let lock_path = loaded.root.join("Cargo.lock");
-        let Some(mtime) = file_mtime(&lock_path) else {
-            return;
-        };
+    Some(LoadedWorkspace {
+        root: cached.root,
+        crates: cached.crates,
+        members: cached.members,
+    })
+}
 
-        let disk = DiskCache {
-            lock_mtime: mtime,
-            root: loaded.root.clone(),
-            crates: loaded.crates.clone(),
-            members: loaded.members.clone(),
-        };
+fn write_disk_cache(ws_cache_dir: &Path, loaded: &LoadedWorkspace) {
+    let lock_path = loaded.root.join("Cargo.lock");
+    let Some(mtime) = file_mtime(&lock_path) else {
+        return;
+    };
 
-        let _ = fs::create_dir_all(ws_cache_dir);
-        let _ = fs::write(
-            ws_cache_dir.join("workspace-deps.json"),
-            serde_json::to_string_pretty(&disk).unwrap_or_default(),
-        );
-    }
+    let disk = DiskCache {
+        lock_mtime: mtime,
+        root: loaded.root.clone(),
+        crates: loaded.crates.clone(),
+        members: loaded.members.clone(),
+    };
+
+    let _ = fs::create_dir_all(ws_cache_dir);
+    let _ = fs::write(
+        ws_cache_dir.join("workspace-deps.json"),
+        serde_json::to_string_pretty(&disk).unwrap_or_default(),
+    );
 }
 
 /// Find workspace root via `cargo locate-project --workspace`.
@@ -287,6 +327,7 @@ fn load_workspace(cwd: &Path, cargo_path: Option<&Path>) -> Option<LoadedWorkspa
                 .ok()
                 .map(|v| WorkspaceCrate {
                     path: path_overrides.get(&p.name).cloned(),
+                    source_dir: p.manifest_path.parent().map(|dir| dir.into()),
                     name: p.name.to_string(),
                     version: v,
                 })

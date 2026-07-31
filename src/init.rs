@@ -1,7 +1,5 @@
 //! Init command: `cargo agents init`.
 
-use std::io::IsTerminal;
-
 use anyhow::{Context, Result};
 use dialoguer::MultiSelect;
 
@@ -22,7 +20,7 @@ pub struct InitOpts {
 
 /// Whether we can prompt the user interactively.
 fn interactive(out: &Output) -> bool {
-    !out.is_quiet() && std::io::stdin().is_terminal()
+    out.is_interactive()
 }
 
 /// Resolve which agents to configure. Priority:
@@ -109,7 +107,9 @@ pub async fn init(sym: &mut Symposium, out: &Output, opts: &InitOpts) -> Result<
 
     if agents.is_empty() {
         // Uninstall: unregister all hooks and MCP servers for every agent.
-        crate::sync::register_hooks(sym, out).context("failed to unregister hooks")?;
+        crate::sync::register_hooks(sym, out)
+            .await
+            .context("failed to unregister hooks")?;
         out.done(format!(
             "{}: wrote user config (no agents — symposium uninstalled)",
             display_path(&config_path),
@@ -125,7 +125,9 @@ pub async fn init(sym: &mut Symposium, out: &Output, opts: &InitOpts) -> Result<
     ));
 
     if sym.config.hook_scope == crate::config::HookScope::Global {
-        crate::sync::register_hooks(sym, out).context("failed to register global hooks")?;
+        crate::sync::register_hooks(sym, out)
+            .await
+            .context("failed to register global hooks")?;
     }
 
     Ok(())

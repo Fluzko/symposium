@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::Symposium;
 use crate::crate_command::{self, DispatchResult};
+use crate::discovery;
 use crate::hook;
 use crate::init::{self, InitOpts};
 use crate::output::Output;
@@ -211,7 +212,15 @@ pub async fn run(
             init::init(sym, out, &opts).await
         }
 
-        Commands::Sync => sync::sync(sym, &mut sym.workspace_deps(cwd), update).await,
+        Commands::Sync => {
+            let deps = sym.workspace_deps(cwd);
+            // The consent prompt belongs to a human running `cargo agents
+            // sync`; it is inert unless `out` is interactive, and the
+            // hook-triggered auto-sync path calls `sync::sync` directly and
+            // never reaches here at all.
+            discovery::prompt_for_consent(sym, &deps, out).await?;
+            sync::sync(sym, &deps, update).await
+        }
 
         Commands::SelfUpdate => self_update::self_update(sym, out),
 

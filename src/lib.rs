@@ -2,6 +2,8 @@ pub mod agents;
 pub mod cli;
 pub mod config;
 pub mod crate_command;
+pub mod dirs;
+pub mod discovery;
 pub mod help_render;
 pub mod hook;
 pub mod hook_schema;

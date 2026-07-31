@@ -36,7 +36,5 @@
 //! originally built to name crates for the retired `source = "crate"`
 //! resolution and is currently ignored; see the [`predicate`] module docs.
 
-pub mod dirs;
 pub mod hook;
 pub mod predicate;
-pub mod workspace;

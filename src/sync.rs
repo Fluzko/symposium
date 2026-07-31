@@ -16,9 +16,9 @@ use crate::agents::Agent;
 use crate::config::Symposium;
 use crate::output::{Output, display_path};
 use crate::plugins;
-use crate::pm::PackageManager as _;
+use crate::pm::WorkspaceDeps;
 use crate::skills;
-use symposium_sdk::workspace::WorkspaceDeps;
+use std::sync::Arc;
 
 /// Marker file written into every skill directory symposium installs.
 ///
@@ -272,7 +272,7 @@ async fn resolve_custom_predicate_entries(
 
 /// Run the full sync: discover applicable skills, install into agent dirs,
 /// clean up stale installations.
-pub async fn sync(sym: &Symposium, deps: &mut WorkspaceDeps, update: UpdateLevel) -> Result<()> {
+pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLevel) -> Result<()> {
     let out = &Output::quiet();
     let loaded = deps
         .load()
@@ -284,7 +284,7 @@ pub async fn sync(sym: &Symposium, deps: &mut WorkspaceDeps, update: UpdateLevel
     tracing::debug!(root = %project_root.display(), "resolved workspace root");
 
     // Load plugin registry (registry sources + workspace plugins)
-    let registry = plugins::load_registry_with_workspace(sym, Some(&loaded));
+    let registry = plugins::load_registry_with_workspace(sym, Some(&loaded)).await;
 
     for warning in &registry.warnings {
         tracing::info!(
@@ -303,9 +303,23 @@ pub async fn sync(sym: &Symposium, deps: &mut WorkspaceDeps, update: UpdateLevel
     // Resolve custom predicate installations.
     let custom_entries = resolve_custom_predicate_entries(sym, &registry, update).await;
 
-    // Find all applicable skills
-    let applicable =
-        skills::skills_applicable_to(sym, &registry, &workspace, custom_entries, update).await;
+    // Resolve the workspace once and build the predicate context shared by
+    // skill resolution and MCP-server filtering.
+    let dep_ids = crate::pm::workspace_dep_ids(sym, deps).await;
+    let used_names = sym.config.plugins.used_names_in(&project_root);
+    let mut ctx =
+        crate::predicate::PredicateContext::with_custom_predicates(&dep_ids, custom_entries)
+            .with_used_names(&used_names);
+
+    // The active plugin set: registry plugins plus the crate-sourced plugins
+    // reached through `[[plugins]]` chained references and dependency
+    // enablement. Every facet resolves over this one set, so a crate plugin's
+    // skills and MCP servers install exactly like a registry plugin's.
+    let pms = sym.package_managers(deps);
+    let active = plugins::active_plugins(sym, &registry, &pms, Some(&project_root), &mut ctx).await;
+
+    // Find all applicable skills.
+    let applicable = skills::collect_skills(sym, &active, &mut ctx, update).await;
 
     // Dedup by `(skill_name, origin_hash)`: two crate origins with the same
     // (name, version, skill-path-within-crate) collapse (the same skill bytes
@@ -327,11 +341,9 @@ pub async fn sync(sym: &Symposium, deps: &mut WorkspaceDeps, update: UpdateLevel
         }
     }
 
-    // Collect MCP servers from applicable plugins, filtered by workspace deps
-    let dep_ids = crate::pm::CargoPm.list_deps(&workspace);
-    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids);
+    // Collect MCP servers from the same active plugin set.
     let mut mcp_servers: Vec<sacp::schema::McpServer> = Vec::new();
-    for p in &registry.plugins {
+    for p in &active {
         if p.applies(&mut ctx) {
             mcp_servers.extend(p.plugin.applicable_mcp_servers(&mut ctx));
         }
@@ -529,8 +541,8 @@ pub async fn sync(sym: &Symposium, deps: &mut WorkspaceDeps, update: UpdateLevel
 /// Register global hooks for all configured agents.
 /// Register hooks for all configured agents. Uses `home_dir` (global scope).
 /// Called from `init` after writing the user config.
-pub fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
-    let registry = plugins::load_registry(sym);
+pub async fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
+    let registry = plugins::load_registry(sym).await;
     let mcp_servers: Vec<sacp::schema::McpServer> = registry
         .plugins
         .iter()

@@ -23,11 +23,11 @@ level = "info"
 symposium-recommendations = true
 user-plugins = true
 
-[[plugin-source]]
+[[registry]]
 name = "my-org"
 git = "https://github.com/my-org/symposium-plugins"
 
-[[plugin-source]]
+[[registry]]
 name = "local-dev"
 path = "my-plugins"
 ```
@@ -102,23 +102,52 @@ enabled = true
 
 ## `[defaults]`
 
-Controls the two built-in plugin sources. Both are enabled by default.
+Controls the two built-in registries. Both are enabled by default.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `symposium-recommendations` | bool | `true` | Fetch plugins from the [symposium-dev/recommendations](https://github.com/symposium-dev/recommendations) repository. |
 | `user-plugins` | bool | `true` | Scan `~/.symposium/plugins/` for user-defined plugins. |
 
-## `[[plugin-source]]`
+## `[[registry]]`
 
-Defines additional plugin sources. Each entry must have exactly one of `git` or `path`.
+Defines additional registries — directories or repositories offering plugins. Each entry must have exactly one of `git` or `path`. `[[plugin-source]]` is the retired spelling of this table and is still accepted.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `name` | string | *(required)* | A name for this source (used in logs and cache paths). |
-| `git` | string | — | Repository URL. Fetched and cached under `~/.symposium/cache/plugin-sources/`. |
+| `name` | string | *(required)* | A name for this registry. Used in logs and cache paths, and to attribute the plugins loaded from it. |
+| `git` | string | — | Repository URL. Fetched and cached under `~/.symposium/cache/plugin-sources/`, then read as a local directory. |
 | `path` | string | — | Local directory containing plugins. Relative paths are resolved from `~/.symposium/`. |
-| `auto-update` | bool | `true` | Check for updates on startup. Only applies to `git` sources. |
+| `auto-update` | bool | `true` | Check for updates on startup. Only applies to `git` registries. |
+
+## `[plugins]`
+
+Enablement: which plugins are allowed to run at all, as distinct from the [predicates](./predicates.md) that decide *when* an enabled plugin applies.
+
+Symposium trusts two things without asking: the workspace you are in, and the [registries](#registry) it is configured with. A registry exists to curate plugins, so enabling one is the act of accepting its curation. Both built-in registries count here and are on by default — `user-plugins` is your own directory, while `symposium-recommendations` is a list curated by the Symposium project and trusted until you turn it off in [`[defaults]`](#defaults).
+
+Your dependency list is deliberately not a trust root. Depending on a crate means compiling its code; it should not silently let the crate's author add instructions to your agent. So a plugin embedded in a dependency runs only once you say so, and a registry plugin that names no dependency anywhere is *dormant* — loaded and listed, but inactive — until you enable it by name.
+
+Trust follows whoever supplies the *content*, not the package the content is about: a registry entry recommending a plugin for `serde` is the registry's own content and is trusted, while `serde`'s embedded plugin is not. One consequence is worth knowing: a trusted plugin may name a crate with a [`[[plugins]]` chained reference](./plugin-definition.md), and that crate's plugin content then loads without a `[plugins]` entry of its own — the registry is vouching for it.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `auto-enable` | array of strings | `[]` | Dependency names whose embedded plugins load without being asked about. `"*"` pre-consents to every dependency. |
+| `use` | array | `[]` | Plugins enabled deliberately. Each entry is either a plain name (enabled in every workspace) or `{ name = "...", workspace = "/path" }` (enabled only while working in that workspace root). |
+| `disable` | array of strings | `[]` | Names that must never be enabled. Takes precedence over `auto-enable`, including over `"*"`. |
+
+Names are matched hyphen/underscore-insensitively, like crate names: `widget-lib` and `widget_lib` are the same entry.
+
+```toml
+[plugins]
+auto-enable = ["widget-lib"]
+disable = ["noisy-crate"]
+use = ["standalone-plugin", { name = "team-tools", workspace = "/home/me/work/service" }]
+```
+
+`use` is what wakes a dormant plugin, and it also enables a plugin whether or not any dependency references it. `auto-enable` is narrower: it is consent for what a dependency you already have carries with it.
+
+You rarely edit this section by hand. [`cargo agents use`](./cargo-agents-use.md) writes and removes `use` entries; the [consent prompt](./cargo-agents-sync.md#consent-prompt) in an interactive `cargo agents sync` writes `auto-enable` and `disable`; and [`cargo agents status`](./cargo-agents-status.md) reports what the section currently decides.
 
 ## Directory resolution
 

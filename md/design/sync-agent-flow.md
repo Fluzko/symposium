@@ -4,9 +4,11 @@ Scans workspace dependencies, installs applicable skills into agent directories,
 
 ## Flow
 
+0. **Consent prompt** (interactive `cargo agents sync` only) — ask about each dependency plugin awaiting consent and record the answers in `[plugins]` before resolution runs, so an approval installs in this same sync. Gated on `Output::is_interactive()`: the hook-triggered auto-sync calls `sync::sync` directly and never reaches this step. See [dependency discovery](./module-structure.md#discoveryrs--dependency-discovery-and-enablement).
+
 1. **Find workspace root** — run `cargo metadata` to locate the workspace manifest directory.
 
-2. **Load plugin sources** — read the user config's `[[plugin-source]]` entries and load their plugin manifests. For git sources, fetch/update as needed.
+2. **Load registries** — read the user config's `[[registry]]` entries, ask each one's package manager for the plugin-bearing entries it offers, and load their plugin manifests. For git registries, fetch/update as needed.
 
 3. **Scan dependencies** — read the full dependency graph from the workspace.
 

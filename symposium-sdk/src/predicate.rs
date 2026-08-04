@@ -1,26 +1,50 @@
 //! Types for custom predicate output.
 //!
-//! FIXME: this witness/emitter channel is currently **unused**. It was built to
-//! let a custom predicate name crates to fetch for the retired `source =
-//! "crate"` skill resolution; custom predicates are now a boolean gate only
-//! (pass/fail via exit code), and Symposium ignores their stdout. The intended
-//! future use is to let a custom predicate **set fields on the plugin (or
-//! component) it gates** — contributing values back into the manifest — through
-//! a channel like this. Until that lands, [`PredicateEmitter`] / [`SelectedCrate`]
-//! have no effect.
-//!
 //! A custom predicate binary communicates its result via:
 //! - **Exit code**: 0 = pass, non-zero = fail.
-//! - **Stdout**: reserved for the future use above; currently ignored.
+//! - **Stdout**: a JSON Lines stream of [`CustomPredicateEvent`] records. See
+//!   the predicate-caching RFD for how Symposium uses these events to cache
+//!   predicate results.
 //!
 //! Use [`PredicateEmitter`] to write records from a Rust predicate binary.
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// A crate named by a custom predicate's witness output. Currently unused — see
-/// the module-level FIXME.
+/// A record emitted by a custom predicate on stdout. Each event describes an
+/// input whose change should invalidate the predicate's cached result.
+///
+/// The variants are intentionally granular so new watch kinds can be added
+/// without breaking existing predicate binaries. Older Symposium versions
+/// ignore unknown records; older predicates that emit no events are treated as
+/// having no changing inputs and are cached indefinitely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub enum CustomPredicateEvent {
+    /// The predicate's result depends on the contents of this file. Symposium
+    /// invalidates the cached result if the file's fingerprint changes.
+    WatchFile(PathBuf),
+
+    /// The predicate's result depends on the value of this environment
+    /// variable. Symposium fingerprints the value at read time.
+    WatchEnv(String),
+
+    /// The predicate's result becomes stale after this many milliseconds.
+    /// `WatchTime(0)` disables caching entirely.
+    WatchTime(u64),
+
+    /// A crate named by a custom predicate's witness output. Retained for
+    /// backward compatibility with the retired `source = "crate"` skill
+    /// resolution; currently ignored by Symposium.
+    SelectedCrate(SelectedCrate),
+}
+
+/// A crate named by a custom predicate's witness output. Retained for
+/// backward compatibility with the retired `source = "crate"` skill
+/// resolution; currently ignored by Symposium.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedCrate {
     pub crate_name: String,
@@ -85,33 +109,43 @@ impl<W: Write> PredicateEmitter<W> {
         Self { writer }
     }
 
+    /// Emit a raw [`CustomPredicateEvent`]. Prefer the typed helpers below.
+    pub fn emit(&mut self, event: &CustomPredicateEvent) -> io::Result<&mut Self> {
+        let line = serde_json::to_string(event)
+            .expect("PredicateEmitter record serialization is infallible");
+        writeln!(self.writer, "{line}")?;
+        Ok(self)
+    }
+
+    /// Declare that the predicate's result depends on `path`. Symposium
+    /// invalidates the cached result when the file's fingerprint changes.
+    pub fn watch_file(&mut self, path: impl Into<PathBuf>) -> io::Result<&mut Self> {
+        self.emit(&CustomPredicateEvent::WatchFile(path.into()))
+    }
+
+    /// Declare that the predicate's result depends on the value of the given
+    /// environment variable.
+    pub fn watch_env(&mut self, name: impl Into<String>) -> io::Result<&mut Self> {
+        self.emit(&CustomPredicateEvent::WatchEnv(name.into()))
+    }
+
+    /// Declare that the predicate's result is only valid for `millis`
+    /// milliseconds. `watch_time(0)` disables caching.
+    pub fn watch_time(&mut self, millis: u64) -> io::Result<&mut Self> {
+        self.emit(&CustomPredicateEvent::WatchTime(millis))
+    }
+
     /// Historically caused Symposium to fetch `name@version` for `source =
     /// "crate"` skill groups; that resolution was retired, so this record is
-    /// currently ignored (see the module-level FIXME).
+    /// currently ignored.
     pub fn selected_crate(
         &mut self,
         name: &str,
         version: &semver::Version,
     ) -> io::Result<&mut Self> {
-        #[derive(Serialize)]
-        struct Record<'a> {
-            #[serde(rename = "selectedCrate")]
-            selected_crate: Inner<'a>,
-        }
-        #[derive(Serialize)]
-        struct Inner<'a> {
-            name: &'a str,
-            version: String,
-        }
-        let record = Record {
-            selected_crate: Inner {
-                name,
-                version: version.to_string(),
-            },
-        };
-        let line = serde_json::to_string(&record)
-            .expect("PredicateEmitter record serialization is infallible");
-        writeln!(self.writer, "{line}")?;
-        Ok(self)
+        self.emit(&CustomPredicateEvent::SelectedCrate(SelectedCrate {
+            crate_name: name.to_string(),
+            version: version.clone(),
+        }))
     }
 }

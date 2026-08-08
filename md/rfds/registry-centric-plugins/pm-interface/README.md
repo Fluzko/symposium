@@ -2,27 +2,36 @@
 
 ## TL;DR
 
-- Define a four-operation interface (`resolve`, `search`, `fetch`, `list-deps`) that all package managers implement.
-- PMs are separate binaries communicating via JSON-RPC over stdio.
-- Only `path` is built into the Symposium binary; `cargo`, `git`, and future PMs are external.
+- Define an operation set (`initialize`, `active_plugins`, `load_plugin`, `list_deps`, `search`, `fetch`, `refresh`) that all package managers implement.
+- PMs are separate binaries speaking newline-delimited JSON-RPC over stdio. One long-lived process per PM per Symposium invocation.
+- A PM returns plugin *manifests*, not just directories, so it can synthesize a plugin for a package with no `Symposium.toml`, or one whose manifest is in another ecosystem's format.
+- Trust is assigned by Symposium, never claimed by the PM.
 
 ## Motivation
 
-Symposium needs to fetch plugins from multiple ecosystems without hard-coding each one. The PM interface is the seam: implement four operations and your ecosystem becomes a plugin source. This lets us ship cargo support today, add npm/pypi later, and let enterprises plug in internal registries — all without changing core.
+Symposium needs to fetch plugins from multiple ecosystems without hard-coding each one. The PM interface is the seam: implement a handful of operations and your ecosystem becomes a plugin source. Cargo, npm, pypi, and an enterprise's internal registry all arrive the same way — all without changing core.
 
 ## Change in a nutshell
 
-A PM is a separate binary that speaks JSON-RPC over stdio. Here's the cargo PM responding to `resolve`:
+A PM is a separate binary that speaks JSON-RPC over stdio. Here's the cargo PM responding to `load_plugin`:
 
 ```toml
 # User writes in Symposium.toml:
 [[plugins]]
-source.cargo = { serde-skills = "1" }
+source.cargo = "serde-skills>=1"
 ```
 
-Symposium passes `{ "serde-skills": "1" }` to the cargo PM's `resolve` method. It queries crates.io and returns `(cargo, serde-skills, 1.2.3)`.
+Symposium sends `load_plugin` with the id `(cargo, serde-skills, >=1)`. The cargo PM resolves the requirement, obtains the crate source, and returns the exact id, the content directory, and the plugin manifest it read (or synthesized) from that directory:
 
-Then `fetch((cargo, serde-skills, 1.2.3))` downloads the crate and unpacks the plugin directory into cache.
+```json
+{ "result": [{
+    "id": { "pm": "cargo", "name": "serde-skills", "version": "1.2.3" },
+    "root": "/home/user/.cargo/registry/src/index.crates.io-.../serde-skills-1.2.3",
+    "manifest": { "skills": [{ "source": { "path": "skills" } }] }
+}] }
+```
+
+Symposium validates that manifest, applies its own defaults and trust rules, and resolves the skill group against `root`.
 
 ## Detailed plans
 
@@ -43,76 +52,182 @@ In the JSON-RPC protocol, a package-id is represented as:
 
 ### The protocol
 
-PMs are separate binaries invoked by Symposium. Communication uses JSON-RPC over stdio (the same pattern as MCP servers). Each PM binary is long-lived — Symposium spawns it once and sends multiple requests.
+PMs are separate binaries invoked by Symposium. Communication uses JSON-RPC 2.0 over stdio, **newline-delimited**: one JSON object per line, no `Content-Length` framing. Nothing in the payloads needs an embedded newline, so the simpler framing is enough. Each PM binary is long-lived: Symposium spawns it once per invocation and sends multiple requests, multiplexed by request id.
 
-The protocol defines four methods:
-
-#### `resolve`
+#### `initialize`
 
 ```json
 // Request
-{ "method": "resolve", "params": { "value": { "serde-skills": "1" } } }
+{ "method": "initialize", "params": {
+    "protocol_version": 1,
+    "workspace": "/home/user/projects/my-app",
+    "cache_dir": "/home/user/.symposium/cache",
+    "env": { "SYMPOSIUM_CARGO": "/usr/bin/cargo" }
+} }
 
 // Response
-{ "result": [{ "pm": "cargo", "name": "serde-skills", "version": "1.2.3" }] }
+{ "result": { "protocol_version": 1, "name": "cargo", "capabilities": ["search", "list_deps"] } }
 ```
 
-Takes the opaque TOML value from `source.<pm> = { ... }` (passed as JSON). Returns a set of package-ids.
+Sent once, before any other method. Carries the per-invocation context the PM needs; the PM answers with the name it owns (the `pm` component of every id it mints) and which optional operations it implements.
 
-- Cargo PM: `{ "serde-skills": "1" }` → queries registry → `(cargo, serde-skills, 1.2.3)`
-- Git PM: `{ "url": "...", "branch": "main" }` → resolves ref → `(git, git@github.com:org/repo#main, abc123)`
-- Path PM (built-in, not JSON-RPC): `{ "path": "./my-plugin" }` → canonicalizes
+A PM is otherwise **self-contained**: it holds whatever it needs to resolve its own ecosystem, so no later method takes ambient context. This is why `workspace` lives here rather than on `list_deps` as originally proposed: with a long-lived process the workspace is fixed for the connection's lifetime.
 
-May involve network calls. Deterministic given same registry state.
+Version negotiation is strict for now: a PM reporting a `protocol_version` Symposium doesn't know is refused with a warning, and its plugins are simply absent.
+
+#### `active_plugins`
+
+```json
+// Request
+{ "method": "active_plugins", "params": { "deps": [{ "pm": "cargo", "name": "serde", "version": "1.0.210" }] } }
+
+// Response
+{ "result": [{ "id": {...}, "root": "...", "manifest": {...} }] }
+```
+
+The plugins this PM activates for the workspace's dependency set. The two shapes it covers:
+
+- A **registry** instance lists its own entries and ignores `deps`.
+- An **ecosystem transport** (cargo) surfaces the plugins its dependencies embed.
+
+Whether the result may run without the user's consent is Symposium's decision, not the PM's: see [Enablement](#enablement).
+
+#### `load_plugin`
+
+```json
+// Request
+{ "method": "load_plugin", "params": { "id": { "pm": "cargo", "name": "serde-skills", "version": ">=1" } } }
+
+// Response
+{ "result": [{ "id": {...}, "root": "...", "manifest": {...} }] }
+```
+
+The plugin(s) a *specific* id maps to: a `[[plugins]]` chained reference, or a crate the user enabled by name. Resolves the version requirement, obtains the content, and returns the plugin(s) found there. Returning zero plugins is not an error.
+
+This is the method the original `resolve` folded into. The version component of the request id may be a requirement (`">=1"`, or `"*"` for none); the response id always names the exact resolved version.
+
+#### `list_deps`
+
+```json
+// Response
+{ "result": [{ "pm": "cargo", "name": "serde", "version": "1.0.210" }, { "pm": "cargo", "name": "tokio", "version": "1.38.0" }] }
+```
+
+The dependencies of the workspace given at `initialize`, in this PM's ecosystem. PMs with no workspace notion return empty.
+
+Contract:
+- Direct dependencies only (not transitive).
+- Must be fast: this is on the hook path. Read lockfiles, don't query the network, cache on the lockfile's mtime.
 
 #### `search`
 
 ```json
 // Request
-{ "method": "search", "params": { "query": { "pm": "cargo", "name": "serde", "version": "1.0.210" } } }
+{ "method": "search", "params": { "query": "serde" } }
 
 // Response
 { "result": [{ "id": { "pm": "cargo", "name": "serde-skills", "version": "1.2.3" }, "description": "..." }] }
 ```
 
-Takes a package-id tuple (all fields provided — as returned by another PM's `list-deps`). Returns matching plugins from this PM's perspective.
-
-- Each PM decides which tuple components to match on. The recommendations PM ignores version; the cargo PM matches on name.
-- If the query's `pm` field doesn't relate to this PM, it may return empty.
-- Used during discovery: `list-deps` results are passed as queries to every PM's `search`.
+Find packages matching a partial query string; backs `cargo agents use` and `cargo agents search`. PMs without a searchable registry return empty.
 
 #### `fetch`
 
 ```json
 // Request
-{ "method": "fetch", "params": { "id": { "pm": "cargo", "name": "serde-skills", "version": "1.2.3" }, "dest": "/home/user/.symposium/cache/cargo/serde-skills/1.2.3" } }
+{ "method": "fetch", "params": { "id": {...}, "update": "none" } }
 
 // Response
-{ "result": { "path": "/home/user/.symposium/cache/cargo/serde-skills/1.2.3" } }
+{ "result": { "id": {...}, "root": "/home/user/.cargo/registry/src/.../serde-skills-1.2.3" } }
 ```
 
-Downloads exact versioned content into the provided destination directory.
+Acquire a package's content and report where it landed, canonicalizing the id's version. `update` is `none` (serve from cache, never touch the network), `check`, or `fetch` (force).
 
 Contract:
-- Same package-id always produces same content.
-- PM writes into `dest`, which Symposium provides.
-- If `dest` already has content, PM may skip (cache hit).
+- The same package-id always produces the same content.
+- The PM owns the directory and guarantees it stays valid for the connection's lifetime.
+- `update: "none"` must not make a network call. This is what keeps per-event hook dispatch offline.
 
-#### `list-deps`
+#### `refresh`
 
 ```json
 // Request
-{ "method": "list_deps", "params": { "workspace": "/home/user/projects/my-app" } }
+{ "method": "refresh", "params": { "update": "check", "force": false } }
 
 // Response
-{ "result": [{ "pm": "cargo", "name": "serde", "version": "1.0.210" }, { "pm": "cargo", "name": "tokio", "version": "1.38.0" }] }
+{ "result": { "refreshed": true } }
 ```
 
-Inspects the workspace and reports dependencies relevant to this PM. Returns full package-id tuples.
+Pull the PM's backing source: for a git-backed registry, fetch the repository. A no-op returning `false` for PMs whose content is already local. `force` overrides a source's auto-update opt-out, for an explicit `cargo agents plugin sync`.
 
-Contract:
-- Direct dependencies only (not transitive).
-- Must be fast — called on every sync. Read lockfiles, don't query the network.
+### What crosses the wire
+
+A PM returns a **plugin manifest**, not merely a directory:
+
+```json
+{ "id": {...}, "root": "/path/to/content", "manifest": { /* Symposium.toml schema, as JSON */ } }
+```
+
+Returning a manifest rather than only a path is what lets a PM **synthesize** a plugin: for a package with no manifest at all, or one whose configuration lives in a different ecosystem's format (an npm PM reading `package.json`, say). A PM that does nothing special just parses the `Symposium.toml` it found and hands it back.
+
+The manifest on the wire is the **raw, unvalidated** schema: the same shape a `Symposium.toml` deserializes into. Validation stays in Symposium:
+
+| Concern | Owner |
+|---------|-------|
+| Producing a manifest (parse, synthesize, translate) | PM |
+| Schema validation, inline-installation promotion | Symposium |
+| Defaults (`skills/`, `.agents/skills/`), `[defaults]` handling | Symposium |
+| Dormancy, trust, consent | Symposium |
+| Resolving `source.path` against `root` | Symposium |
+
+This split keeps policy in one place. A PM reports which plugins exist and what
+they contain; which of them are enabled is decided from configuration and from
+the source the plugin came from, neither of which is anything the PM says.
+
+The schema is published as a Rust crate that both Symposium and PM authors depend on, so a Rust PM builds the manifest as a typed value rather than assembling JSON by hand. PMs in other languages target the JSON shape directly.
+
+**Future optimization.** A PM could answer with `{"manifest_path": "Symposium.toml"}` instead of an inline manifest, letting Symposium read the file itself and skipping a serialize/deserialize round trip for the common case. Not needed to start.
+
+### Enablement
+
+A PM reports what is available. Symposium decides what runs, from two inputs:
+the user's `[plugins]` configuration, and which source the plugin came from.
+
+Some sources are trusted, meaning a plugin from them is enabled without the user
+being asked:
+
+- the **recommendations registry**,
+- the **current workspace** (its root and members),
+- the configured `[[registry]]` entries the user added by hand.
+
+A plugin embedded in a dependency is not: depending on a package should not let
+its author add to your agent's context, so it runs only once the user consents.
+
+### Naming a plugin in configuration
+
+To enable or disable a specific plugin, the user has to be able to name it, and
+the name has to survive across runs. So every plugin has a **canonical name**,
+supplied by the PM that offers it, and configuration entries are the pair
+`(pm, canonical-name)`:
+
+```toml
+[plugins]
+# Turn off one recommendation, overriding the registry's trusted-by-default
+# status.
+disable = [{ pm = "symposium-recommendations", name = "rtk" }]
+
+# Consent to a plugin embedded in a dependency.
+auto-enable = [{ pm = "cargo", name = "my-internal-crate" }]
+```
+
+Each PM picks names that are stable and meaningful for its ecosystem. The cargo
+PM uses the crate name. A registry PM uses the entry's path within the registry.
+The pair is qualified by PM so that two ecosystems using the same word do not
+collide, and so that a name always identifies exactly one thing.
+
+This is what makes a trusted source overridable. Recommendations are enabled
+without asking, which is the point of them, but a user who does not want a
+particular one names it and turns it off.
 
 ### Error handling
 
@@ -125,115 +240,155 @@ Errors use JSON-RPC error codes:
 | -32003 | Invalid input | Hard error at parse time |
 | -32004 | Auth required | Report to user with setup instructions |
 
+Beyond named codes, plugin loading is **best-effort** and must stay that way across the process boundary. A PM that errors, hangs past its timeout, crashes, or fails its `initialize` handshake degrades to "contributes no plugins," logged as a warning. One broken PM never aborts a sync or a hook: the same contract the in-process layer already holds, where a plugin that fails to load is dropped rather than surfaced.
+
+Anything written to a PM's stderr is captured and logged at debug level, so a PM can be diagnosed without disturbing the protocol on stdout.
+
 ### PM lifecycle
 
 Symposium manages PM binaries as follows:
 
-1. PMs are installed as `[[installable]]` entries — from the recommendations repository or the user's root config.
-2. On first use, Symposium spawns the PM binary and connects via stdio.
-3. The PM stays alive for the duration of the sync/hook operation.
-4. Symposium may call methods concurrently (the PM should handle this or serialize internally).
+1. On first use, Symposium spawns the PM binary, connects via stdio, and sends `initialize`.
+2. The PM stays alive for the rest of the Symposium invocation, and is shut down when `PmRegistry` drops.
+3. Spawning is **lazy**: a PM whose operations are never needed is never started.
+4. Symposium may have several requests in flight (the PM handles this or serializes internally).
 
-The `path` PM is the exception — it's built into the Symposium binary itself (since it just reads local directories and has no external dependencies).
+A PM binary is found one of three ways:
+
+1. **Built in.** The PMs Symposium ships with are located by name, with no configuration required.
+2. **Config-declared.** A `[[package-manager]]` section names the PM and points at an installation source, acquired through the same machinery hook binaries already use. This is the bootstrap channel: it cannot depend on plugins being loaded, since loading plugins is what needs PMs.
+3. **Plugin-vended.** A plugin registers a new PM type, per the parent RFD's [future work](../README.md#future-work). The `initialize` handshake is designed so this needs no protocol change.
 
 ### Cache layout
 
-```
-~/.symposium/cache/
-├── cargo/
-│   └── serde-skills/
-│       └── 1.2.3/
-│           ├── Symposium.toml
-│           └── skills/
-├── git/
-│   └── github.com-org-repo/
-│       └── abc123/
-│           └── ...
-└── recommendations/
-    └── cargo/
-        └── serde/
-            └── ...
-```
+Symposium hands each PM a `cache_dir` in the `initialize` handshake and the PM
+caches whatever it likes underneath it. What goes there, and how it is arranged,
+is entirely the PM's business: Symposium never reads or interprets the contents.
 
-Cache is a pure optimization — deletable and rebuildable from config. Symposium owns the directory structure; PMs write content into the slot they're given.
+The trade runs both ways. A PM gets one canonical place to write, so it does not
+have to invent a location or ask the user to configure one, and everything
+Symposium caused to be downloaded is in one place. In exchange, Symposium may
+delete that directory at any time, so a PM must treat it as a cache and never as
+storage: anything it cannot rebuild does not belong there.
+
+A PM is free to serve content from outside `cache_dir` when its ecosystem
+already has a cache worth reusing. The cargo PM does exactly this, serving
+sources out of `~/.cargo/registry/src/`, which is why the directory is offered
+rather than imposed.
+
+`fetch` returns a `root` the PM guarantees valid for the connection's lifetime.
+Symposium reads it and never writes to it.
 
 ### Built-in PMs
 
-#### `path`
+`path` and `git` are built into the Symposium binary, for one reason: bootstrap.
+A configured PM is a binary that has to be acquired, and acquiring anything means
+reading a registry first. `path` and `git` are what make that first read possible,
+so they cannot themselves be things you acquire. The default recommendations
+registry is git-sourced, so a fresh install has to be able to read a git registry
+before it has acquired anything at all.
 
-Built into the Symposium binary. For local development and workspace-local plugins.
+Neither is built in because a separate process would be technically awkward.
+`git` in particular does need the network, and the fetching and caching it needs
+already exist in Symposium for git skill-group sources and hook binaries, so
+building it in reuses machinery rather than adding any. If the bootstrap
+constraint ever went away, either could become an ordinary PM binary without a
+protocol change.
 
-- `resolve`: canonicalizes a path, returns `(path, /absolute/path, _)`.
-- `search`: returns empty (not a searchable registry).
-- `fetch`: no-op (content is already on disk).
-- `list-deps`: returns empty.
-
-### External PMs (shipped as installables)
+Every other PM needs ecosystem tooling that Symposium has no reason to carry, and
+is a separate binary.
 
 #### `cargo`
 
 Separate binary (`symposium-pm-cargo`). See the [cargo PM sub-RFD](../cargo-pm/README.md) for details.
 
-#### `git`
+#### `git` as a chained source
 
-Separate binary (`symposium-pm-git`). Resolves refs to commit SHAs, fetches repo content.
-
-#### `recommendations`
-
-Separate binary (`symposium-pm-recommendations`). Operates over the curated recommendations repository. See the main README's [recommendations manager section](../README.md#example-the-recommendations-manager) for structure.
+`source.git` on a `[[plugins]]` chained reference is still rejected. Git *registries* and git *skill-group* sources both work today through the built-in reader; what's missing is naming a git repository as a chained plugin. That does not obviously need a separate binary either, and is left open.
 
 ## Frequently asked questions
 
 ### Why JSON-RPC over stdio?
 
-It's the same pattern used by MCP servers and LSP — well-understood, language-agnostic, and debuggable. We can use the `agent-client-protocol` SDK for the implementation. It also means PMs can be written in any language.
+It's the same pattern used by MCP servers and LSP: well-understood, language-agnostic, and debuggable. It also means PMs can be written in any language.
 
 ### Why not compile PMs into the binary?
 
 Language-agnosticism. We want npm/pypi PMs eventually, and those may be best written in JS/Python. Even for Rust-based PMs, the binary boundary keeps the core small and lets PMs be updated independently.
 
-### Why is `path` the only built-in?
+### Why is the manifest on the wire instead of a directory?
 
-It has no external dependencies and no protocol overhead would be justified for "return this local directory." Every other PM needs network access, registry-specific logic, or ecosystem tooling — better as separate binaries.
+So a PM can describe a package that doesn't describe itself. A crate with a bare `skills/` directory has no manifest; an npm package's configuration would live in `package.json`. If the wire form were a path, every such case would need Symposium to learn that ecosystem's conventions, which is exactly what the PM boundary exists to avoid.
+
+### Doesn't returning a manifest let a PM claim anything it likes?
+
+It describes content, which is its job. What it does not decide is whether any
+of that runs: validation, defaults, and enablement are applied by Symposium
+after the manifest arrives, from configuration and from the source the offer
+came from. See [Enablement](#enablement).
 
 ### Who resolves version requirements — Symposium or the PM?
 
-The PM. When config says the user wants `serde-skills` version `1.*`, Symposium calls `resolve` with that constraint. The PM knows how to interpret version ranges for its ecosystem.
+The PM. Symposium sends `load_plugin` with the requirement in the id's version component; the PM interprets the range for its ecosystem and answers with the exact version.
+
+### What does this cost on the hook path?
+
+A process spawn per PM per invocation. The property worth protecting is not "no subprocess" but "no `cargo metadata`": that's the expensive part, since it reads and resolves the whole graph. The `update: "none"` contract keeps `fetch` offline, `list_deps` caches on the lockfile mtime, and lazy spawning means a workspace whose predicates never reference a dependency starts no PM at all.
+
+If spawn cost does turn out to matter, the answer is a daemon mode for PMs (and for Symposium) rather than folding PMs back into the binary. That's a larger change and not proposed here.
 
 ## Implementation plan and status
 
-### Step 1: Define the JSON-RPC protocol schema
+### Step 1: Extract the manifest schema into a shared crate
 
-Document the four methods, their request/response shapes, and error codes. Publish as a schema that PM authors can validate against.
+Move the raw `Symposium.toml` schema and the predicate *syntax* types (parsing, `Display`, serde, not evaluation) into a crate both Symposium and PM authors depend on. Add `Serialize` alongside the existing `Deserialize`.
 
-- [ ] PR: protocol schema definition
+Tests: round-trip every manifest fixture in the repo through JSON and assert the validated `Plugin` is identical.
 
-### Step 2: Implement the `path` PM (built-in)
+- [ ] PR: manifest schema crate
 
-Simplest case — validates the fetch/cache flow end-to-end without spawning an external process.
 
-- [ ] PR: path PM implementation + tests
+### Step 2: Reshape the in-process trait to the wire shape
+
+`active_plugins` / `load_plugin` return `{id, root, manifest}` instead of an already-validated plugin. Manifest *production* moves to the PM side; validation, defaults, and trust move to a single core seam. Still fully in-process: this is a refactor with no protocol involved, and it is what de-risks step 3.
+
+Tests: the existing suite passes unchanged.
+
+- [ ] PR: offer-shaped PM trait
+
 
 ### Step 3: PM process management
 
-Spawning, stdio connection, JSON-RPC framing, lifecycle management (start on demand, keep alive during sync).
+Newline-delimited JSON-RPC client, the `initialize` handshake, lazy spawn, lifecycle and shutdown, timeout and crash handling. A server harness in the SDK so a Rust PM is a `main` plus a trait impl.
 
-- [ ] PR: PM process manager
+Tests: a fixture PM binary that returns canned manifests, driven end to end; plus failure cases: a PM that exits immediately, one that returns malformed JSON, one that never answers.
+
+- [ ] PR: PM process manager + SDK harness
+
 
 ### Step 4: Implement `symposium-pm-cargo`
 
-First external PM. Port existing crate-fetch logic. Validates the full JSON-RPC round-trip.
+Port workspace resolution, crate fetching, and crate-manifest merging into the binary. Add whatever the workspace root and members need to cross the boundary, since core reads them in a dozen places.
+
+Concretely:
+
+1. Split the cargo PM into a library the binary wraps, so unit tests can keep driving it in-process through the trait.
+2. Carry workspace information over the protocol. Core reads the workspace root and member directories off the cargo resolver in a dozen places, so this is the bulk of the change. Loading plugins *from* those directories stays in Symposium: they are local directory reads, and the workspace is a trust root whose policy core owns. The cargo PM's job is to report where the workspace is, not what it contains.
+3. Forward `SYMPOSIUM_CARGO` into the child, since the test harness installs a fake cargo and a child inherits no environment.
+
+Tests: the existing integration suite, driven through the real subprocess.
 
 - [ ] PR: cargo PM binary + tests
 
-### Step 5: Implement `symposium-pm-git`
 
-Resolves refs, fetches repos. Validates a second external PM works with the protocol.
+### Step 5: Configuration surface
 
-- [ ] PR: git PM binary + tests
+The `[[package-manager]]` section and acquisition through the existing installation machinery, replacing the hard-coded lookup from step 3.
 
-### Step 6: Implement `symposium-pm-recommendations`
+- [ ] PR: PM configuration
 
-Operates over the recommendations repository structure.
+### Step 6: A non-Rust-ecosystem reference PM
 
-- [ ] PR: recommendations PM binary + tests
+One PM that synthesizes manifests from a foreign format, proving the boundary carries an ecosystem Symposium knows nothing about.
+
+- [ ] PR: reference PM

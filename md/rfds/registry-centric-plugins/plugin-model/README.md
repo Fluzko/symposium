@@ -55,6 +55,12 @@ A plugin is a directory. That's it. The directory may contain:
 
 When a directory has no `Symposium.toml`, Symposium behaves as if an empty one exists. This empty manifest still triggers default behavior (see below).
 
+A registry entry is the exception. A manifest that references no dependency anywhere
+has nothing to infer a gate from, and treating it as "always on" would fire every
+curated plugin in every workspace. Such a plugin loads
+[dormant](../README.md#dormancy) and activates only when a `[plugins] use` entry
+names it. `depends-on = ["*"]` is the explicit always-active spelling.
+
 ### `Symposium.toml` structure
 
 ```toml
@@ -137,14 +143,16 @@ The plugin itself and each of its subsections can be gated with a `predicates = 
 Common predicates:
 
 * `workspace()` — true if this plugin is part of the active workspace
-* `used()` — true if this plugin was explicitly used by the user
 * `workspace-dependency()` — true if plugin is a dependency of some project in the current workspace
 * `depends-on(pm, name, version)` — true if the workspace depends on this package
 * `env(FOO=BAR)` — true if the environment variable is set to the given value
 * `file-exists(path)` — true if the given file exists relative to workspace root
 * `shell(command)` — true if the command exits with code 0
-* `workspace-directory(path)` — true if the workspace is a subdirectory of the given path
 * `not(p)`, `any(p, ...)`, `all(p, ...)` — combinators
+
+Explicit enablement is deliberately *not* a predicate. Enablement is a separate
+axis deciding whether a plugin may run at all, recorded in `[plugins]` and
+consulted before predicates are evaluated.
 
 The `[depends-on]` shorthand reuses the PM's `resolve` format:
 
@@ -163,11 +171,12 @@ A plugin can declare additional plugins to be loaded when it activates:
 
 ```toml
 [[plugins]]
-source.cargo = { serde-extras = "*" }
-
-[[plugins]]
-source.path = { path = "./sub-plugin" }
+source.cargo = "serde-extras>=1"
 ```
+
+A chained edge names a *package*, which its package manager resolves. `source.path`
+and `source.git` are rejected with a hint: a path is not a package, and local
+content is reachable as a `[[skills]] source.path` group or as a workspace plugin.
 
 Chaining is an *activation-time* relationship: when this plugin becomes active, also load these. Chained plugins:
 - Are fetched and cached transitively (installing A also fetches A's chained plugins)
@@ -209,32 +218,34 @@ skills = false
 
 ## Implementation plan and status
 
+All five steps landed. One follow-on remains: a crate-embedded plugin can *define* a custom predicate, but the definition isn't registered, so it can't be evaluated. See the parent RFD's [future work](../README.md#future-work).
+
 ### Step 1: Plugin struct and manifest parsing
 
 Define the `Plugin` struct, parse `Symposium.toml`, synthesize empty manifests for directories without one.
 
-- [ ] PR: plugin struct + TOML parsing
+- [x] PR: plugin struct + TOML parsing
 
 ### Step 2: Default application
 
 Implement skill discovery from `skills/` and `.agents/skills/`. Suppression via `[defaults]`.
 
-- [ ] PR: plugin defaults
+- [x] PR: plugin defaults
 
 ### Step 3: Predicates on plugins
 
 Evaluate predicates at the plugin level and per-construct level. Gate activation. Implement the `[depends-on]` shorthand.
 
-- [ ] PR: predicate evaluation
+- [x] PR: predicate evaluation
 
 ### Step 4: Chained plugins
 
 Parse `[[plugins]]` entries, resolve via PMs, fetch transitively, evaluate independently.
 
-- [ ] PR: chained plugin loading
+- [x] PR: chained plugin loading
 
 ### Step 5: Integration with sync
 
 Wire the new plugin model into the sync pipeline: iterate installed plugins, evaluate predicates, sync active content to agent directories.
 
-- [ ] PR: sync integration
+- [x] PR: sync integration

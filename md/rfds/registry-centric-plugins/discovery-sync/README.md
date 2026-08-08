@@ -128,27 +128,49 @@ On session start, a lightweight check runs:
 
 The hook does NOT install anything. It only notifies. Installation goes through `symposium sync`.
 
-### Auto-install configuration
+### Enablement configuration
+
+Enablement is keyed on `(pm, canonical-name)`, the identity every PM gives the
+plugins it offers (see the [PM interface](../pm-interface/README.md#naming-a-plugin-in-configuration)).
+The pair is what lets a user name one specific plugin: a crate for the cargo PM,
+an entry path for a registry PM, and never an ambiguous bare word.
 
 ```toml
 # In ~/.symposium/config.toml
 
-# Install all discoveries without prompting
-auto-sync = true
+[plugins]
+# Pre-consented, so a discovery installs without prompting.
+auto-enable = [{ pm = "cargo", name = "my-internal-crate" }]
 
-# Or per-PM granularity:
-[auto-sync]
-recommendations = true   # auto-install from recommendations
-cargo = false            # prompt for crates.io discoveries
+# Deliberate enablements, global or scoped to one workspace.
+use = [
+  { pm = "cargo", name = "widget" },
+  { pm = "cargo", name = "gadget", workspace = "/path/to/project" },
+]
+
+# Pruned from enablement, which is also where a decline is recorded, and how a
+# plugin from a trusted source is turned off.
+disable = [{ pm = "symposium-recommendations", name = "rtk" }]
 ```
 
-### Dismissed discoveries
+`auto-enable` also accepts `"*"`, meaning every dependency-embedded plugin is
+consented to. `disable` still applies on top, so blanket consent stays
+overridable one plugin at a time.
 
-When a user says "none" to a discovery, it's suppressed until:
-- The plugin's version changes (a new release might be more relevant)
-- The user explicitly searches for it via `symposium use`
+### Declined discoveries
 
-Dismissals are tracked in state (`~/.symposium/state.toml`).
+A decline is recorded in `[plugins] disable` in the user config, and is
+permanent until the user edits it. It lives in config rather than state because
+it is a decision the user made and should be able to see and revise, not a
+cache Symposium is free to invalidate; a version bump does not re-raise it.
+
+Only an explicit "never ask again" is written. The prompt's default answer
+("ask me later") and Escape record nothing, so hitting Enter reflexively never
+declines anything permanently.
+
+The prompt is inert unless the output is attached to a terminal on both ends. A
+hook must never block on stdin, so on the hook path the pending candidates are
+rendered into `SessionStart` context pointing at `cargo agents sync` instead.
 
 ### Debouncing and caching
 
@@ -180,28 +202,28 @@ Yes: `auto-sync = false` (the default) means you only get notified, never auto-i
 
 Wire up the pipeline with the path PM initially to validate the flow end-to-end.
 
-- [ ] PR: sync pipeline with path PM
+- [x] PR: sync pipeline with path PM
 
 ### Step 2: Discovery algorithm
 
 Implement `list-deps` → `search` loop across all PMs. 
 
-- [ ] PR: discovery algorithm
+- [x] PR: discovery algorithm
 
 ### Step 3: Prompt UX
 
 Present discoveries, record choices (accept/dismiss).
 
-- [ ] PR: discovery prompt
+- [x] PR: discovery prompt
 
 ### Step 4: Hook notification
 
 Add discovery check to session-start hook. Use cached results only.
 
-- [ ] PR: session start notification
+- [x] PR: session start notification
 
 ### Step 5: Auto-install and dismissal
 
 Add `auto-sync` config, per-PM granularity, and dismissed-discovery tracking.
 
-- [ ] PR: auto-install + dismissal state
+- [x] PR: auto-install + dismissal state

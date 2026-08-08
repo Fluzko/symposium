@@ -182,7 +182,7 @@ The plugin itself and each of its subsections can be gated with a `predicates = 
 
 `depends-on` is sugar for the common dependency case: `depends-on = ["serde", "tokio"]` lowers to `any(depends-on(serde), depends-on(tokio))`, ANDed with any `predicates`.
 
-Whether a plugin was **explicitly used** and whether it is a **workspace dependency** are *not* predicates in the shipped design. "Used" is the enablement axis — a `[plugins] use` entry (see [Explicit use](#explicit-use)) — which is also how a [dormant plugin](#dormancy) wakes; dependency presence is `depends-on(<name>)`. These are not mutually exclusive: a plugin can be a workspace member, a dependency, and explicitly used all at once.
+Whether a plugin was **explicitly used** and whether it is a **workspace dependency** are *not* predicates. "Used" is the enablement axis, a `[plugins] use` entry (see [Explicit use](#explicit-use)), which is also how a [dormant plugin](#dormancy) wakes; dependency presence is `depends-on(<name>)`. These are not mutually exclusive: a plugin can be a workspace member, a dependency, and explicitly used all at once.
 
 #### Default content
 
@@ -201,51 +201,48 @@ These defaults establish the skills conventions described earlier. For example, 
 
 ### Package managers
 
-> **Implementation note.** The shipped PM layer is **in-process**: [`PmRegistry`](../../design/module-structure.md#pm--package-managers) holds each PM as a `Box<dyn PackageManager>` — the cargo transport plus one `path` instance per configured registry — and the operation set is `active_plugins(deps)` / `load_plugin(id)` / `list_deps` / `search` / `fetch`. The original `resolve` operation folded into `load_plugin`: a `[[plugins]] source.cargo` reference is resolved by *loading* the named id, not by a separate lowering step. The separate-binary JSON-RPC protocol described below is the out-of-process *target* — not yet built; `PmRegistry` is the seam that will spawn and talk to those binaries. See [remaining work](#future-work).
+A package manager (PM) is a pluggable backend that knows how to find, fetch, and enumerate plugins from a particular ecosystem. A PM may run in Symposium's own process or as a separate binary it speaks to over stdio; both implement the same operations, so nothing above the PM layer knows which it is talking to.
 
-A package manager (PM) is a pluggable backend that knows how to find, resolve, fetch, and enumerate plugins from a particular ecosystem. Each PM is a separate binary that Symposium invokes — installed as an `[[installable]]` from either the recommendations repository or the user's root config. The `path` PM is built into the Symposium binary itself (since it just reads local directories), but `cargo`, `git`, and any future PMs (npm, pypi, etc.) are separate binaries.
+`path` and `git` are built in, since both only read local directories. `cargo` is a crate of its own that can run either way, and any other ecosystem (npm, pypi, an internal registry) arrives as a binary named by a `[[package-manager]]` config entry.
 
-Every PM implements four operations:
+Every PM implements these operations:
 
 | Operation | Input | Output | Used by |
 |-----------|-------|--------|---------|
-| `resolve` | opaque TOML value (from `source.<pm>`) | set of package-ids | manifest processing |
+| `active_plugins` | the workspace's dependency ids | set of plugin offers | discovery, sync |
+| `load_plugin` | package-id | set of plugin offers | chained references, `use` |
 | `search` | partial query string | set of package-ids + metadata | `symposium use` |
 | `fetch` | package-id | directory with plugin content | sync/install |
-| `list-deps` | workspace directory | set of package-ids | auto-discovery |
+| `list_deps` | (none) | set of package-ids | auto-discovery |
+| `workspace_info` | (none) | workspace root and members | workspace plugins, scoping |
+| `refresh` | update level | whether content was pulled | registry sync |
+
+A plugin *offer* is a resolved id, a content directory, and an unvalidated manifest. Returning a manifest rather than only a directory is what lets a PM synthesize a plugin for a package that ships no manifest, or translate one from its own ecosystem's format, without Symposium learning that ecosystem's conventions. Validation and defaults are applied by Symposium once the manifest arrives. Which plugins actually run is a separate decision, made from the user's `[plugins]` configuration and from the source the offer came from.
 
 A **package-id** is a tuple `(pm, name, version)` where all three components are PM-defined strings. Examples: `(cargo, serde, 1.0.210)`, `(git, github.com/rtk-ai/rtk, abc123def)`, `(recommendations, cargo/serde, 0.1.0)`. There is no mandated string-serialized format — the tuple is the identity.
 
 See the [PM interface sub-RFD](./pm-interface/README.md) for full protocol details.
 
-#### Example: The recommendations manager
+#### Example: The recommendations registry
 
-> **Implementation note.** The shipped design does *not* build a dedicated recommendations PM or the `cargo/<name>/` namespace convention below. The actual `symposium-recommendations` repository is a flat registry read by the ordinary `PathPm`, and each entry declares which crates activate it with its own `depends-on` (evaluated when the plugin is loaded, like any registry plugin). A recommendations plugin is just "a plugin activated when certain deps are present," which the normal `depends-on` predicate already expresses — so the layout carries no dependency information and no separate PM is involved. The namespace convention could be re-added later as a thin lowering inside `PathPm` (a `cargo/<name>/` entry implying `depends-on(cargo:<name>)`) if it earns its keep. The proposal below is kept as the original design.
-
-The recommendations PM is provided by the `symposium-recommendations` crate. It operates over a repository of curated plugin directories, organized by the PM namespace they relate to:
+The `symposium-recommendations` repository is an ordinary flat registry, read by
+the built-in `path` PM once its content has been fetched. Each entry is a plugin
+directory that declares which crates activate it with its own `depends-on`:
 
 ```
 symposium-recommendations/
-  cargo/
-    serde/
-      Symposium.toml
-    tokio/
-      Symposium.toml
-  symposium/
-    yolo-skills/
-      Symposium.toml
+  serde-guidance/
+    Symposium.toml     # depends-on = ["serde"]
+  tokio-guidance/
+    Symposium.toml     # depends-on = ["tokio>=1"]
 ```
 
-It defines the core operations as follows:
-
-| Operation | Definition |
-|-----------|------------|
-| `resolve` | accepts a string `"foo"` or a list of strings `["foo", "bar"]` and treats them as in search |
-| `search` | if PM is specified, search the `pm/name` directory; otherwise, search all directories |
-| `fetch` | load the plugin from `pm/name` directory |
-| `list-deps` | returns empty set |
-
-Note: the recommendations PM participates in discovery not via `list-deps` but via `search`. The discovery flow calls `list-deps` on all PMs (e.g., cargo returns `(cargo, serde, 1.0.210)`), then for each dependency calls `search` on all PMs with the full tuple. The recommendations PM matches on `(pm, name)` and ignores the version component. This is where the recommendations PM gets to offer advice for other PMs' dependencies.
+No dedicated PM and no namespace convention are involved, because none are
+needed: a recommendation is just a plugin that activates when certain
+dependencies are present, which the ordinary `depends-on` predicate already
+expresses. The layout therefore carries no dependency information of its own,
+and a recommendations entry is validated and gated exactly like any other
+registry plugin.
 
 #### Example: The cargo manager
 
@@ -306,7 +303,8 @@ We plan follow-up RFDs with more details on each component:
 
 The remaining work, roughly in dependency order:
 
-- **Out-of-process PM binaries** — the shipped PM layer is in-process (see the note under [Package managers](#package-managers)). The design calls for each ecosystem PM (`cargo`, `git`, npm, pypi, …) to be a **separate binary** spoken to over JSON-RPC, with only the `path` PM built in. `PmRegistry` is the seam that will spawn and talk to them; the operation set and identity tuple are already in that shape, so this is a transport change, not a redesign. The JSON-RPC protocol, error semantics, and caching contract are the sub-RFD to write.
+- **Acquiring a PM binary**: a `[[package-manager]]` entry names a command that must already exist. Running it through the existing installation machinery (`source = "cargo"` / `"github"`, as hooks and subcommands do) would let an entry install what it names. Plugin-vended PMs layer on after that.
+- **Registries as PMs over the wire**: `path` and `git` registries stay in-process, since both only read local directories. Nothing stops a registry from being a PM binary too; there has just been no reason yet.
 - **PMs defined by plugins** — letting a plugin *register a new PM type* (so an org can ship an internal-registry PM, or an ecosystem PM like npm/pypi, as an ordinary plugin). Depends on the out-of-process protocol above; the registration and discovery mechanism is TBD.
 - **Additional built-in ecosystems** — there is no `git` PM yet (git *sources* for skill groups and installations exist, but a chained `source.git` is rejected); npm/pypi are unstarted.
 - **Custom predicate dispatch across plugins (fixed-point)** — a crate-embedded plugin can *define* a custom predicate, but its definition is not yet registered, so it cannot be evaluated (only registry plugins' custom predicates are). Wiring a crate's *own* custom predicates into its facet evaluation is tractable; the general case — one plugin defines a predicate that another plugin's gate references — needs a convergence loop, since the definition must be loaded before the gate that uses it can be evaluated.
@@ -315,8 +313,8 @@ The remaining work, roughly in dependency order:
 
 ## Implementation status
 
-1. **Plugin model** — ✅ landed. Plugins, `[defaults]`, predicates, chained plugins, dormancy.
-2. **PM interface + Cargo PM** — ✅ landed **in-process**. Identity tuple and the operation set (`active_plugins` / `load_plugin` / `list_deps` / `search` / `fetch`); the out-of-process JSON-RPC form is future work.
-3. **Discovery & sync** — ✅ landed. Dependency-embedded plugin discovery, the consent prompt, and the `[plugins]` config. The recommendations-via-`search` half was intentionally replaced by the flat-registry model (see the note under [the recommendations manager](#example-the-recommendations-manager)).
-4. **User-managed plugins** — ✅ landed. `use` / `remove` / `status`, workspace vs. global scope.
+1. **Plugin model.** Plugins, `[defaults]`, predicates, chained plugins, dormancy.
+2. **PM interface and the cargo PM.** The identity tuple, the operation set, the JSON-RPC transport (`symposium_sdk::pm::protocol` and `pm::server` on the PM's side, `pm::RemotePm` on Symposium's), and `symposium-pm-cargo` as a standalone crate and binary. A PM answers with a `PluginOffer`: an id, a content directory, and an unvalidated manifest, so it can synthesize a plugin for a package that has none. `[[package-manager]]` config entries add ecosystems beyond cargo.
+3. **Discovery and sync.** Dependency-embedded plugin discovery, the consent prompt, and the `[plugins]` config. Recommendations are a flat registry rather than a `search` result (see the note under [the recommendations manager](#example-the-recommendations-manager)).
+4. **User-managed plugins.** `use` / `remove` / `status`, workspace vs. global scope.
 5. **Remaining** — see [Future work](#future-work).

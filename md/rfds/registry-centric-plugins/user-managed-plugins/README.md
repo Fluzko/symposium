@@ -168,22 +168,22 @@ If a global and local plugin provide a skill with the same name, the local one w
 
 Define and parse the `[[plugins]]` and `[[workspace-plugins]]` entries in config.
 
-- [ ] PR: config format + parsing
+- [x] PR: config format + parsing
 
 ### Step 2: `symposium use`
 
 Search flow, selection UX, writing to config, triggering sync.
 
-- [ ] PR: `use` command
+- [x] PR: `use` command
 
 ### Step 3: `symposium remove`
 
 Matching, removal from config, cleanup on next sync.
 
-- [ ] PR: `remove` command
+- [x] PR: `remove` command
 
 ### Step 4: `symposium status`
 
 Display installed/active/inactive plugins with provenance and predicate status.
 
-- [ ] PR: `status` command
+- [x] PR: `status` command

@@ -10,13 +10,11 @@ use std::{fmt::Write as _, path::Path};
 
 use clap::{Command, CommandFactory};
 
-use symposium_sdk::workspace::WorkspaceCrate;
-
 use crate::{
     cli::{Cli, Commands, builtin_audience},
     config::Symposium,
-    plugins::{Audience, PluginRegistry, load_registry_with_workspace},
-    pm::{PackageId, PackageManager as _},
+    plugins::{Audience, ParsedPlugin, load_registry_with_workspace},
+    pm::PackageId,
     subcommand_dispatch::applicable_subcommands,
 };
 
@@ -33,7 +31,7 @@ pub const AGENTS_HEADING: &str = "Commands for agents";
 /// - no subcommand, or the bare `help` keyword -> top-level
 /// - `<built-in> --help` (incl. nested and required-arg commands) -> clap's own per command help, re-rendered;
 /// - a plugin-vended `<name> --help` -> `None`, so dispatch forwards `--help` to the child.
-pub fn help_text(
+pub async fn help_text(
     parse: Result<&Cli, &clap::Error>,
     args: &[String],
     sym: &Symposium,
@@ -44,12 +42,15 @@ pub fn help_text(
             let help_keyword = matches!(&cli.command, Some(Commands::External(argv)) if argv.first().and_then(|fst| fst.to_str()) == Some("help"));
 
             if cli.command.is_none() || help_keyword {
-                return Some(render_help(sym, cwd));
+                return Some(render_help(sym, cwd).await);
             }
 
             if cli.help {
                 // `<built-in> --help`; fall back to top-level if the target is a plugin (External) or `--help` come before any subcommand name.
-                return Some(subcommand_help(args).unwrap_or_else(|| render_help(sym, cwd)));
+                return match subcommand_help(args) {
+                    Some(text) => Some(text),
+                    None => Some(render_help(sym, cwd).await),
+                };
             }
 
             None
@@ -88,14 +89,32 @@ pub fn subcommand_help(args: &[String]) -> Option<String> {
     })
 }
 
-pub fn render_help(sym: &Symposium, cwd: &Path) -> String {
-    let mut deps = sym.workspace_deps(cwd);
+pub async fn render_help(sym: &Symposium, cwd: &Path) -> String {
+    let deps = sym.workspace_deps(cwd);
     let workspace = deps.load().cloned();
-    let registry = load_registry_with_workspace(sym, workspace.as_deref());
-    render(&registry, deps.crates())
+    let registry = load_registry_with_workspace(sym, workspace.as_deref()).await;
+    let dep_ids = crate::pm::workspace_dep_ids(sym, &deps).await;
+    let used = workspace
+        .as_ref()
+        .map(|ws| sym.config.plugins.used_names_in(&ws.root))
+        .unwrap_or_default();
+
+    // Resolve the active plugin set so crate-sourced subcommands appear in help.
+    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used);
+    let pms = sym.package_managers(&deps);
+    let active = crate::plugins::active_plugins(
+        sym,
+        &registry,
+        &pms,
+        workspace.as_ref().map(|ws| ws.root.as_path()),
+        &mut ctx,
+    )
+    .await;
+
+    render(&active, &dep_ids, &used)
 }
 
-fn render(registry: &PluginRegistry, workspace: &[WorkspaceCrate]) -> String {
+fn render(plugins: &[ParsedPlugin], deps: &[PackageId], used: &[&str]) -> String {
     let mut cmd = Cli::command();
     let full = cmd.render_help().to_string();
 
@@ -108,10 +127,8 @@ fn render(registry: &PluginRegistry, workspace: &[WorkspaceCrate]) -> String {
     let header = &full[..commands_idx];
     let options = &full[options_idx..];
 
-    let deps = crate::pm::CargoPm.list_deps(workspace);
-
-    let humans = collect_section(&cmd, registry, &deps, Audience::Humans);
-    let agents = collect_section(&cmd, registry, &deps, Audience::Agents);
+    let humans = collect_section(&cmd, plugins, deps, used, Audience::Humans);
+    let agents = collect_section(&cmd, plugins, deps, used, Audience::Agents);
 
     let col_width = humans
         .iter()
@@ -145,8 +162,9 @@ fn render(registry: &PluginRegistry, workspace: &[WorkspaceCrate]) -> String {
 /// Collect entries for one audience section: clap's builtins first (sorted), then plugin-vended subs whose predicates apply (sorted).
 fn collect_section(
     cmd: &Command,
-    registry: &PluginRegistry,
+    plugins: &[ParsedPlugin],
     deps: &[PackageId],
+    used: &[&str],
     target: Audience,
 ) -> Vec<(String, String)> {
     let mut builtins = cmd
@@ -162,35 +180,35 @@ fn collect_section(
 
     builtins.sort();
 
-    let mut plugins = applicable_subcommands(registry, deps)
+    let mut plugin_subs = applicable_subcommands(plugins, deps, used)
         .into_iter()
         .filter(|(_, _, subcommand)| subcommand.audience == target)
         .map(|(_, name, subcommand)| (name.to_string(), subcommand.description.clone()))
         .collect::<Vec<_>>();
 
-    plugins.sort();
+    plugin_subs.sort();
 
-    builtins.extend(plugins);
+    builtins.extend(plugin_subs);
 
     builtins
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::collections::BTreeMap;
 
     use expect_test::expect;
 
     use crate::{
-        plugins::{ParsedPlugin, Plugin, Subcommand},
+        plugins::{Plugin, PluginRegistry, Subcommand},
         pm::ANY_VERSION,
         predicate::PredicateSet,
     };
 
     use super::*;
 
-    fn workspace_crate(name: &str, version: &str) -> WorkspaceCrate {
-        WorkspaceCrate::new(name.into(), semver::Version::parse(version).unwrap(), None)
+    fn workspace_crate(name: &str, version: &str) -> PackageId {
+        PackageId::new(crate::pm::CARGO_PM, name, version)
     }
 
     fn crate_set(spec: &str) -> PredicateSet {
@@ -203,7 +221,6 @@ mod tests {
         subcommands: BTreeMap<String, Subcommand>,
     ) -> ParsedPlugin {
         ParsedPlugin {
-            path: PathBuf::from(format!("/test/{name}.toml")),
             plugin: Plugin {
                 name: name.into(),
                 hooks: vec![],
@@ -214,8 +231,8 @@ mod tests {
                 installations: vec![],
                 custom_predicates: vec![],
                 chained: vec![],
+                requires_use: false,
             },
-            source_dir: PathBuf::from("/test"),
             workspace_member: false,
             canonical: PackageId::new("test", name, ANY_VERSION),
         }
@@ -233,7 +250,6 @@ mod tests {
     fn registry(plugins: Vec<ParsedPlugin>) -> PluginRegistry {
         PluginRegistry {
             plugins,
-            standalone_skills: vec![],
             warnings: vec![],
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),
         }
@@ -259,7 +275,7 @@ mod tests {
     #[test]
     fn renders_with_no_plugin_subs() {
         let reg = registry(vec![]);
-        let ws: Vec<WorkspaceCrate> = vec![];
+        let ws: Vec<PackageId> = vec![];
         expect![[r#"
             AI the Rust Way
 
@@ -268,9 +284,12 @@ mod tests {
             Commands for humans:
             init         Set up user-wide configuration
             plugin       Manage plugins
+            search       Search configured registries for plugins
             self-update  Update symposium to the latest version
+            status       Show which plugins are enabled for this workspace, and why
             sync         Synchronize skills with workspace dependencies
             telemetry    Manage opt-in usage telemetry (status, enable, disable, show)
+            use          Enable a plugin by name and sync it into the workspace
 
             Commands for agents:
             crate-info   Find crate sources
@@ -283,7 +302,7 @@ mod tests {
               -h, --help             Print help
               -V, --version          Print version
         "#]]
-             .assert_eq(&redact(render(&reg, &ws)));
+             .assert_eq(&redact(render(&reg.plugins, &ws, &[])));
     }
 
     #[test]
@@ -296,7 +315,7 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = vec![workspace_crate("example-crate", "1.0.0")];
 
-        let out = render(&reg, &ws);
+        let out = render(&reg.plugins, &ws, &[]);
         let humans = extract_section(&out, "Commands for humans:");
         assert!(
             humans.contains("example-tool"),
@@ -321,7 +340,7 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = vec![workspace_crate("example-crate", "1.0.0")];
 
-        let out = render(&reg, &ws);
+        let out = render(&reg.plugins, &ws, &[]);
         let agents = extract_section(&out, "Commands for agents:");
         assert!(
             agents.contains("example-tool"),
@@ -350,7 +369,7 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = vec![workspace_crate("other-crate-sources", "1.0.0")];
 
-        let out = render(&reg, &ws);
+        let out = render(&reg.plugins, &ws, &[]);
         assert!(
             !out.contains("example-tool"),
             "example-tool should be filtered when workspace lacks example-crate:\n{out}"
@@ -372,7 +391,7 @@ mod tests {
         let reg = registry(vec![plugin_with("example-plugin", "*", subs)]);
         let ws = vec![workspace_crate("example-crate", "1.0.0")];
 
-        let out = render(&reg, &ws);
+        let out = render(&reg.plugins, &ws, &[]);
         let agents = extract_section(&out, "Commands for agents:");
         let bar_pos = agents.find("bar-tool").expect("bar-tool present");
         let foo_pos = agents.find("foo-tool").expect("foo-tool present");

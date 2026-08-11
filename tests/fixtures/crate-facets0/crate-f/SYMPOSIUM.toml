@@ -1,0 +1,29 @@
+# crate-f ships its own plugin manifest declaring non-skill extensions — an
+# MCP server and a subcommand — reached only through the chained reference from
+# vouch-f. Their presence after sync/dispatch proves crate-sourced MCP servers
+# and subcommands now flow through the active plugin set, not just skills.
+# `name` defaults to the crate and `depends-on` is waived, since the chained
+# reference that reaches this manifest is the gate.
+
+[[mcp_servers]]
+name = "facet-server"
+depends-on = ["*"]
+command = "/usr/bin/true"
+args = ["--stdio"]
+
+[[installations]]
+name = "facet-install"
+executable = "rustc"
+
+[subcommand.facet-tool]
+description = "Print rustc version (from crate-f)"
+command = "facet-install"
+
+# A hook whose script emits additional context — proves crate-sourced hooks
+# dispatch through the active plugin set.
+[[hooks]]
+name = "facet-hook"
+event = "PreToolUse"
+matcher = "Task"
+command = { script = "$TEST_DIR/crate-f/scripts/facet-hook.sh" }
+format = "symposium"

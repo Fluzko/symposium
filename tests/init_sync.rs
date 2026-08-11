@@ -223,16 +223,20 @@ async fn sync_skips_invalid_skill_frontmatter() {
         &["invalid-skill0", "workspace0"],
         async |mut ctx| {
             ctx.symposium(&["init", "--add-agent", "codex"]).await?;
-            let registry = symposium::plugins::load_registry(&ctx.sym);
-            assert!(
-                registry.warnings.iter().any(|warning| {
-                    warning.path.ends_with("bad-skill/SKILL.md")
-                        && warning.message.contains("failed to parse frontmatter")
-                }),
-                "registry should record a warning for skipped invalid skill"
-            );
 
-            ctx.symposium(&["sync"]).await?;
+            // The bad skill is synthesized into a plugin; loading it fails, and
+            // the package manager surfaces that as a warning during sync —
+            // naming the SKILL.md and the parse error — rather than installing
+            // anything.
+            let events = ctx.sync_with_report(tracing::Level::INFO).await?;
+            assert!(
+                events.iter().any(|e| e
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .is_some_and(|m| m.contains("bad-skill/SKILL.md")
+                        && m.contains("failed to parse frontmatter"))),
+                "sync should warn about the skipped invalid skill: {events:?}"
+            );
 
             let workspace_root = ctx.workspace_root.as_ref().unwrap();
             let installed =
@@ -585,6 +589,84 @@ async fn sync_installs_skill_from_crate_path() {
     .unwrap();
 }
 
+/// A dependency's embedded skills stay out until the user consents, and load
+/// as soon as `[plugins] auto-enable` names the dependency.
+///
+/// Fixture layout: `auto-enable-host` depends on `crate-a` (path dep), which
+/// ships `skills/a-guidance/SKILL.md`. No plugin manifest anywhere points at
+/// it — dependencies are not a trust root, so consent is the only way in.
+#[tokio::test]
+async fn auto_enable_admits_a_dependencys_embedded_skills() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["auto-enable0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let workspace_root = ctx.workspace_root.clone().unwrap();
+            let skills_dir = workspace_root.join(".claude/skills");
+            assert!(
+                find_installed_skills(&skills_dir, "a-guidance").is_empty(),
+                "an unconsented dependency plugin must not install anything"
+            );
+
+            ctx.sym.config.plugins.auto_enable.push("crate-a".into());
+            ctx.sym.save_config()?;
+            ctx.symposium(&["sync"]).await?;
+
+            let a_dir = find_installed_skill(&skills_dir, "a-guidance");
+            let content = std::fs::read_to_string(a_dir.join("SKILL.md"))?;
+            assert!(content.contains("Use crate-a like this"));
+            assert!(a_dir.join(".symposium").exists());
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// A registry plugin that names no dependency is installed but dormant: it
+/// contributes nothing until a `[plugins] use` entry enables it by name.
+#[tokio::test]
+async fn dormant_plugin_activates_only_once_used() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["dormant-plugin0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let workspace_root = ctx.workspace_root.clone().unwrap();
+            let skills_dir = workspace_root.join(".claude/skills");
+            assert!(
+                find_installed_skills(&skills_dir, "gateless-guidance").is_empty(),
+                "a dormant plugin must not install anything"
+            );
+
+            // It is nonetheless loaded and known — dormant, not invalid.
+            let found = symposium::plugins::find_plugin(&ctx.sym, "gateless-plugin").await;
+            assert!(found.is_some_and(|p| p.plugin.requires_use));
+
+            ctx.sym
+                .config
+                .plugins
+                .used
+                .push(symposium::config::UseEntry::Global(
+                    "gateless-plugin".into(),
+                ));
+            ctx.sym.save_config()?;
+            ctx.symposium(&["sync"]).await?;
+
+            let dir = find_installed_skill(&skills_dir, "gateless-guidance");
+            assert!(dir.join(".symposium").exists());
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// `sync` loads a crate's skills through a `[[plugins]]` chained reference.
 ///
 /// Fixture layout:
@@ -647,6 +729,50 @@ async fn sync_installs_skill_via_crate_manifest() {
             let content = std::fs::read_to_string(m_dir.join("SKILL.md"))?;
             assert!(content.contains("Use crate-m via the manifest"));
             assert!(m_dir.join(".symposium").exists());
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// An MCP server declared by a crate reached through a `[[plugins]]` chained
+/// reference is available to the agent — a crate-sourced plugin's MCP servers
+/// flow through the active plugin set, not just its skills.
+///
+/// With the meta-server on (the default) the agent's config carries only the
+/// `symposium` entry, so what proves the server reached the agent is that
+/// resolution finds it behind that entry.
+///
+/// Fixture layout:
+/// - `facet-host` depends on `crate-f` (path dep)
+/// - `vouch-f` gates on `crate-f` and carries `[[plugins]] source.cargo =
+///   "crate-f"` but declares nothing of its own
+/// - `crate-f` ships a `SYMPOSIUM.toml` declaring the `facet-server` MCP server
+#[tokio::test]
+async fn sync_registers_mcp_server_from_chained_crate() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["crate-facets0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let workspace_root = ctx.workspace_root.as_ref().unwrap().clone();
+            let settings = std::fs::read_to_string(workspace_root.join(".claude/settings.json"))?;
+            assert!(
+                settings.contains(symposium::sync::META_SERVER_NAME),
+                "the meta-server entry should be registered:\n{settings}"
+            );
+
+            let resolution = symposium::mcp::resolve::resolve(&ctx.sym, &workspace_root).await;
+            let names: Vec<&str> = resolution.servers.iter().map(|s| s.name.as_str()).collect();
+            assert!(
+                names.contains(&"facet-server"),
+                "chained crate's MCP server should resolve, got {names:?} \
+                 (rejected: {:?})",
+                resolution.rejected
+            );
             Ok(())
         },
     )
@@ -2459,15 +2585,17 @@ async fn report_json_shows_skipped_skills() {
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
             let events = ctx.sync_with_report(tracing::Level::DEBUG).await?;
 
-            // The plugins0 fixture has a serde-guidance skill that requires `serde`.
-            // workspace-empty0 has no deps, so it should be skipped.
+            // The plugins0 fixture's serde-guidance is a bare skill, now a
+            // plugin gated on `serde`. workspace-empty0 has no deps, so the
+            // plugin is skipped at the plugin level (before its skills are
+            // even considered).
             let skipped: Vec<&Value> = events
                 .iter()
-                .filter(|e| e["kind"] == "skill_considered" && e["matched"] == false)
+                .filter(|e| e["kind"] == "plugin_considered" && e["matched"] == false)
                 .collect();
             assert!(
                 !skipped.is_empty(),
-                "expected at least one skill to be skipped when workspace has no deps"
+                "expected the serde-guidance plugin to be skipped when workspace has no deps"
             );
 
             // No skill_installed events should appear

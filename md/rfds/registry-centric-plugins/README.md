@@ -94,6 +94,10 @@ This works the same way but activates those plugins across all workspaces.
 
 Users could also edit their config.toml to define their specific predicates for when they want plugins to be activated (e.g., when a certain file is present in the workspace, for Rust workspaces only, etc).
 
+### Dormancy
+
+A registry plugin whose manifest references no dependency anywhere — no `depends-on`, no `depends-on(...)` predicate, no `[[skills]]`/`[[hooks]]`/`[[mcp]]`/`[[plugins]]` gate that names one — has nothing to infer an activation gate from. Rather than treat that as "always on" (which would fire every curated plugin in every workspace), such a plugin is *dormant*: installed and known, but inactive until a `[plugins] use` entry names it. `depends-on = ["*"]` is the explicit "always active" spelling. The positional origins never go dormant, because where they were found supplies the gate: a crate plugin is reached through a reference to its own crate, and a workspace plugin is gated by workspace membership.
+
 
 ## As a crate author
 
@@ -167,30 +171,18 @@ Every plugin has a canonical identifier — a tuple `(pm, name, version)` — as
 
 #### Predicates
 
-The plugin itself and each of its subsections can be gated with a `predicates = [...]` field. When a plugin is installed, the content is only *activated* if the predicate matches.
+The plugin itself and each of its subsections can be gated with a `predicates = [...]` field (plus the `depends-on` shorthand). When a plugin is installed, the content is only *activated* if the predicates match. The full model is in the [predicates reference](../../reference/predicates.md); the functions are:
 
-Common predicates include:
+* `depends-on(<name>)`, true if some project in the workspace depends on `<name>`. A version requirement is allowed (`depends-on(serde>=1.0)`), and `depends-on(*)` matches any workspace.
+* `workspace-member()`, true if the plugin this predicate belongs to is defined by a member of the active workspace.
+* `env(FOO)` / `env(FOO=BAR)`, true if the environment variable is set (to `BAR`).
+* `path_exists(<arg>)`, true if the argument resolves to an existing path — checked on the filesystem, then on `$PATH` for a bare name (so it matches a local file or an installed binary).
+* `shell(<command>)`, true if `<command>` run via `sh -c` exits `0`.
+* the combinators `not(<p>)`, `any(<p>, …)`, `all(<p>, …)`, which together give full boolean logic.
 
-* `workspace()`, true if this plugin is part of the active workspace;
-* `used()`, true if this plugin was explicitly used by the user;
-* `workspace-dependency()`, true if plugin is a dependency of some project in the current workspace;
-* `env(FOO=BAR)`, true if the environment variable `FOO` is set to `BAR`;
-* `file-exists(path)`, true if the given file exists;
-* `depends-on(package-id)`, true if some project in the workspace depends on `package-id`;
-    * This is delegated to the installed Symposium package managers. By default it refers to any of them, but you can be more specific, e.g., `depends-on(cargo, serde, 1.0)` or `depends-on(npm, leftpad)`.
-* `shell(command)`, true if the given command exits with code 0;
-* `workspace-directory(/home/ferris/dev/rust)`, true if the active workspace is a subdirectory of the given path.
+`depends-on` is sugar for the common dependency case: `depends-on = ["serde", "tokio"]` lowers to `any(depends-on(serde), depends-on(tokio))`, ANDed with any `predicates`.
 
-Note that the first three predicates are not mutually exclusive. A given plugin may (a) appear in the workspace; (b) appear in the dependencies of a project in the workspace; and (c) be explicitly used all at the same time.
-
-There is also a shorthand for `depends-on` that reuses the PM's `resolve` format:
-
-```toml
-[depends-on]
-cargo = { tokio = "1", serde = "1" }
-```
-
-This is equivalent to `predicates = ["depends-on(cargo, tokio, 1)", "depends-on(cargo, serde, 1)"]` — the value under `depends-on.$pm` is passed to that PM's `resolve` to determine what packages are referenced.
+Whether a plugin was **explicitly used** and whether it is a **workspace dependency** are *not* predicates in the shipped design. "Used" is the enablement axis — a `[plugins] use` entry (see [Explicit use](#explicit-use)) — which is also how a [dormant plugin](#dormancy) wakes; dependency presence is `depends-on(<name>)`. These are not mutually exclusive: a plugin can be a workspace member, a dependency, and explicitly used all at once.
 
 #### Default content
 
@@ -209,6 +201,8 @@ These defaults establish the skills conventions described earlier. For example, 
 
 ### Package managers
 
+> **Implementation note.** The shipped PM layer is **in-process**: [`PmRegistry`](../../design/module-structure.md#pm--package-managers) holds each PM as a `Box<dyn PackageManager>` — the cargo transport plus one `path` instance per configured registry — and the operation set is `active_plugins(deps)` / `load_plugin(id)` / `list_deps` / `search` / `fetch`. The original `resolve` operation folded into `load_plugin`: a `[[plugins]] source.cargo` reference is resolved by *loading* the named id, not by a separate lowering step. The separate-binary JSON-RPC protocol described below is the out-of-process *target* — not yet built; `PmRegistry` is the seam that will spawn and talk to those binaries. See [remaining work](#future-work).
+
 A package manager (PM) is a pluggable backend that knows how to find, resolve, fetch, and enumerate plugins from a particular ecosystem. Each PM is a separate binary that Symposium invokes — installed as an `[[installable]]` from either the recommendations repository or the user's root config. The `path` PM is built into the Symposium binary itself (since it just reads local directories), but `cargo`, `git`, and any future PMs (npm, pypi, etc.) are separate binaries.
 
 Every PM implements four operations:
@@ -225,6 +219,8 @@ A **package-id** is a tuple `(pm, name, version)` where all three components are
 See the [PM interface sub-RFD](./pm-interface/README.md) for full protocol details.
 
 #### Example: The recommendations manager
+
+> **Implementation note.** The shipped design does *not* build a dedicated recommendations PM or the `cargo/<name>/` namespace convention below. The actual `symposium-recommendations` repository is a flat registry read by the ordinary `PathPm`, and each entry declares which crates activate it with its own `depends-on` (evaluated when the plugin is loaded, like any registry plugin). A recommendations plugin is just "a plugin activated when certain deps are present," which the normal `depends-on` predicate already expresses — so the layout carries no dependency information and no separate PM is involved. The namespace convention could be re-added later as a thin lowering inside `PathPm` (a `cargo/<name>/` entry implying `depends-on(cargo:<name>)`) if it earns its keep. The proposal below is kept as the original design.
 
 The recommendations PM is provided by the `symposium-recommendations` crate. It operates over a repository of curated plugin directories, organized by the PM namespace they relate to:
 
@@ -308,14 +304,19 @@ We plan follow-up RFDs with more details on each component:
 
 ### Future work
 
-- **Fixed-point resolution** — a convergence loop for when plugins define custom predicates that other plugins depend on. Needed once custom predicates are used across plugin boundaries.
-- **Custom PMs** — allowing plugins to define new PM types (npm, pypi, internal). The PM interface is the seam; registration and discovery mechanism TBD.
+The remaining work, roughly in dependency order:
+
+- **Out-of-process PM binaries** — the shipped PM layer is in-process (see the note under [Package managers](#package-managers)). The design calls for each ecosystem PM (`cargo`, `git`, npm, pypi, …) to be a **separate binary** spoken to over JSON-RPC, with only the `path` PM built in. `PmRegistry` is the seam that will spawn and talk to them; the operation set and identity tuple are already in that shape, so this is a transport change, not a redesign. The JSON-RPC protocol, error semantics, and caching contract are the sub-RFD to write.
+- **PMs defined by plugins** — letting a plugin *register a new PM type* (so an org can ship an internal-registry PM, or an ecosystem PM like npm/pypi, as an ordinary plugin). Depends on the out-of-process protocol above; the registration and discovery mechanism is TBD.
+- **Additional built-in ecosystems** — there is no `git` PM yet (git *sources* for skill groups and installations exist, but a chained `source.git` is rejected); npm/pypi are unstarted.
+- **Custom predicate dispatch across plugins (fixed-point)** — a crate-embedded plugin can *define* a custom predicate, but its definition is not yet registered, so it cannot be evaluated (only registry plugins' custom predicates are). Wiring a crate's *own* custom predicates into its facet evaluation is tractable; the general case — one plugin defines a predicate that another plugin's gate references — needs a convergence loop, since the definition must be loaded before the gate that uses it can be evaluated.
+- **Chained-edge version enforcement** — `[[plugins]] source.cargo = "widget>=1"` records the version requirement but does not enforce it: expansion enqueues the crate with no version, so it resolves against the workspace pin regardless. Enforcement would compare the resolved version to the recorded requirement and warn/skip on mismatch.
 - **Policy plugins** — org-level enforcement (deny-lists, approval gates). Separate extension point, design TBD.
 
-## Implementation order
+## Implementation status
 
-1. **Plugin model** — what a plugin is, defaults, predicates, chained plugins.
-2. **PM interface + Cargo PM** — the foundation. Identity tuple, four operations, JSON-RPC protocol, first real PM.
-3. **Discovery & sync** — PM `list-deps` + `search`, prompt UX. Enables "plugins from your dependencies."
-4. **User-managed plugins** — `use`/`remove`/`status` UX.
-5. **Future work** — fixed-point, custom PMs, policy — as demand arises.
+1. **Plugin model** — ✅ landed. Plugins, `[defaults]`, predicates, chained plugins, dormancy.
+2. **PM interface + Cargo PM** — ✅ landed **in-process**. Identity tuple and the operation set (`active_plugins` / `load_plugin` / `list_deps` / `search` / `fetch`); the out-of-process JSON-RPC form is future work.
+3. **Discovery & sync** — ✅ landed. Dependency-embedded plugin discovery, the consent prompt, and the `[plugins]` config. The recommendations-via-`search` half was intentionally replaced by the flat-registry model (see the note under [the recommendations manager](#example-the-recommendations-manager)).
+4. **User-managed plugins** — ✅ landed. `use` / `remove` / `status`, workspace vs. global scope.
+5. **Remaining** — see [Future work](#future-work).

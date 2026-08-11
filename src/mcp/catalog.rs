@@ -174,7 +174,7 @@ impl Catalog {
             }
         }
 
-        let resolution = crate::mcp::resolve::resolve(&self.sym, &self.cwd);
+        let resolution = crate::mcp::resolve::resolve(&self.sym, &self.cwd).await;
         let previous = self.state();
         let next = Arc::new(CatalogState::new(resolution, &previous.entries));
 

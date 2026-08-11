@@ -9,6 +9,7 @@
 //! processes begin on first use.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::plugins::{McpTransport, StdioCommand};
@@ -17,7 +18,6 @@ use crate::config::Symposium;
 use crate::mcp::client::SpawnSpec;
 use crate::mcp::server::{EXECUTE, LIST_TOOLS};
 use crate::plugins::McpServerOverrides;
-use crate::pm::PackageManager;
 
 /// Where a server's executable comes from.
 ///
@@ -138,28 +138,38 @@ pub struct Rejection {
 }
 
 /// Resolve the servers applicable to the workspace containing `cwd`.
-pub fn resolve(sym: &Symposium, cwd: &Path) -> Resolution {
-    let mut deps = sym.workspace_deps(cwd);
-    let Some(loaded) = deps.load() else {
+pub async fn resolve(sym: &Symposium, cwd: &Path) -> Resolution {
+    let deps = sym.workspace_deps(cwd);
+    if deps.load().is_none() {
         // Outside a Rust workspace there is nothing to condition on.
         return Resolution::default();
-    };
-    let loaded = loaded.clone();
-    resolve_loaded(sym, &loaded)
+    }
+    resolve_with_deps(sym, &deps).await
 }
 
-/// Resolve against a workspace already loaded by the caller.
-pub fn resolve_loaded(
+/// Resolve against a workspace resolver the caller already holds, so the hook
+/// pipeline shares its one `cargo metadata` result with this pass.
+pub async fn resolve_with_deps(
     sym: &Symposium,
-    loaded: &symposium_sdk::workspace::LoadedWorkspace,
+    deps: &Arc<crate::pm::WorkspaceDeps>,
 ) -> Resolution {
-    let registry = crate::plugins::load_registry_with_workspace(sym, Some(loaded));
+    let Some(loaded) = deps.load().cloned() else {
+        return Resolution::default();
+    };
+    let registry = crate::plugins::load_registry_with_workspace(sym, Some(&loaded)).await;
 
-    let dep_ids = crate::pm::CargoPm.list_deps(&loaded.crates);
-    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids);
+    let dep_ids = crate::pm::workspace_dep_ids(sym, deps).await;
+    let used_names = sym.config.plugins.used_names_in(&loaded.root);
+    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used_names(&used_names);
+
+    // The same active set every other facet resolves over, so a crate-sourced
+    // plugin's servers are reachable exactly like a registry plugin's.
+    let pms = sym.package_managers(deps);
+    let active =
+        crate::plugins::active_plugins(sym, &registry, &pms, Some(&loaded.root), &mut ctx).await;
 
     let mut entries: Vec<Candidate> = Vec::new();
-    for plugin in &registry.plugins {
+    for plugin in &active {
         if !plugin.applies(&mut ctx) {
             continue;
         }
@@ -384,6 +394,7 @@ mod tests {
             subcommands: Default::default(),
             custom_predicates: Vec::new(),
             chained: Vec::new(),
+            requires_use: false,
         }
     }
 

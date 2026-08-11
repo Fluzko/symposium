@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::config::Symposium;
-use crate::pm::{CargoPm, PackageManager as _};
+use crate::pm::CargoPm;
 
 /// Result of dispatching a command.
 pub enum DispatchResult {
@@ -20,10 +20,13 @@ pub async fn dispatch_crate(
     cwd: &Path,
 ) -> DispatchResult {
     tracing::debug!(%name, ?version, "crate-info dispatched");
-    let mut deps = sym.workspace_deps(cwd);
-    let workspace = deps.crates();
+    let deps = sym.workspace_deps(cwd);
     let id = CargoPm::id_for(name, version);
-    match CargoPm.fetch(&id, workspace).await {
+    match sym
+        .package_managers(&deps)
+        .fetch(&id, symposium_install::UpdateLevel::None)
+        .await
+    {
         Ok(result) => {
             let output = format!(
                 "Crate: {}\nVersion: {}\nSource: {}\n",

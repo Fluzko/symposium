@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::Level;
 
 // ---------------------------------------------------------------------------
@@ -96,6 +97,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "McpConfig::is_default")]
     pub mcp: McpConfig,
 
+    /// Which discovered plugins the user has consented to.
+    #[serde(default, skip_serializing_if = "PluginsConfig::is_default")]
+    pub plugins: PluginsConfig,
+
     /// Agents configured for this user.
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentEntry>,
@@ -103,13 +108,130 @@ pub struct Config {
     #[serde(default)]
     pub logging: LoggingConfig,
 
-    /// Default plugin sources that are always included unless disabled.
+    /// Default registries that are always included unless disabled.
     #[serde(default)]
     pub defaults: DefaultsConfig,
 
-    /// User-defined plugin sources (git repos or local paths).
-    #[serde(default, rename = "plugin-source")]
-    pub plugin_source: Vec<PluginSourceConfig>,
+    /// User-defined registries (git repos or local paths).
+    /// `plugin-source` is the retired spelling, still accepted.
+    #[serde(default, rename = "registry", alias = "plugin-source")]
+    pub registries: Vec<RegistryConfig>,
+}
+
+/// The `[plugins]` section: enablement, the consent axis.
+///
+/// Activation predicates answer *when* a plugin applies; enablement answers
+/// *whether it may run at all*. The workspace and the configured registries
+/// are trust roots — what they define needs no per-plugin consent. A
+/// dependency is deliberately not a trust root: depending on a crate means
+/// compiling its code, not letting its author inject agent context. So a
+/// plugin embedded in a dependency runs only once the user consents, either
+/// ahead of time (`auto-enable`) or by name (`use`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginsConfig {
+    /// Dependency names whose embedded plugins load without being asked
+    /// about; `"*"` pre-consents to every dependency. Matched
+    /// hyphen/underscore-insensitively, like crate names.
+    #[serde(default, rename = "auto-enable", skip_serializing_if = "Vec::is_empty")]
+    pub auto_enable: Vec<String>,
+
+    /// Plugins enabled deliberately, the durable record `cargo agents use`
+    /// writes. Unlike `auto-enable` (consent for what a dependency already
+    /// carries), a used plugin is enabled whether or not any dependency
+    /// references it — it is also what wakes a dormant registry plugin.
+    #[serde(default, rename = "use", skip_serializing_if = "Vec::is_empty")]
+    pub used: Vec<UseEntry>,
+
+    /// Plugin names pruned from enablement, and the record of declined
+    /// discoveries (so they are not offered again).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disable: Vec<String>,
+}
+
+impl PluginsConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Names enabled by `use` entries that apply while working in
+    /// `workspace_root`.
+    pub fn used_names_in(&self, workspace_root: &Path) -> Vec<&str> {
+        self.used
+            .iter()
+            .filter(|entry| entry.applies_in(workspace_root))
+            .map(UseEntry::name)
+            .collect()
+    }
+
+    /// Does `name` appear in `auto-enable` (directly or via `"*"`)?
+    pub fn is_auto_enabled(&self, name: &str) -> bool {
+        self.auto_enable
+            .iter()
+            .any(|entry| name_matches(entry, name))
+    }
+
+    /// Does `name` appear in `disable`?
+    pub fn is_disabled(&self, name: &str) -> bool {
+        self.disable.iter().any(|entry| name_matches(entry, name))
+    }
+
+    /// Is `name` enabled by a `use` entry applicable in `workspace_root`?
+    pub fn is_used_in(&self, name: &str, workspace_root: &Path) -> bool {
+        self.used_names_in(workspace_root)
+            .iter()
+            .any(|entry| name_matches(entry, name))
+    }
+
+    /// Whether any enablement entry could pull in a crate plugin. With neither
+    /// `auto-enable` nor `use` naming anything,
+    /// [`enabled_dependencies`](crate::discovery::enabled_dependencies) is empty
+    /// regardless of the dependency graph — so a caller can skip resolving the
+    /// workspace crates on that basis.
+    pub fn has_enablement_entries(&self) -> bool {
+        !self.auto_enable.is_empty() || !self.used.is_empty()
+    }
+}
+
+/// Does a configured entry name `name`? `"*"` matches everything; otherwise
+/// the comparison is hyphen/underscore-insensitive, since these entries are
+/// user-typed package names.
+fn name_matches(entry: &str, name: &str) -> bool {
+    entry == "*"
+        || crate::crate_sources::normalize_crate_name(entry)
+            == crate::crate_sources::normalize_crate_name(name)
+}
+
+/// One `[plugins] use` entry: a plugin name enabled deliberately, scoped
+/// either to a single workspace or to every workspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum UseEntry {
+    /// `use = ["name"]` — enabled in every workspace.
+    Global(String),
+    /// `use = [{ name = "...", workspace = "/path" }]` — enabled while
+    /// working in the named workspace root.
+    Workspace { name: String, workspace: PathBuf },
+}
+
+impl UseEntry {
+    pub fn name(&self) -> &str {
+        match self {
+            UseEntry::Global(name) => name,
+            UseEntry::Workspace { name, .. } => name,
+        }
+    }
+
+    /// Does this entry apply while working in `workspace_root`?
+    pub fn applies_in(&self, workspace_root: &Path) -> bool {
+        match self {
+            UseEntry::Global(_) => true,
+            UseEntry::Workspace { workspace, .. } => {
+                let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                canon(workspace) == canon(workspace_root)
+            }
+        }
+    }
 }
 
 /// An `[[agent]]` entry — just identifies an agent by name.
@@ -277,10 +399,11 @@ impl Default for Config {
             auto_update: AutoUpdate::default(),
             telemetry: TelemetryConfig::default(),
             mcp: McpConfig::default(),
+            plugins: PluginsConfig::default(),
             agents: Vec::new(),
             logging: LoggingConfig::default(),
             defaults: DefaultsConfig::default(),
-            plugin_source: Vec::new(),
+            registries: Vec::new(),
         }
     }
 }
@@ -302,14 +425,16 @@ struct RawConfig {
     telemetry: TelemetryConfig,
     #[serde(default)]
     mcp: McpConfig,
+    #[serde(default)]
+    plugins: PluginsConfig,
     #[serde(default, rename = "agent")]
     agents: Vec<AgentEntry>,
     #[serde(default)]
     logging: LoggingConfig,
     #[serde(default)]
     defaults: DefaultsConfig,
-    #[serde(default, rename = "plugin-source")]
-    plugin_source: Vec<PluginSourceConfig>,
+    #[serde(default, rename = "registry", alias = "plugin-source")]
+    registries: Vec<RegistryConfig>,
 }
 
 impl Default for RawConfig {
@@ -329,10 +454,11 @@ impl RawConfig {
             auto_update: self.auto_update,
             telemetry: self.telemetry,
             mcp: self.mcp,
+            plugins: self.plugins,
             agents: self.agents,
             logging: self.logging,
             defaults: self.defaults,
-            plugin_source: self.plugin_source,
+            registries: self.registries,
         })
     }
 }
@@ -347,15 +473,16 @@ impl From<Config> for RawConfig {
             auto_update: config.auto_update,
             telemetry: config.telemetry,
             mcp: config.mcp,
+            plugins: config.plugins,
             agents: config.agents,
             logging: config.logging,
             defaults: config.defaults,
-            plugin_source: config.plugin_source,
+            registries: config.registries,
         }
     }
 }
 
-/// Controls which built-in plugin sources are enabled.
+/// Controls which built-in registries are enabled.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DefaultsConfig {
     /// Include the `symposium-dev/recommendations` git source (default: true).
@@ -376,11 +503,13 @@ impl Default for DefaultsConfig {
     }
 }
 
-/// A configured plugin source — either a git repository or a local path.
+/// A configured registry — a git repository or a local path offering plugins.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
-pub struct PluginSourceConfig {
-    /// Display name for this source.
+pub struct RegistryConfig {
+    /// Display name for this registry. Plugins loaded from it are attributed
+    /// to this name, which is also the `pm` component of the ids its package
+    /// manager mints.
     pub name: String,
 
     /// GitHub URL (fetched as tarball, cached locally).
@@ -400,15 +529,8 @@ pub struct PluginSourceConfig {
 // Merged configuration view
 // ---------------------------------------------------------------------------
 
-/// A plugin source together with its base directory for resolving relative paths.
-#[derive(Debug, Clone)]
-pub struct ResolvedPluginSource {
-    pub source: PluginSourceConfig,
-    /// Directory to resolve relative `path` values against.
-    /// For user sources this is the user config dir; for project sources
-    /// this is the project root.
-    pub base_dir: PathBuf,
-}
+/// Cache subdirectory holding git registries' unpacked content.
+pub const REGISTRY_CACHE_SUBDIR: &str = "plugin-sources";
 
 const BUILTIN_RECOMMENDATIONS_URL: &str = "https://github.com/symposium-dev/recommendations";
 
@@ -418,7 +540,7 @@ const BUILTIN_RECOMMENDATIONS_URL: &str = "https://github.com/symposium-dev/reco
 #[derive(Clone)]
 pub struct Symposium {
     pub config: Config,
-    dirs: symposium_sdk::dirs::SymposiumDirs,
+    dirs: crate::dirs::SymposiumDirs,
     home_dir: PathBuf,
 }
 
@@ -431,7 +553,7 @@ impl Symposium {
     /// 3. `~/.symposium`
     pub fn from_environment() -> Self {
         let home_dir = dirs::home_dir().expect("could not determine home directory");
-        let dirs = symposium_sdk::dirs::SymposiumDirs::from_environment();
+        let dirs = crate::dirs::SymposiumDirs::from_environment();
         let _ = fs::create_dir_all(&dirs.config_dir);
         let _ = fs::create_dir_all(&dirs.cache_dir);
 
@@ -463,7 +585,7 @@ impl Symposium {
         // global hook registration writes into the tempdir.
         let home_dir = root.to_path_buf();
 
-        let dirs = symposium_sdk::dirs::SymposiumDirs::new(config_dir, cache_dir, None);
+        let dirs = crate::dirs::SymposiumDirs::new(config_dir, cache_dir, None);
 
         Self {
             config,
@@ -473,7 +595,7 @@ impl Symposium {
     }
 
     /// The resolved directory paths.
-    pub fn dirs(&self) -> &symposium_sdk::dirs::SymposiumDirs {
+    pub fn dirs(&self) -> &crate::dirs::SymposiumDirs {
         &self.dirs
     }
 
@@ -482,9 +604,10 @@ impl Symposium {
         self.dirs.cargo_override.as_deref()
     }
 
-    /// Create a `WorkspaceDeps` with disk caching enabled.
-    pub fn workspace_deps(&self, cwd: &Path) -> symposium_sdk::workspace::WorkspaceDeps {
-        self.dirs.workspace_deps(cwd)
+    /// Create a `WorkspaceDeps` with disk caching enabled, shareable as an
+    /// [`Arc`] (a [`CargoPm`](crate::pm::CargoPm) holds one).
+    pub fn workspace_deps(&self, cwd: &Path) -> Arc<crate::pm::WorkspaceDeps> {
+        Arc::new(self.dirs.workspace_deps(cwd))
     }
 
     /// Build a `Command` for the cargo binary.
@@ -504,6 +627,34 @@ impl Symposium {
             Some(path) => ctx.with_cargo_bin(path.clone()),
             None => ctx,
         }
+    }
+
+    /// The active package-manager set: the fixed ecosystem transports plus one
+    /// [`PathPm`](crate::pm::PathPm) per configured registry
+    /// ([`registries`](Self::registries)) over its content directory —
+    /// including git registries, whose repository is unpacked into the cache
+    /// before it is read. Each instance is named for its registry, since that
+    /// name is what its plugins are attributed to.
+    pub fn package_managers(
+        &self,
+        workspace: &Arc<crate::pm::WorkspaceDeps>,
+    ) -> crate::pm::PmRegistry {
+        // The cargo transport first — over dependencies, so not a trust root.
+        let mut instances = vec![crate::pm::PmInstance {
+            name: crate::pm::CARGO_PM.to_string(),
+            trusted: false,
+            pm: Box::new(crate::pm::CargoPm::new(Arc::clone(workspace))),
+        }];
+        // One registry instance per configured registry — trust roots.
+        instances.extend(self.registry_instances());
+        crate::pm::PmRegistry::new(instances)
+    }
+
+    /// The package managers for a workspace-independent operation (registry
+    /// listing, crates.io search): the cargo transport is built over a detached
+    /// resolver that never runs `cargo metadata`.
+    pub fn detached_managers(&self) -> crate::pm::PmRegistry {
+        self.package_managers(&Arc::new(crate::pm::WorkspaceDeps::detached()))
     }
 
     /// Override the cargo binary path (test-only).
@@ -576,42 +727,76 @@ impl Symposium {
         &self.home_dir
     }
 
-    /// Returns the effective list of plugin sources, including built-in defaults.
-    pub fn plugin_sources(&self) -> Vec<ResolvedPluginSource> {
-        let mut sources = Vec::new();
+    /// The registry package-manager instances, in effect order: the builtin
+    /// recommendations repo, the builtin `user-plugins` directory, then the
+    /// configured `[[registry]]` entries. Each is a trust root — a git entry is
+    /// a [`GitPm`](crate::pm::GitPm), a path entry a [`PathPm`](crate::pm::PathPm)
+    /// — so refreshing (pulling git content) is the PM's own concern rather than
+    /// a separate step. A registry whose source can't be resolved (a malformed
+    /// git URL, or an entry naming neither `git` nor `path`) is skipped with a
+    /// warning.
+    pub fn registry_instances(&self) -> Vec<crate::pm::PmInstance> {
+        let mut configs: Vec<RegistryConfig> = Vec::new();
 
         if self.config.defaults.symposium_recommendations {
-            sources.push(ResolvedPluginSource {
-                source: PluginSourceConfig {
-                    name: "symposium-recommendations".to_string(),
-                    git: Some(BUILTIN_RECOMMENDATIONS_URL.to_string()),
-                    path: None,
-                    auto_update: true,
-                },
-                base_dir: self.dirs.config_dir.clone(),
+            configs.push(RegistryConfig {
+                name: "symposium-recommendations".to_string(),
+                git: Some(BUILTIN_RECOMMENDATIONS_URL.to_string()),
+                path: None,
+                auto_update: true,
             });
         }
 
         if self.config.defaults.user_plugins {
-            sources.push(ResolvedPluginSource {
-                source: PluginSourceConfig {
-                    name: "user-plugins".to_string(),
-                    git: None,
-                    path: Some("plugins".to_string()),
-                    auto_update: true,
-                },
-                base_dir: self.dirs.config_dir.clone(),
+            configs.push(RegistryConfig {
+                name: "user-plugins".to_string(),
+                git: None,
+                path: Some("plugins".to_string()),
+                auto_update: true,
             });
         }
 
-        for s in &self.config.plugin_source {
-            sources.push(ResolvedPluginSource {
-                source: s.clone(),
-                base_dir: self.dirs.config_dir.clone(),
-            });
-        }
+        configs.extend(self.config.registries.iter().cloned());
+        configs
+            .into_iter()
+            .filter_map(|cfg| self.registry_instance(cfg))
+            .collect()
+    }
 
-        sources
+    /// Build the registry instance for one config entry. Relative `path` values
+    /// resolve against the config dir.
+    fn registry_instance(&self, cfg: RegistryConfig) -> Option<crate::pm::PmInstance> {
+        let name = cfg.name.clone();
+        let pm: Box<dyn crate::pm::PackageManager + Send + Sync> = if let Some(url) = &cfg.git {
+            match crate::pm::GitPm::new(
+                name.clone(),
+                url.clone(),
+                cfg.auto_update,
+                self.install_context(),
+            ) {
+                Some(git) => Box::new(git),
+                None => {
+                    tracing::warn!(registry = %name, url = %url, "bad registry URL");
+                    return None;
+                }
+            }
+        } else if let Some(path) = &cfg.path {
+            let p = PathBuf::from(path);
+            let dir = if p.is_absolute() {
+                p
+            } else {
+                self.dirs.config_dir.join(p)
+            };
+            Box::new(crate::pm::PathPm::new(name.clone(), dir))
+        } else {
+            tracing::warn!(registry = %name, "registry names neither git nor path");
+            return None;
+        };
+        Some(crate::pm::PmInstance {
+            name,
+            trusted: true,
+            pm,
+        })
     }
 
     /// Write the user config to disk.
@@ -718,7 +903,7 @@ mod tests {
         let config = parse_config("");
         assert!(config.defaults.symposium_recommendations);
         assert!(config.defaults.user_plugins);
-        assert!(config.plugin_source.is_empty());
+        assert!(config.registries.is_empty());
     }
 
     #[test]
@@ -742,58 +927,70 @@ mod tests {
     }
 
     #[test]
-    fn parse_plugin_source_git() {
+    fn parse_registry_git() {
         let config = parse_config(indoc! {r#"
-            [[plugin-source]]
+            [[registry]]
             name = "my-org"
             git = "https://github.com/my-org/plugins"
             auto-update = false
         "#});
-        assert_eq!(config.plugin_source.len(), 1);
-        assert_eq!(config.plugin_source[0].name, "my-org");
+        assert_eq!(config.registries.len(), 1);
+        assert_eq!(config.registries[0].name, "my-org");
         assert_eq!(
-            config.plugin_source[0].git.as_deref(),
+            config.registries[0].git.as_deref(),
             Some("https://github.com/my-org/plugins")
         );
-        assert!(!config.plugin_source[0].auto_update);
+        assert!(!config.registries[0].auto_update);
+    }
+
+    /// `[[plugin-source]]` is the retired spelling of `[[registry]]`.
+    #[test]
+    fn parse_retired_plugin_source_spelling() {
+        let config = parse_config(indoc! {r#"
+            [[plugin-source]]
+            name = "my-org"
+            git = "https://github.com/my-org/plugins"
+        "#});
+        assert_eq!(config.registries.len(), 1);
+        assert_eq!(config.registries[0].name, "my-org");
     }
 
     #[test]
-    fn parse_plugin_source_path() {
+    fn parse_registry_path() {
         let config = parse_config(indoc! {r#"
-            [[plugin-source]]
+            [[registry]]
             name = "local"
             path = "my-plugins"
         "#});
-        assert_eq!(config.plugin_source.len(), 1);
-        assert_eq!(config.plugin_source[0].path.as_deref(), Some("my-plugins"));
-        assert!(config.plugin_source[0].auto_update); // default true
+        assert_eq!(config.registries.len(), 1);
+        assert_eq!(config.registries[0].path.as_deref(), Some("my-plugins"));
+        assert!(config.registries[0].auto_update); // default true
     }
 
     #[test]
-    fn parse_multiple_plugin_sources() {
+    fn parse_multiple_registries() {
         let config = parse_config(indoc! {r#"
             [defaults]
             symposium-recommendations = false
 
-            [[plugin-source]]
+            [[registry]]
             name = "org-a"
             git = "https://github.com/a/plugins"
 
-            [[plugin-source]]
+            [[registry]]
             name = "org-b"
             git = "https://github.com/b/plugins"
             auto-update = false
 
-            [[plugin-source]]
+            [[registry]]
             name = "local"
             path = "extras"
         "#});
         assert!(!config.defaults.symposium_recommendations);
-        assert_eq!(config.plugin_source.len(), 3);
-        assert_eq!(config.plugin_source[0].name, "org-a");
-        assert_eq!(config.plugin_source[1].name, "org-b");
-        assert_eq!(config.plugin_source[2].name, "local");
+        assert_eq!(config.registries.len(), 3);
+        assert_eq!(config.registries[0].name, "org-a");
+        assert_eq!(config.registries[1].name, "org-b");
+        assert_eq!(config.registries[2].name, "local");
     }
 
     #[test]
@@ -996,6 +1193,69 @@ mod tests {
             agents-syncing = false
         "});
         assert!(!config.agents_syncing);
+    }
+
+    #[test]
+    fn parse_plugins_defaults_are_empty() {
+        let config = parse_config("");
+        assert!(config.plugins.auto_enable.is_empty());
+        assert!(config.plugins.used.is_empty());
+        assert!(config.plugins.disable.is_empty());
+
+        // An all-default section is not written back out.
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            !serialized.contains("[plugins]"),
+            "default enablement config should not be written: {serialized}"
+        );
+    }
+
+    #[test]
+    fn parse_plugins_enablement() {
+        let config = parse_config(indoc! {r#"
+            [plugins]
+            auto-enable = ["widget-lib"]
+            disable = ["noisy-crate"]
+            use = ["everywhere", { name = "scoped", workspace = "/ws/a" }]
+        "#});
+
+        assert!(config.plugins.is_auto_enabled("widget_lib"));
+        assert!(!config.plugins.is_auto_enabled("other"));
+        assert!(config.plugins.is_disabled("noisy-crate"));
+
+        assert_eq!(
+            config.plugins.used,
+            vec![
+                UseEntry::Global("everywhere".into()),
+                UseEntry::Workspace {
+                    name: "scoped".into(),
+                    workspace: PathBuf::from("/ws/a"),
+                },
+            ]
+        );
+        assert_eq!(
+            config.plugins.used_names_in(Path::new("/ws/a")),
+            vec!["everywhere", "scoped"]
+        );
+        assert_eq!(
+            config.plugins.used_names_in(Path::new("/ws/other")),
+            vec!["everywhere"]
+        );
+        assert!(config.plugins.is_used_in("scoped", Path::new("/ws/a")));
+        assert!(!config.plugins.is_used_in("scoped", Path::new("/ws/other")));
+
+        // Entries survive a round trip through the config file.
+        let reparsed = parse_config(&toml::to_string_pretty(&config).unwrap());
+        assert_eq!(reparsed.plugins, config.plugins);
+    }
+
+    #[test]
+    fn auto_enable_wildcard_matches_every_name() {
+        let config = parse_config(indoc! {r#"
+            [plugins]
+            auto-enable = ["*"]
+        "#});
+        assert!(config.plugins.is_auto_enabled("anything"));
     }
 
     #[test]

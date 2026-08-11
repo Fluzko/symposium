@@ -42,7 +42,7 @@ async fn main() -> ExitCode {
     // `--help` / `-h` / `help` / no subcommand -> audience-grouped top-level help (or clap's
     // per-command help for `<built-in> --help`).
     // Plugin `<name> --help` returns `None` here and is forwarded to the child by dispatch below.
-    if let Some(text) = help_render::help_text(parse.as_ref(), &args_str, &sym, &cwd) {
+    if let Some(text) = help_render::help_text(parse.as_ref(), &args_str, &sym, &cwd).await {
         print!("{text}");
         return ExitCode::SUCCESS;
     }
@@ -85,6 +85,13 @@ async fn main() -> ExitCode {
     match &cli.command {
         Some(Commands::Init { .. }) => tracing::info!("cargo agents init"),
         Some(Commands::Sync) => tracing::info!("cargo agents sync"),
+        Some(Commands::Search { query }) => tracing::info!(%query, "cargo agents search"),
+        Some(Commands::Use {
+            name,
+            global,
+            remove,
+        }) => tracing::info!(%name, global, remove, "cargo agents use"),
+        Some(Commands::Status) => tracing::info!("cargo agents status"),
         Some(Commands::Plugin { command }) => {
             tracing::info!(subcommand = ?command, "cargo agents plugin");
         }
@@ -131,7 +138,7 @@ async fn main() -> ExitCode {
     // Skipped for `mcp-serve`: a client may spawn a throwaway copy to probe
     // the server before the real session, so startup must not fetch or write.
     if !is_mcp_serve {
-        plugins::ensure_plugin_sources(&sym, source_update).await;
+        plugins::ensure_registries(&sym, source_update).await;
     }
 
     // Auto-update = "on": check for updates and re-exec if a new binary was
@@ -156,7 +163,7 @@ async fn main() -> ExitCode {
         Some(Commands::Hook { agent, event }) => hook::run(&sym, agent, event).await,
 
         Some(Commands::McpServe) => {
-            let resolution = symposium::mcp::resolve::resolve(&sym, &cwd);
+            let resolution = symposium::mcp::resolve::resolve(&sym, &cwd).await;
             for rejection in &resolution.rejected {
                 tracing::warn!(
                     server = %rejection.server,
@@ -241,7 +248,7 @@ async fn main() -> ExitCode {
 async fn handle_plugin_command(sym: &config::Symposium, command: PluginCommand) -> ExitCode {
     match command {
         PluginCommand::Sync { provider } => {
-            match plugins::sync_plugin_source(sym, provider.as_deref()).await {
+            match plugins::sync_registries(sym, provider.as_deref()).await {
                 Ok(synced) => {
                     if synced.is_empty() {
                         if let Some(ref p) = provider {
@@ -263,7 +270,7 @@ async fn handle_plugin_command(sym: &config::Symposium, command: PluginCommand) 
             }
         }
         PluginCommand::List => {
-            let providers = plugins::list_plugins(sym);
+            let providers = plugins::list_plugins(sym).await;
             for provider in &providers {
                 tracing::info!(
                     report = %report::ReportEvent::ProviderListed {
@@ -342,8 +349,9 @@ async fn handle_plugin_command(sym: &config::Symposium, command: PluginCommand) 
             } else {
                 let parent = path.parent().unwrap_or(&path);
                 match plugins::load_plugin(&path, "", parent) {
-                    Ok(p) => {
-                        println!("{}", tokio::fs::read_to_string(p.path).await.unwrap());
+                    Ok(_) => {
+                        // `path` is the manifest file being validated.
+                        println!("{}", tokio::fs::read_to_string(&path).await.unwrap());
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
@@ -353,12 +361,22 @@ async fn handle_plugin_command(sym: &config::Symposium, command: PluginCommand) 
                 }
             }
         }
-        PluginCommand::Show { plugin } => match plugins::find_plugin(sym, &plugin) {
+        PluginCommand::Show { plugin } => match plugins::find_plugin(sym, &plugin).await {
+            // A plugin is identified by its id; render its effective (resolved)
+            // configuration rather than re-reading a manifest file.
             Some(p) => {
-                println!("# Source: {}", p.path.display());
-                println!();
-                print!("{}", tokio::fs::read_to_string(p.path).await.unwrap());
-                ExitCode::SUCCESS
+                println!("# {}", p.canonical);
+                match toml::to_string_pretty(&p.plugin) {
+                    Ok(rendered) => {
+                        println!();
+                        print!("{rendered}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("cannot render `{}`: {e}", p.canonical);
+                        ExitCode::FAILURE
+                    }
+                }
             }
             None => {
                 eprintln!("Plugin not found: {plugin}");
@@ -374,7 +392,7 @@ fn emit_validation_results(r: &plugins::ValidationResult) -> usize {
         Ok(()) => {
             tracing::info!(
                 report = %report::ReportEvent::Validated {
-                    path: r.path.display().to_string(),
+                    path: r.id.clone(),
                     item_kind: r.kind.to_string(),
                     valid: true,
                     error: None,
@@ -385,7 +403,7 @@ fn emit_validation_results(r: &plugins::ValidationResult) -> usize {
         Err(e) => {
             tracing::info!(
                 report = %report::ReportEvent::Validated {
-                    path: r.path.display().to_string(),
+                    path: r.id.clone(),
                     item_kind: r.kind.to_string(),
                     valid: false,
                     error: Some(e.to_string()),

@@ -369,6 +369,10 @@ The design shows `declare namespace sqlx { function query(...) }`. Shipped decla
 
 A TypeScript namespace cannot declare a member whose name is not a valid identifier, and hyphenated tool names are ordinary. An object type accepts quoted keys, so a hyphenated tool can be both declared and called. Each such tool is bound under both spellings.
 
+Declared names are the server's own, not camelCased into TypeScript style. Nothing in the captured corpus is camelCase (58 tools snake_case, 12 kebab-case), and snake_case is already a valid identifier, so camelCasing would rename the primary spelling of most tools and force the wire name to be carried as a second declared method just to stay visible — roughly doubling the listing for them, in a design whose point is context economy. It would also hide the name the server itself reports errors by.
+
+What that would have bought is had for nothing instead: a model trained on TypeScript may reach for `createEntities` when shown `create_entities`, so **lookup is tolerant of case and punctuation** while the declaration is untouched. `create_entities`, `createEntities` and `create-entities` all reach the same tool. A declared spelling always matches exactly first, so a server exposing two tools that differ only in punctuation keeps them distinct, and an ambiguous fallback is refused by name rather than guessed. Only tools in the visible set resolve, so a filtered tool cannot be summoned under another spelling.
+
 ### Results are unwrapped, and a declared output schema becomes the return type
 
 The design's own example calls `.rows.map(...)` on a tool result, which only works if the host unwraps MCP's result envelope, but the design never says it does, while declaring return types `any`.

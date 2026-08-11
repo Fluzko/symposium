@@ -774,6 +774,9 @@ fn workspace_with_typed_server() -> Workspace {
              "outputSchema": {"type": "object",
                 "properties": {"count": {"type": "number"}}, "required": ["count"]},
              "behavior": {"kind": "echo"}},
+            {"name": "count_items", "description": "A snake_case tool name",
+             "inputSchema": {"type": "object", "properties": {"bin": {"type": "string"}}},
+             "behavior": {"kind": "echo"}},
             {"name": "untyped", "description": "Declares no output shape",
              "inputSchema": {"type": "object", "properties": {"a": {"type": "string"}}},
              "behavior": {"kind": "echo"}},
@@ -949,5 +952,70 @@ async fn an_untyped_tool_is_not_checked() {
 
     assert_ne!(result.is_error, Some(true), "got: {text}");
     assert!(text.contains(r#""a":"anything""#), "got: {text}");
+    let _ = client.cancel().await;
+}
+
+/// Tool names come from third-party servers and none in the wild are camelCase,
+/// so a model reaching for one out of TypeScript habit must still land the call.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_camel_case_spelling_reaches_a_snake_case_tool() {
+    let workspace = workspace_with_typed_server();
+    let client = connect_in(&workspace).await;
+
+    let result = execute(&client, r#"return await typed.countItems({ bin: "A1" });"#).await;
+    let text = text_of(&result);
+
+    assert_ne!(result.is_error, Some(true), "got: {text}");
+    assert!(text.contains(r#""bin":"A1""#), "got: {text}");
+    let _ = client.cancel().await;
+}
+
+/// The declared spelling is what the model is shown, and it keeps working.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_declared_spelling_still_reaches_its_tool() {
+    let workspace = workspace_with_typed_server();
+    let client = connect_in(&workspace).await;
+
+    let result = execute(&client, r#"return await typed.count_items({ bin: "A1" });"#).await;
+    let text = text_of(&result);
+
+    assert_ne!(result.is_error, Some(true), "got: {text}");
+    assert!(text.contains(r#""bin":"A1""#), "got: {text}");
+    let _ = client.cancel().await;
+}
+
+/// Tolerant lookup must not invent tools: an unknown name still fails, with the
+/// existing did-you-mean rather than a silent wrong call.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_tool_name_still_fails() {
+    let workspace = workspace_with_typed_server();
+    let client = connect_in(&workspace).await;
+
+    let result = execute(&client, r#"return await typed.deleteEverything();"#).await;
+    let text = text_of(&result);
+
+    assert_eq!(result.is_error, Some(true), "got: {text}");
+    let _ = client.cancel().await;
+}
+
+/// Only declared names appear; a tolerated spelling is not advertised.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_alternate_spelling_is_not_declared() {
+    let workspace = workspace_with_typed_server();
+    let client = connect_in(&workspace).await;
+
+    let result = client
+        .call_tool(CallToolRequestParams::new("list_tools").with_arguments(
+            serde_json::Map::from_iter([("servers".to_string(), serde_json::json!(["typed"]))]),
+        ))
+        .await
+        .expect("list_tools");
+    let text = text_of(&result);
+
+    assert!(text.contains("count_items("), "got: {text}");
+    assert!(
+        !text.contains("countItems"),
+        "the camelCase spelling must not be declared, got: {text}"
+    );
     let _ = client.cancel().await;
 }

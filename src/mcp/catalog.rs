@@ -20,7 +20,9 @@ use rmcp::model::Tool;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use super::declarations::{ToolBinding, ToolDecl, binding_table, render_server};
+use super::declarations::{
+    KeyMatch, ToolBinding, ToolDecl, binding_table, render_server, resolve_key,
+};
 use super::dispatch::Namespace;
 use super::resolve::{Rejection, Resolution, ResolvedServer, ServerCommand};
 use super::supervisor::{RestartPolicy, Supervisor};
@@ -386,10 +388,17 @@ impl Catalog {
 
         // The same table the declarations are rendered from.
         let table = binding_table(visible);
-        let Some(binding) = table.iter().find(|b| b.keys.iter().any(|k| k == key)) else {
-            return Err(unknown_tool(server, key, &table));
+        let wire_name = match resolve_key(&table, key) {
+            KeyMatch::One(binding) => binding.wire_name.clone(),
+            KeyMatch::Ambiguous(names) => {
+                return Err(format!(
+                    "`{server}` has more than one tool spelled like `{key}`: {}. \
+                     Use one of those names exactly.",
+                    names.join(", ")
+                ));
+            }
+            KeyMatch::None => return Err(unknown_tool(server, key, &table)),
         };
-        let wire_name = binding.wire_name.clone();
 
         // Taken before the call so the tool list, which the mutable borrow of
         // the supervisor ends, is still in hand.

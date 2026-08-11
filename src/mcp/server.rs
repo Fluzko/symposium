@@ -57,9 +57,29 @@ impl MetaServer {
         // engine's thread.
         let (calls, mut receiver) = super::dispatch::channel();
         let catalog = Arc::clone(&self.catalog);
+        // A server whose answer did not match its declared output schema is
+        // reported alongside the result. Collected here because the notice is
+        // for the model, not for the script, which receives the value either
+        // way.
+        let notices: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = Arc::clone(&notices);
         let pump = tokio::spawn(async move {
             while let Some(call) = receiver.recv().await {
-                let answer = catalog.call(&call.server, &call.tool, call.args).await;
+                let answer = match catalog.call(&call.server, &call.tool, call.args).await {
+                    Ok(outcome) => {
+                        if let Some(notice) = outcome.notice {
+                            let mut seen = collected.lock().expect("notice lock");
+                            // The same tool answering off-shape ten times is
+                            // one fact about that tool, not ten.
+                            if !seen.contains(&notice) {
+                                seen.push(notice);
+                            }
+                        }
+                        Ok(outcome.value)
+                    }
+                    Err(e) => Err(e),
+                };
                 let _ = call.reply.send(answer);
             }
         });
@@ -71,6 +91,11 @@ impl MetaServer {
         // for the channel to close means waiting on the engine thread. Once
         // the script is over, anything still queued is past its deadline.
         pump.abort();
+
+        // Schema mismatches join the pre-existing problems, so everything the
+        // model needs to interpret the result arrives with it.
+        let mut problems = problems;
+        problems.extend(notices.lock().expect("notice lock").drain(..));
 
         match outcome {
             Ok(outcome) => CallToolResult::success(vec![ContentBlock::text(render_outcome(

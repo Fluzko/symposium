@@ -17,6 +17,7 @@ pub mod sandbox;
 pub mod schema_to_ts;
 pub mod server;
 pub mod supervisor;
+pub mod validate;
 
 #[cfg(test)]
 mod corpus_tests;

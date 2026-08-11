@@ -17,6 +17,10 @@ pub struct ToolDecl<'a> {
     pub name: &'a str,
     pub description: Option<&'a str>,
     pub input_schema: Option<&'a Value>,
+    /// The tool's declared output schema, when it has one. Rendered as the
+    /// return type, and validated against the returned value at call time so
+    /// the declaration is a claim the host enforces rather than a hint.
+    pub output_schema: Option<&'a Value>,
 }
 
 /// The JavaScript keys one tool answers to, primary first.
@@ -75,6 +79,7 @@ pub fn render_server(server: &str, tools: &[ToolDecl]) -> String {
             continue;
         };
         let params = render_params(&mut types, tool.input_schema);
+        let result = render_result(&mut types, tool.output_schema);
 
         for (index, key) in binding.keys.iter().enumerate() {
             if index == 0 {
@@ -87,10 +92,7 @@ pub fn render_server(server: &str, tools: &[ToolDecl]) -> String {
                 let name = jsdoc_text(tool.name).unwrap_or_else(|| "the same tool".to_string());
                 methods.push_str(&format!("  /** Alias for {name}. */\n"));
             }
-            methods.push_str(&format!(
-                "  {}({params}): Promise<unknown>;\n",
-                render_key(key)
-            ));
+            methods.push_str(&format!("  {}({params}): {result};\n", render_key(key)));
         }
     }
 
@@ -126,6 +128,23 @@ fn render_params(types: &mut TypeRenderer, schema: Option<&Value>) -> String {
     let optional = if has_required(schema) { "" } else { "?" };
     // Indent one level: the type sits inside the server object's braces.
     format!("params{optional}: {}", types.render_indented(schema, 1))
+}
+
+/// Render a tool's return type.
+///
+/// A declared output schema becomes the return type; a tool without one stays
+/// `unknown`, which forces the model to narrow rather than assume a shape.
+///
+/// Nothing obliges a server to send what it declared, so this is intent rather
+/// than guarantee. The same schema is checked against the value at call time
+/// and a mismatch is tagged, not refused — see [`crate::mcp::validate`].
+fn render_result(types: &mut TypeRenderer, schema: Option<&Value>) -> String {
+    match schema {
+        // Same indent as the parameter type: both sit inside the server
+        // object's braces.
+        Some(schema) => format!("Promise<{}>", types.render_indented(schema, 1)),
+        None => "Promise<unknown>".to_string(),
+    }
 }
 
 fn has_properties(schema: &Value) -> bool {
@@ -191,6 +210,7 @@ mod tests {
             name,
             description: None,
             input_schema: Some(schema),
+            output_schema: None,
         }
     }
 
@@ -208,13 +228,96 @@ mod tests {
         );
     }
 
-    /// Return types are deliberately untyped: almost no server in the wild
-    /// declares an output schema, so promising a shape would be a lie.
+    /// A tool that declares no output schema stays untyped. `unknown` forces
+    /// the model to narrow rather than assume a shape nobody promised.
     #[test]
-    fn every_tool_returns_a_promise_of_unknown() {
+    fn a_tool_without_an_output_schema_returns_unknown() {
         let schema = json!({"type": "object", "properties": {"a": {"type": "string"}}});
         let out = render_server("s", &[tool("t", &schema)]);
         assert!(out.contains("): Promise<unknown>;"), "got:\n{out}");
+    }
+
+    fn typed_tool<'a>(name: &'a str, input: &'a Value, output: &'a Value) -> ToolDecl<'a> {
+        ToolDecl {
+            name,
+            description: None,
+            input_schema: Some(input),
+            output_schema: Some(output),
+        }
+    }
+
+    #[test]
+    fn a_declared_output_schema_becomes_the_return_type() {
+        let input = json!({"type": "object", "properties": {"q": {"type": "string"}}});
+        let output = json!({
+            "type": "object",
+            "properties": {"count": {"type": "integer"}},
+            "required": ["count"],
+        });
+        let out = render_server("s", &[typed_tool("search", &input, &output)]);
+        assert!(
+            out.contains("): Promise<{\n    count: number;\n  }>;"),
+            "got:\n{out}"
+        );
+        assert!(
+            !out.contains("Promise<unknown>"),
+            "a declared shape should replace `unknown`:\n{out}"
+        );
+    }
+
+    /// A named type in an output schema goes through the same hoisting as one
+    /// in a parameter schema, so it is declared once above the server object.
+    #[test]
+    fn a_named_type_in_an_output_schema_is_hoisted() {
+        let input = json!({"type": "object"});
+        let output = json!({
+            "type": "object",
+            "properties": {"hit": {"$ref": "#/definitions/Hit"}},
+            "definitions": {
+                "Hit": {
+                    "title": "Hit",
+                    "type": "object",
+                    "properties": {"score": {"type": "number"}},
+                },
+            },
+        });
+        let out = render_server("s", &[typed_tool("find", &input, &output)]);
+        let server_at = out.find("declare const s:").expect("server declared");
+        let hit_at = out.find("Hit").expect("named type rendered");
+        assert!(
+            hit_at < server_at,
+            "the named type should precede the server object:\n{out}"
+        );
+    }
+
+    /// Both spellings of a hyphenated tool are the same tool, so both carry the
+    /// same return type.
+    #[test]
+    fn an_aliased_tool_carries_its_return_type_on_both_spellings() {
+        let input = json!({"type": "object"});
+        let output = json!({"type": "object", "properties": {"ok": {"type": "boolean"}}});
+        let out = render_server("s", &[typed_tool("get-sum", &input, &output)]);
+        let typed = out.matches("Promise<{").count();
+        assert_eq!(typed, 2, "both spellings should be typed:\n{out}");
+    }
+
+    /// The renderer's never-fail rule applies to output schemas too: a
+    /// construct it does not understand degrades rather than panicking.
+    #[test]
+    fn an_unrecognized_output_construct_degrades() {
+        let input = json!({"type": "object"});
+        let output = json!({"not-a-real-keyword": ["whatever"]});
+        let out = render_server("s", &[typed_tool("t", &input, &output)]);
+        assert!(out.contains("): Promise<"), "got:\n{out}");
+    }
+
+    /// A non-object output schema is still worth declaring.
+    #[test]
+    fn a_scalar_output_schema_is_declared() {
+        let input = json!({"type": "object"});
+        let output = json!({"type": "string"});
+        let out = render_server("s", &[typed_tool("name", &input, &output)]);
+        assert!(out.contains("): Promise<string>;"), "got:\n{out}");
     }
 
     /// A tool taking nothing should not force the model to pass `{}`.
@@ -242,6 +345,7 @@ mod tests {
                 name: "t",
                 description: None,
                 input_schema: None,
+                output_schema: None,
             }],
         );
         assert!(out.contains("t(): Promise<unknown>;"), "got:\n{out}");
@@ -275,6 +379,7 @@ mod tests {
                 name: "get-sum",
                 description: Some("Adds numbers"),
                 input_schema: None,
+                output_schema: None,
             }],
         );
         assert_eq!(
@@ -410,6 +515,7 @@ mod tests {
                 name: "t",
                 description: Some("Does  a\nthing"),
                 input_schema: None,
+                output_schema: None,
             }],
         );
         assert!(out.contains("/** Does a thing */"), "got:\n{out}");

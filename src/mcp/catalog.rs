@@ -123,6 +123,18 @@ pub struct Catalog {
     resolved_at: std::sync::Mutex<Option<std::time::SystemTime>>,
 }
 
+/// What one tool call produced.
+///
+/// The notice is carried beside the value rather than folded into it: wrapping
+/// the result would change the shape the script sees, and the script is not who
+/// the notice is for.
+pub struct CallOutcome {
+    pub value: Value,
+    /// Set when the server's answer did not match the output schema it
+    /// declared, so the caller can tell the model its type did not hold.
+    pub notice: Option<String>,
+}
+
 struct Entry {
     resolved: ResolvedServer,
     /// Absent until first use. Building it may acquire an installation, which
@@ -351,7 +363,7 @@ impl Catalog {
     /// `key` is the property name the script used, which may be a sanitized
     /// alias. Resolving it needs the tool list, so this is what starts the
     /// server.
-    pub async fn call(&self, server: &str, key: &str, args: Value) -> Result<Value, String> {
+    pub async fn call(&self, server: &str, key: &str, args: Value) -> Result<CallOutcome, String> {
         let state = self.state();
         let Some(entry) = state.entries.iter().find(|e| e.resolved.name == server) else {
             return Err(format!(
@@ -379,10 +391,32 @@ impl Catalog {
         };
         let wire_name = binding.wire_name.clone();
 
-        supervisor
+        // Taken before the call so the tool list, which the mutable borrow of
+        // the supervisor ends, is still in hand.
+        let declared = tools
+            .iter()
+            .find(|t| t.name.as_ref() == wire_name)
+            .and_then(|t| t.output_schema.clone());
+
+        let value = supervisor
             .call(&wire_name, args, timeout)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+
+        // Checked after unwrapping, since that is the value a script actually
+        // receives. A mismatch is reported, never fatal: the value may still be
+        // readable, and the model is the one who can decide (see
+        // [`crate::mcp::validate`]).
+        let notice = declared.and_then(|schema| {
+            crate::mcp::validate::check_result(
+                server,
+                &wire_name,
+                &Value::Object((*schema).clone()),
+                &value,
+            )
+        });
+
+        Ok(CallOutcome { value, notice })
     }
 
     /// Close every running server.
@@ -546,21 +580,33 @@ fn render(server: &str, tools: &[&Tool], detail: Detail) -> String {
         }
         Detail::Signatures | Detail::Full => {
             // The schemas are owned so the declaration renderer, which works
-            // in plain JSON, never sees a protocol type.
-            let schemas: Vec<Option<Value>> = tools
+            // in plain JSON, never sees a protocol type. Output schemas follow
+            // the input schema's gate: signatures name a tool's shape-free
+            // form, so spelling out the return there while hiding the
+            // parameter would be inconsistent.
+            let schemas: Vec<(Option<Value>, Option<Value>)> = tools
                 .iter()
                 .map(|tool| {
-                    (detail == Detail::Full).then(|| Value::Object((*tool.input_schema).clone()))
+                    if detail != Detail::Full {
+                        return (None, None);
+                    }
+                    (
+                        Some(Value::Object((*tool.input_schema).clone())),
+                        tool.output_schema
+                            .as_ref()
+                            .map(|schema| Value::Object((**schema).clone())),
+                    )
                 })
                 .collect();
             let decls: Vec<ToolDecl> = tools
                 .iter()
                 .zip(&schemas)
-                .map(|(tool, schema)| ToolDecl {
+                .map(|(tool, (input, output))| ToolDecl {
                     name: tool.name.as_ref(),
                     description: tool.description.as_deref(),
                     // Signatures name the parameter; full spells out its shape.
-                    input_schema: schema.as_ref(),
+                    input_schema: input.as_ref(),
+                    output_schema: output.as_ref(),
                 })
                 .collect();
             render_server(server, &decls)

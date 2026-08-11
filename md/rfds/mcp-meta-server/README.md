@@ -369,14 +369,29 @@ The design shows `declare namespace sqlx { function query(...) }`. Shipped decla
 
 A TypeScript namespace cannot declare a member whose name is not a valid identifier, and hyphenated tool names are ordinary. An object type accepts quoted keys, so a hyphenated tool can be both declared and called. Each such tool is bound under both spellings.
 
-### Results are unwrapped, and return types are `unknown` rather than `any`
+### Results are unwrapped, and a declared output schema becomes the return type
 
 The design's own example calls `.rows.map(...)` on a tool result, which only works if the host unwraps MCP's result envelope, but the design never says it does, while declaring return types `any`.
 
 Both halves changed. Results are unwrapped through an explicit ladder that checks the error flag _first_ (a server can report an error _and_ structured content, and checking content first swallows the error), and one popular Python framework's extra result wrapper is unwrapped too, since it survives a proxy hop.
 
-Return types are `Promise<unknown>`. `unknown` forces a model to narrow the value rather than assume a shape; `any` invites the assumption. Typing returns from a server's declared output schema is deliberately not built.
-Adoption is roughly 3 tools in 330 surveyed, and it is bimodal rather than uniformly absent, so the seam is worth keeping and the compiler is not worth writing.
+A tool that declares an `outputSchema` gets that schema as its return type; one that does not stays `Promise<unknown>`. `unknown` forces a model to narrow the value rather than assume a shape; `any` invites the assumption.
+
+Typing the return raises a problem the design does not consider: nothing obliges a server to send what it declared. The unwrap ladder has four exits, and only the structured-content one can match an `outputSchema`. A server that answers with text lands on the text exit, and answering with text is not a defect, it is ordinary. So a declared type is a statement of intent, not a guarantee.
+
+The declared schema is therefore checked against the value at call time, and a mismatch is **tagged, never fatal**. Failing the call would discard a result the model can usually still read: `"count: 3"` is not the declared object but plainly carries the answer. Instead the value is passed through untouched, and one line rides back with it:
+
+```
+[memory.search_nodes: result off-shape, treat as unknown]
+```
+
+That is the one thing the model cannot work out for itself. Without it, it meets the breach as an `undefined` property, blames its own code, and typically spends another round trip probing the tool.
+
+The tag is deliberately not prose. A correction that costs more context than the type it corrects would defeat the purpose of the whole design, so which field was wrong is left out: the value accompanies the tag, so the model can read what it actually got, and the full failure list goes to the log where it costs nothing and is still there for whoever is debugging the server. The tag also rides the same channel as the other problems `execute` reports, so it never alters the value the script sees, and it is deduplicated: one tool answering off-shape in a loop is one fact about that tool.
+
+Two further limits: remote `$ref`s are never resolved, since fetching a URL a third-party schema names would turn a declaration into an outbound request; and a schema that cannot be compiled is not checked at all, matching the renderer's own rule that generation never fails whatever a server sends.
+
+Adoption is worth stating plainly, because an earlier draft of this section got it wrong. In the captured corpus 25 of 72 tools declare an output schema, and it is bimodal rather than rare: two of the six servers declare one on every tool, three declare none. Output schemas are also a recent protocol addition, so the share is more likely to grow than shrink.
 
 ### The type-mapping table
 

@@ -48,12 +48,26 @@ declare const everything: {
   "get-structured-content"(params: {
     /** Choose city */
     location: "New York" | "Chicago" | "Los Angeles";
-  }): Promise<unknown>;
+  }): Promise<{
+    /** Weather conditions description */
+    conditions: string;
+    /** Humidity percentage */
+    humidity: number;
+    /** Temperature in celsius */
+    temperature: number;
+  }>;
   /** Alias for get-structured-content. */
   get_structured_content(params: {
     /** Choose city */
     location: "New York" | "Chicago" | "Los Angeles";
-  }): Promise<unknown>;
+  }): Promise<{
+    /** Weather conditions description */
+    conditions: string;
+    /** Humidity percentage */
+    humidity: number;
+    /** Temperature in celsius */
+    temperature: number;
+  }>;
   /** Returns the sum of two numbers */
   "get-sum"(params: {
     /** First number */

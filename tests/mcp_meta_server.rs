@@ -152,6 +152,13 @@ fn workspace_with_backing_server() -> Workspace {
 }
 
 fn workspace_serving(mock: serde_json::Value) -> Workspace {
+    workspace_serving_as("sqlx", mock)
+}
+
+/// As [`workspace_serving`], with the manifest's server name spelled out. That
+/// name, not the one the mock reports in its handshake, is the namespace a
+/// script addresses.
+fn workspace_serving_as(server: &str, mock: serde_json::Value) -> Workspace {
     let dir = tempfile::tempdir().expect("temp dir");
     let base = dir.path().to_path_buf();
     let home = base.join("home");
@@ -171,8 +178,9 @@ fn workspace_serving(mock: serde_json::Value) -> Workspace {
         home.join("plugins/db/SYMPOSIUM.toml"),
         format!(
             "name = \"db-plugin\"\ndepends-on = [\"*\"]\n\n\
-             [[mcp_servers]]\nname = \"sqlx\"\ncommand = {:?}\n\
+             [[mcp_servers]]\nname = {:?}\ncommand = {:?}\n\
              args = [\"--config\", {:?}]\n",
+            server,
             mock_binary().display().to_string(),
             mock_config.display().to_string(),
         ),
@@ -745,4 +753,201 @@ async fn install_command_output_stays_off_stdout() {
         serde_json::from_str::<serde_json::Value>(line)
             .unwrap_or_else(|e| panic!("stdout line is not JSON ({e}): {line}"));
     }
+}
+
+// -- declared output schemas --
+
+/// A workspace whose backing server declares an output schema on some tools.
+///
+/// `echo` returns the arguments as structured content, so a script decides what
+/// the server sends back. That is what lets one mock cover both a conforming
+/// answer and a violating one.
+fn workspace_with_typed_server() -> Workspace {
+    workspace_serving_as(
+        "typed",
+        serde_json::json!({
+        "name": "typed",
+        "tools": [
+            {"name": "count", "description": "Count things",
+             "inputSchema": {"type": "object",
+                "properties": {"count": {"type": "number"}}, "required": ["count"]},
+             "outputSchema": {"type": "object",
+                "properties": {"count": {"type": "number"}}, "required": ["count"]},
+             "behavior": {"kind": "echo"}},
+            {"name": "untyped", "description": "Declares no output shape",
+             "inputSchema": {"type": "object", "properties": {"a": {"type": "string"}}},
+             "behavior": {"kind": "echo"}},
+            {"name": "unstructured", "description": "Declares a shape, answers with text",
+             "inputSchema": {"type": "object"},
+             "outputSchema": {"type": "object",
+                "properties": {"count": {"type": "number"}}, "required": ["count"]},
+             "behavior": {"kind": "text", "text": "count: 3"}}
+        ]
+        }),
+    )
+}
+
+async fn execute(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    script: &str,
+) -> rmcp::model::CallToolResult {
+    client
+        .call_tool(CallToolRequestParams::new("execute").with_arguments(
+            serde_json::Map::from_iter([("script".to_string(), serde_json::json!(script))]),
+        ))
+        .await
+        .expect("execute should answer, not fail")
+}
+
+/// The declared shape reaches the model as the tool's return type.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declared_output_schema_is_shown_as_the_return_type() {
+    let workspace = workspace_with_typed_server();
+    let client = connect_in(&workspace).await;
+
+    let result = client
+        .call_tool(CallToolRequestParams::new("list_tools").with_arguments(
+            serde_json::Map::from_iter([("servers".to_string(), serde_json::json!(["typed"]))]),
+        ))
+        .await
+        .expect("list_tools");
+    let text = text_of(&result);
+
+    assert!(
+        text.contains("count(params: {") && text.contains("): Promise<{"),
+        "the typed tool should declare its return shape, got: {text}"
+    );
+    assert!(
+        text.contains("untyped(params?: {\n    a?: string;\n  }): Promise<unknown>;"),
+        "a tool without an output schema stays unknown, got: {text}"
+    );
+    let _ = client.cancel().await;
+}
+
+/// A conforming answer passes through untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conforming_result_is_returned() {
+    let workspace = workspace_with_typed_server();
+    let client = connect_in(&workspace).await;
+
+    let result = execute(&client, r#"return await typed.count({ count: 3 });"#).await;
+    let text = text_of(&result);
+
+    assert_ne!(result.is_error, Some(true), "got: {text}");
+    assert!(text.contains(r#""count":3"#), "got: {text}");
+    let _ = client.cancel().await;
+}
+
+/// A server that declares a shape and sends another does not fail the call.
+/// The value stands and the model is told the shape did not hold, because the
+/// value is often still readable and only the model can decide.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_violating_result_is_passed_through_with_a_notice() {
+    let workspace = workspace_with_typed_server();
+    let client = connect_in(&workspace).await;
+
+    // `echo` reflects the arguments, so this makes the server answer with a
+    // string where its own schema promised a number.
+    let result = execute(&client, r#"return await typed.count({ count: "three" });"#).await;
+    let text = text_of(&result);
+
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "a schema mismatch must not fail the call, got: {text}"
+    );
+    assert!(
+        text.contains(r#""count":"three""#),
+        "the value should reach the script unchanged, got: {text}"
+    );
+    assert!(
+        text.contains("[typed.count: result off-shape, treat as unknown]"),
+        "the model should be tagged, tersely, got: {text}"
+    );
+}
+
+/// The case from the requirement: a tool declares `{ count: number }` and
+/// answers `"count: 3"` as text. Ordinary MCP, so the text is handed over for
+/// the model to read rather than refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unstructured_answer_is_handed_over_to_be_read() {
+    let workspace = workspace_with_typed_server();
+    let client = connect_in(&workspace).await;
+
+    let result = execute(&client, r#"return await typed.unstructured();"#).await;
+    let text = text_of(&result);
+
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "text where an object was declared must not fail, got: {text}"
+    );
+    assert!(
+        text.contains("count: 3"),
+        "the script should receive the text, got: {text}"
+    );
+    assert!(
+        text.contains("[typed.unstructured: result off-shape, treat as unknown]"),
+        "the model should be tagged, tersely, got: {text}"
+    );
+}
+
+/// A mismatch is not an exception, so a script that destructures the declared
+/// shape keeps running and simply finds nothing there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_violation_does_not_throw_in_the_script() {
+    let workspace = workspace_with_typed_server();
+    let client = connect_in(&workspace).await;
+
+    let script = r#"
+        const r = await typed.unstructured();
+        return { raw: r, declared: r.count ?? "absent", threw: false };
+    "#;
+    let result = execute(&client, script).await;
+    let text = text_of(&result);
+
+    assert_ne!(result.is_error, Some(true), "got: {text}");
+    assert!(text.contains(r#""threw":false"#), "got: {text}");
+    assert!(
+        text.contains(r#""declared":"absent""#),
+        "destructuring the declared shape should find nothing, got: {text}"
+    );
+    assert!(text.contains(r#""raw":"count: 3""#), "got: {text}");
+}
+
+/// One tool answering off-shape repeatedly is one fact about that tool. The
+/// notice must not be repeated per call, or a loop would crowd out the result.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repeated_violation_is_reported_once() {
+    let workspace = workspace_with_typed_server();
+    let client = connect_in(&workspace).await;
+
+    let script = r#"
+        for (let i = 0; i < 4; i++) { await typed.unstructured(); }
+        return "done";
+    "#;
+    let result = execute(&client, script).await;
+    let text = text_of(&result);
+
+    assert_ne!(result.is_error, Some(true), "got: {text}");
+    assert_eq!(
+        text.matches("result off-shape").count(),
+        1,
+        "the tag should appear once, got: {text}"
+    );
+}
+
+/// A tool that declares nothing is unaffected: no shape was promised, so
+/// nothing is enforced.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_untyped_tool_is_not_checked() {
+    let workspace = workspace_with_typed_server();
+    let client = connect_in(&workspace).await;
+
+    let result = execute(&client, r#"return await typed.untyped({ a: "anything" });"#).await;
+    let text = text_of(&result);
+
+    assert_ne!(result.is_error, Some(true), "got: {text}");
+    assert!(text.contains(r#""a":"anything""#), "got: {text}");
+    let _ = client.cancel().await;
 }

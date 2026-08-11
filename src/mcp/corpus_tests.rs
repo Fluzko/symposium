@@ -43,6 +43,7 @@ fn render_corpus(payload: &str, server: &str) -> String {
             name: tool["name"].as_str().unwrap_or_default(),
             description: tool["description"].as_str(),
             input_schema: tool.get("inputSchema"),
+            output_schema: tool.get("outputSchema"),
         })
         .collect();
 
@@ -59,7 +60,9 @@ fn every_tool_in_the_corpus_produces_a_declaration() {
         let parsed: Value = serde_json::from_str(payload).unwrap();
         let expected = parsed["tools"].as_array().unwrap().len();
         let rendered = render_corpus(payload, server);
-        let found = rendered.matches("): Promise<unknown>;").count();
+        // Return-type agnostic: a tool that declares an output schema renders
+        // `Promise<{ ... }>` rather than `Promise<unknown>`.
+        let found = rendered.matches("): Promise<").count();
         assert!(
             found >= expected,
             "{server}: expected at least {expected} declarations, found {found}"

@@ -19,5 +19,11 @@ declare const sequentialthinking: {
     thoughtNumber: number;
     /** Estimated total thoughts needed (numeric value, e.g., 5, 10) */
     totalThoughts: number;
-  }): Promise<unknown>;
+  }): Promise<{
+    branches: string[];
+    nextThoughtNeeded: boolean;
+    thoughtHistoryLength: number;
+    thoughtNumber: number;
+    totalThoughts: number;
+  }>;
 };

@@ -131,6 +131,12 @@ Contract:
 
 Find packages matching a partial query string; backs `cargo agents use` and `cargo agents search`. PMs without a searchable registry return empty.
 
+The query is a fragment of a name a person typed, never a package-id: the cargo
+PM queries crates.io with it, a registry PM substring-matches its entry names.
+Discovery does not use `search`: it works from `list_deps` and `active_plugins`
+(see [discovery](../discovery-sync/README.md#the-discovery-algorithm)), so a PM
+that implements nothing but `active_plugins` still participates fully in it.
+
 #### `fetch`
 
 ```json
@@ -177,7 +183,7 @@ The manifest on the wire is the **raw, unvalidated** schema: the same shape a `S
 | Producing a manifest (parse, synthesize, translate) | PM |
 | Schema validation, inline-installation promotion | Symposium |
 | Defaults (`skills/`, `.agents/skills/`), `[defaults]` handling | Symposium |
-| Dormancy, trust, consent | Symposium |
+| Activation roots, trust, consent | Symposium |
 | Resolving `source.path` against `root` | Symposium |
 
 This split keeps policy in one place. A PM reports which plugins exist and what
@@ -227,7 +233,9 @@ collide, and so that a name always identifies exactly one thing.
 
 This is what makes a trusted source overridable. Recommendations are enabled
 without asking, which is the point of them, but a user who does not want a
-particular one names it and turns it off.
+particular one names it and turns it off. `disable` beats every other entry,
+including a `use` naming the same plugin: see
+[precedence](../discovery-sync/README.md#precedence).
 
 ### Error handling
 

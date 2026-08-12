@@ -29,15 +29,14 @@ Adding a `Symposium.toml` lets you control behavior — add predicates, declare 
 
 ```toml
 # Symposium.toml
-[depends-on]
-cargo = { tokio = "1" }
+depends-on = ["tokio>=1"]
 
 [[hooks]]
 event = "PreToolUse"
 command = "my-linter"
 
 [[plugins]]
-source.cargo = { tokio-extras = "*" }
+source.cargo = "tokio-extras"
 ```
 
 ## Detailed plans
@@ -55,21 +54,24 @@ A plugin is a directory. That's it. The directory may contain:
 
 When a directory has no `Symposium.toml`, Symposium behaves as if an empty one exists. This empty manifest still triggers default behavior (see below).
 
-A registry entry is the exception. A manifest that references no dependency anywhere
-has nothing to infer a gate from, and treating it as "always on" would fire every
-curated plugin in every workspace. Such a plugin loads
-[dormant](../README.md#dormancy) and activates only when a `[plugins] use` entry
-names it. `depends-on = ["*"]` is the explicit always-active spelling.
+An empty manifest is enough because where the directory was found supplies the
+plugin's [activation root](../README.md#activation-roots): a workspace member is
+rooted in workspace membership, a crate in the reference that reached it. A
+registry entry is not found anywhere in particular, being offered to every
+workspace equally, so it has to name its own root, which for a curated plugin
+means naming the dependencies it advises on (`depends-on = ["*"]` claims every
+workspace as one). An entry that names none is left with `use` as its only root:
+it loads and is reported, but contributes nothing until a `[plugins] use` entry
+names it.
 
 ### `Symposium.toml` structure
 
 ```toml
 # Predicates gating activation
-predicates = ["workspace()", "file-exists(build.rs)"]
+predicates = ["workspace-member()", "path_exists(build.rs)"]
 
-# Shorthand: depends-on reuses the PM's resolve format
-[depends-on]
-cargo = { tokio = "1", serde = "1" }
+# Shorthand for the common dependency case
+depends-on = ["tokio>=1", "serde>=1"]
 
 # Suppress defaults
 [defaults]
@@ -98,10 +100,7 @@ args = ["serve"]
 
 # Chained plugins — loaded when this plugin activates
 [[plugins]]
-source.cargo = { tokio-extras = "*" }
-
-[[plugins]]
-source.git = { url = "github.com/org/helpers", branch = "main" }
+source.cargo = "tokio-extras>=1"
 
 # Installable content (binaries referenced by hooks/MCP servers)
 [[installable]]
@@ -140,28 +139,23 @@ These defaults establish the skills conventions:
 
 The plugin itself and each of its subsections can be gated with a `predicates = [...]` field. When a plugin is installed, the content is only *activated* if the predicate matches.
 
-Common predicates:
-
-* `workspace()` — true if this plugin is part of the active workspace
-* `workspace-dependency()` — true if plugin is a dependency of some project in the current workspace
-* `depends-on(pm, name, version)` — true if the workspace depends on this package
-* `env(FOO=BAR)` — true if the environment variable is set to the given value
-* `file-exists(path)` — true if the given file exists relative to workspace root
-* `shell(command)` — true if the command exits with code 0
-* `not(p)`, `any(p, ...)`, `all(p, ...)` — combinators
+The functions are listed in the parent RFD's [predicates
+section](../README.md#predicates) and specified in full in the [predicates
+reference](../../../reference/predicates.md): `depends-on(<atom>)`,
+`workspace-member()`, `env(...)`, `path_exists(...)`, `shell(...)`, and the
+combinators `not`, `any`, `all`.
 
 Explicit enablement is deliberately *not* a predicate. Enablement is a separate
 axis deciding whether a plugin may run at all, recorded in `[plugins]` and
 consulted before predicates are evaluated.
 
-The `[depends-on]` shorthand reuses the PM's `resolve` format:
+The `depends-on` shorthand covers the common dependency case:
 
 ```toml
-[depends-on]
-cargo = { tokio = "1", serde = "1" }
+depends-on = ["tokio>=1", "serde>=1"]
 ```
 
-This is equivalent to `predicates = ["depends-on(cargo, tokio, 1)", "depends-on(cargo, serde, 1)"]`.
+This is equivalent to `predicates = ["any(depends-on(tokio>=1), depends-on(serde>=1))"]`.
 
 Predicates can appear at any level (plugin, skill, hook, MCP server). A predicate on a plugin gates all its direct contents. Chained plugins have their own predicates and are evaluated independently.
 

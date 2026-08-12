@@ -3,7 +3,7 @@
 ## TL;DR
 
 - `symposium sync` resolves installed plugins, discovers new ones from workspace dependencies, prompts the user, fetches, evaluates predicates, and wires active content into agent directories.
-- Discovery calls `list-deps` on all PMs, then passes each result as a query to `search` on all PMs.
+- Every PM is asked the same two things: `list-deps`, then `active_plugins` over that dependency set. What differs is the answer's source: a trusted PM's plugins load directly, an untrusted PM's need the user's consent first.
 - A session-start hook notifies users of available extensions without auto-installing.
 
 ## Motivation
@@ -35,22 +35,30 @@ Install? [1,all,none]: 1
 
 ### The discovery algorithm
 
-The core discovery loop:
+The core loop:
 
-1. **Call `list-deps` on all PMs.** Each PM reports the workspace's dependencies in its ecosystem. For example, the cargo PM returns `[(cargo, serde, 1.0.210), (cargo, tokio, 1.38.0)]`. PMs that don't have a concept of workspace deps (git, path, recommendations) return empty.
+1. **Call `list-deps` on all PMs.** Each PM reports the workspace's dependencies in its ecosystem. For example, the cargo PM returns `[(cargo, serde, 1.0.210), (cargo, tokio, 1.38.0)]`. PMs with no notion of workspace deps (a registry) return empty.
 
-2. **For each dependency, call `search` on all PMs.** The full package-id tuple is passed as the query. Each PM decides how to match:
-   - The cargo PM: if `pm = cargo`, search the registry for matching plugin crates. Otherwise, return empty.
-   - The recommendations PM: match on `(pm, name)`, ignoring version. If it has a `cargo/serde/` directory, it returns that as a match.
-   - The git PM: returns empty (not searchable).
+2. **Call `active_plugins` on all PMs**, passing that dependency set. A registry answers with its own entries, ignoring the deps. An ecosystem transport answers with the plugins its dependencies embed: the crate that ships a `skills/` directory or a `Symposium.toml` of its own. Fetching is cache-only here, so this makes no network calls and a workspace dependency is inspected in the source the PM already extracted.
 
-3. **Filter out already-installed plugins.** Compare search results against what's already in config.
+3. **Split the offers by the source they came from.** A registry is a trust root, so its plugins are loaded straight away and gated by nothing but their own predicates. A dependency is not: depending on a package means compiling its code, not letting its author add to the agent's context, so a plugin embedded in one needs the user's say-so. Only these reach the next step.
 
-4. **Prompt the user.** Present new discoveries and let them choose which to install.
+4. **Classify each remaining offer against `[plugins]`.** A name may be enabled by `use`, pre-consented by `auto-enable`, previously declined via `disable`, or undecided, which makes it a *candidate*.
 
-5. **Record choices.** Accepted plugins are added to config. Declined plugins are recorded as dismissed.
+5. **Prompt the user** about the candidates, and record the answers: approvals into `auto-enable`, declines into `disable`.
 
-This two-phase approach (list-deps → search) is what lets the recommendations PM "advise" on other PMs' dependencies without needing its own `list-deps` to return anything.
+So every PM is asked, and asked the same thing. Trust does not decide who gets
+asked; it decides what happens to the answer. Steps 3 to 5 are what "discovery"
+names in the narrow sense, the consent decision, and only dependency-embedded
+plugins ever need one. Nothing here fetches or writes until the prompt is
+answered.
+
+Note what is *not* here: no per-dependency `search`. Curated recommendations do
+not need one, because a recommendation is an ordinary registry plugin that names
+the crates it advises on with `depends-on`, which the ordinary predicate pass
+already evaluates. `search` is a user-facing lookup, backing `symposium use` and
+`symposium search`, where the input is a partial name typed by a person rather
+than a package-id.
 
 ### The sync pipeline
 
@@ -58,7 +66,7 @@ This two-phase approach (list-deps → search) is what lets the recommendations 
 
 ```
 1. Resolve config       → installed plugin package-ids (exact versions)
-2. Discover deps        → candidate plugin package-ids (via list-deps + search)
+2. Discover deps        → candidate plugin package-ids (via list-deps + active_plugins)
 3. Prompt/auto-install  → updated installed set
 4. Fetch                → populate cache
 5. Evaluate predicates  → active set
@@ -67,7 +75,7 @@ This two-phase approach (list-deps → search) is what lets the recommendations 
 
 #### Step 1: Resolve config
 
-Read `~/.symposium/config.toml`. For each entry, call the PM's `resolve` to get the current best match.
+Read `~/.symposium/config.toml`. Each `[plugins]` entry names a `(pm, canonical-name)` pair; `load_plugin` on the owning PM turns it into the current best match.
 
 #### Step 2: Discover deps
 
@@ -102,8 +110,8 @@ Fetching happens in parallel across PMs and packages.
 #### Step 5: Evaluate predicates
 
 For each cached plugin, evaluate its predicates against the workspace:
-- `workspace()` → is this directory part of the workspace?
-- `depends-on(cargo, axum, 0.7)` → check if cargo's `list-deps` included axum
+- `workspace-member()` → is this plugin defined by a member of the workspace?
+- `depends-on(axum>=0.7)` → did some PM's `list-deps` include a matching axum?
 - etc.
 
 Plugins that pass are *active*. Plugins that don't pass are installed but dormant.
@@ -120,8 +128,8 @@ Copy active skills/hooks/MCP servers into agent directories. Same change-awarene
 On session start, a lightweight check runs:
 
 1. Use cached `list-deps` results (from lockfile mtime — no network calls).
-2. Call `search` on all PMs with each dep.
-3. If new matches exist, include in hook response:
+2. Run discovery over them, cache-only.
+3. If undecided candidates exist, include in hook response:
    ```
    New extensions available for 3 dependencies. Run `symposium sync` to review.
    ```
@@ -156,6 +164,39 @@ disable = [{ pm = "symposium-recommendations", name = "rtk" }]
 `auto-enable` also accepts `"*"`, meaning every dependency-embedded plugin is
 consented to. `disable` still applies on top, so blanket consent stays
 overridable one plugin at a time.
+
+#### Precedence
+
+The three lists answer different questions, so they can name the same plugin at
+once. The rule is that **`disable` wins**, unconditionally:
+
+| Configuration | Result |
+|---------------|--------|
+| `use` only | enabled, subject to its predicates |
+| `auto-enable` only | enabled if a dependency embeds it |
+| `use` + `auto-enable` | enabled; `use` additionally reaches a plugin no dependency embeds |
+| anything + `disable` | off |
+
+`disable` has to be the last word to be worth having. Everything else (a trusted
+registry, `auto-enable`, an explicit `use`) is a way of saying a plugin *may*
+run, and `disable` is the only way to say it may not; a precedence rule
+that let any of them beat it would mean there is no way to turn a plugin off.
+
+So `use` on a disabled plugin does not re-enable it, and `symposium use --remove`
+does not cancel a `disable` (it removes a `use` entry, which is the opposite
+decision). Re-enabling means dropping the `disable` entry.
+
+#### Scope
+
+`use` carries a scope: an entry is either global or recorded for one workspace
+root, so a plugin can be enabled in the one project that wants it.
+
+`auto-enable` and `disable` do not: both are global. For `auto-enable` this is a
+consequence of what it means, namely standing consent to what your dependencies
+carry, which is a judgment about the plugin's author rather than about a
+project. For `disable` it is a simplification worth naming: turning a plugin off in one
+workspace turns it off in all of them. See the parent RFD's
+[future work](../README.md#future-work).
 
 ### Declined discoveries
 

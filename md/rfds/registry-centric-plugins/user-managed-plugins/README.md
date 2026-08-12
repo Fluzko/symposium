@@ -3,7 +3,7 @@
 ## TL;DR
 
 - `symposium use [--global] X` searches PMs, installs a plugin, records it in config.
-- `symposium remove X` removes from config.
+- `symposium use --remove X` removes that record from config.
 - `symposium status` shows what's installed, what's active, and why.
 - Global installs apply everywhere; local installs are scoped to a workspace directory without modifying workspace files.
 
@@ -30,7 +30,7 @@ Installed plugins:
     Active: yes
     Skills: serde-usage, serde-derive-helper
 
-$ symposium remove serde-skills
+$ symposium use --remove serde-skills
 ✓ Removed (cargo, serde-skills, 1.2.3)
 ```
 
@@ -38,29 +38,40 @@ $ symposium remove serde-skills
 
 ### `symposium use [--global] <query>`
 
-**Query:** A name or partial identifier. Symposium searches all PMs for matches.
+**Query:** A plugin name. A name is not an identity, since two ecosystems may use
+the same word, so `use` resolves it across every PM and then decides.
 
 **Flow:**
 
-1. Call `search` on all PMs with the query.
-2. One result → confirm and install. Multiple → present selection:
+1. Collect every plugin the name could mean: registry plugins that name themselves, the workspace's own dependencies (checked offline, before anything reaches the network), and `search` hits from every PM, which is what lets `use` name a package the workspace does not depend on yet. Matches are deduplicated on `(pm, canonical-name)`.
+2. Exactly one match is used. Several is an error naming them, which the user resolves by picking the ecosystem:
    ```
-   Found plugins matching "serde":
-     [1] (cargo, serde-skills, 1.2.3) — Schema-aware serialization helpers
-     [2] (recommendations, cargo/serde, 0.1.0) — Recommended serde extensions
-   Install which? [1]:
+   `serde` is offered by more than one package manager:
+     cargo (--pm cargo)
+     symposium-recommendations (--pm symposium-recommendations)
+   pick one with `--pm <name>`
    ```
-3. Record in config.
+3. Record the `(pm, canonical-name)` pair in config, so the entry round-trips to the same plugin.
 4. Fetch into cache.
 5. Run sync to activate if predicates pass.
 
+A plugin a trust root already offers needs no entry, and `use` says so rather
+than writing one. The exception is a plugin with no [activation
+root](../README.md#activation-roots) of its own, where `use` is precisely the
+root being supplied.
+
 **Flags:**
-- `--global` — active in all workspaces.
-- Without `--global` — scoped to the current workspace directory.
+- `--global`: active in all workspaces.
+- Without `--global`: scoped to the current workspace directory.
+- `--pm <name>`: the package manager to pick when more than one offers the name.
 
-### `symposium remove <query>`
+### `symposium use --remove <name>`
 
-Match `<query>` against installed plugins. If ambiguous, prompt. Remove from config. On next sync, content is cleaned from agent directories. Cache entry stays (garbage-collected separately).
+Drop the `use` entry for `<name>` and re-sync, so the plugin's content is reaped from the agent directories straight away. The cache entry stays (garbage-collected separately).
+
+The scope has to match: without `--global` this removes the entry recorded for the current workspace, with it the unscoped one. A scope mismatch is an error rather than a silent success, since "nothing to remove" and "removed" are answers the user needs to tell apart.
+
+Removal is the inverse of `use`, not a general off switch: it withdraws an enablement the user recorded. Turning off a plugin that was never `use`d, such as one a registry offers, is `disable`.
 
 ### `symposium status`
 
@@ -90,30 +101,33 @@ Workspace plugins (from Symposium.toml):
 Location: `~/.symposium/config.toml`
 
 ```toml
-# Global plugins
-[[plugins]]
-source.cargo = { serde-skills = "1" }
+[plugins]
+use = [
+  # Global: active in every workspace.
+  { pm = "cargo", name = "serde-skills" },
+  { pm = "cargo", name = "rtk" },
 
-[[plugins]]
-source.cargo = { rtk = "2" }
-
-# Workspace-scoped plugins
-[[workspace-plugins]]
-directory = "/home/user/projects/my-app"
-source.cargo = { axum-agents = "0.5" }
-
-[[workspace-plugins]]
-directory = "/home/user/projects/my-app"
-source.cargo = { diesel-helpers = "1" }
+  # Workspace-scoped, keyed by absolute path.
+  { pm = "cargo", name = "axum-agents", workspace = "/home/user/projects/my-app" },
+  { pm = "cargo", name = "diesel-helpers", workspace = "/home/user/projects/my-app" },
+]
 ```
 
-Note: config entries use `source.<pm>` syntax — the same format as `Symposium.toml` plugin entries. Symposium passes the value to the PM's `resolve` to get the exact package-id. The version in the source value is a *requirement* (e.g., `"1"` means any 1.x); the resolved package-id has the exact version.
+An entry names a plugin, not a version requirement: the pair `(pm,
+canonical-name)` is the identity ([naming a plugin in
+configuration](../pm-interface/README.md#naming-a-plugin-in-configuration)), and
+the version is whatever the PM resolves at load time. A bare string is read as a
+cargo package, since that is what an unqualified name has always meant.
 
 ### Scoping: global vs. local
 
 **Global (`--global`):** Plugin activates in every workspace. Good for universally useful tools.
 
-**Local (default):** Plugin scoped to the current workspace directory. Stored as `[[workspace-plugins]]` keyed by absolute path.
+**Local (default):** Plugin scoped to the current workspace directory. Stored as a `use` entry carrying that absolute path.
+
+Scope is a property of `use` only. `disable` is global, so it is not the way to
+turn a plugin off in one project. See
+[precedence and scope](../discovery-sync/README.md#precedence).
 
 Key constraint: **local installs don't modify workspace files.** Scoping lives entirely in `~/.symposium/config.toml`. This means:
 - No dotfiles added to the project
@@ -124,13 +138,13 @@ Key constraint: **local installs don't modify workspace files.** Scoping lives e
 
 ### Version updates
 
-On each `symposium sync`, Symposium calls `resolve` with the source value from config. The PM finds the best matching version. Upgrades happen within the allowed range; downgrades don't.
+On each `symposium sync`, Symposium calls `load_plugin` with the configured `(pm, canonical-name)` pair. The PM finds the best matching version. Upgrades happen within the allowed range; downgrades don't.
 
 There is no separate `symposium update` command — sync handles this naturally.
 
 ### Interaction with discovery
 
-Discovery can also add entries to config (when the user accepts a discovered plugin during sync). These show up as regular `[[plugins]]` or `[[workspace-plugins]]` entries. The `status` command shows provenance:
+Discovery also writes to `[plugins]` when the user answers its prompt: approvals go to `auto-enable`, declines to `disable`. `use` entries and `auto-enable` entries both enable, and `status` shows which root a plugin came in on:
 
 ```
 Source: discovery (auto-installed 2026-05-15)
@@ -152,11 +166,19 @@ Local installs are personal preferences. Putting them in workspace files would c
 
 ### What if I move my project directory?
 
-`[[workspace-plugins]]` entries use absolute paths. If you move the directory, they stop matching. Fix: update the path in config manually, or re-run `symposium use` in the new location.
+Workspace-scoped `use` entries record absolute paths. If you move the directory, they stop matching. Fix: update the path in config manually, or re-run `symposium use` in the new location.
 
 ### What happens when global and local plugins conflict?
 
 If a global and local plugin provide a skill with the same name, the local one wins. `status` shows a warning.
+
+### What if a plugin is both `use`d and disabled?
+
+It stays off. `disable` is the last word over every enabling mechanism, so a
+`use` entry naming a disabled plugin has no effect, and `use --remove` cannot
+cancel a `disable`: it removes a `use` entry, which is the opposite decision.
+Re-enabling means dropping the `disable` entry. See
+[precedence](../discovery-sync/README.md#precedence).
 
 ### Can I install without a workspace?
 
@@ -166,7 +188,7 @@ If a global and local plugin provide a skill with the same name, the local one w
 
 ### Step 1: Config file format
 
-Define and parse the `[[plugins]]` and `[[workspace-plugins]]` entries in config.
+Define and parse the `[plugins]` section: `use`, `auto-enable`, and `disable`, with global and workspace-scoped `use` entries.
 
 - [x] PR: config format + parsing
 
@@ -176,7 +198,7 @@ Search flow, selection UX, writing to config, triggering sync.
 
 - [x] PR: `use` command
 
-### Step 3: `symposium remove`
+### Step 3: `symposium use --remove`
 
 Matching, removal from config, cleanup on next sync.
 

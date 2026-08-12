@@ -92,11 +92,24 @@ symposium use --global X
 
 This works the same way but activates those plugins across all workspaces.
 
+`use` is also how a user reaches a plugin that nothing about the workspace implies: a curated plugin that names no dependency, so no [activation root](#activation-roots) would ever pick it up on its own.
+
 Users could also edit their config.toml to define their specific predicates for when they want plugins to be activated (e.g., when a certain file is present in the workspace, for Rust workspaces only, etc).
 
-### Dormancy
+### Turning plugins off
 
-A registry plugin whose manifest references no dependency anywhere — no `depends-on`, no `depends-on(...)` predicate, no `[[skills]]`/`[[hooks]]`/`[[mcp]]`/`[[plugins]]` gate that names one — has nothing to infer an activation gate from. Rather than treat that as "always on" (which would fire every curated plugin in every workspace), such a plugin is *dormant*: installed and known, but inactive until a `[plugins] use` entry names it. `depends-on = ["*"]` is the explicit "always active" spelling. The positional origins never go dormant, because where they were found supplies the gate: a crate plugin is reached through a reference to its own crate, and a workspace plugin is gated by workspace membership.
+`disable` is the off switch, listing plugins that must not run whatever else says otherwise:
+
+```toml
+[plugins]
+disable = [{ pm = "symposium-recommendations", name = "rtk" }]
+```
+
+It is deliberately the last word. Every other mechanism (a trusted registry, `auto-enable`, an explicit `use`) says a plugin *may* run; `disable` is the single place that says it may not. So a plugin that is both `use`d and disabled stays off, and re-enabling it means dropping the `disable` entry. `symposium use --remove` does not do that: it removes a `use` entry, so it cannot cancel a decision the user made in the other direction.
+
+A decline at the discovery prompt is recorded here too, which is the same rule seen from the other side: having said "never ask again" about a dependency's plugin, the user does not get asked again, and does not silently get the plugin either.
+
+Unlike `use`, a `disable` entry carries no workspace scope: it is global. See [enablement configuration](./discovery-sync/README.md#enablement-configuration) for the full precedence rules.
 
 
 ## As a crate author
@@ -117,7 +130,7 @@ widget/
     crates/
       widget-lib/
         Cargo.toml
-        Symposium.toml         <-- defines `[[plugins]] source.cargo = { widget-symposium = "1" }`
+        Symposium.toml         <-- defines `[[plugins]] source.cargo = "widget-symposium>=1"`
       widget-test/
         Cargo.toml
       widget-symposium/
@@ -132,7 +145,7 @@ You can also add a plugin into the central symposium recommendations repository.
 symposium-recommendations/
     ...
     cargo/
-      widget-lib/              <-- defines `[[plugins]] source.cargo = { widget-symposium = "1" }`
+      widget-lib/              <-- defines `[[plugins]] source.cargo = "widget-symposium>=1"`
         Symposium.toml
 ```
 
@@ -182,7 +195,17 @@ The plugin itself and each of its subsections can be gated with a `predicates = 
 
 `depends-on` is sugar for the common dependency case: `depends-on = ["serde", "tokio"]` lowers to `any(depends-on(serde), depends-on(tokio))`, ANDed with any `predicates`.
 
-Whether a plugin was **explicitly used** and whether it is a **workspace dependency** are *not* predicates. "Used" is the enablement axis, a `[plugins] use` entry (see [Explicit use](#explicit-use)), which is also how a [dormant plugin](#dormancy) wakes; dependency presence is `depends-on(<name>)`. These are not mutually exclusive: a plugin can be a workspace member, a dependency, and explicitly used all at once.
+Whether a plugin was **explicitly used** and whether it is a **workspace dependency** are *not* predicates. "Used" is the enablement axis, a `[plugins] use` entry (see [Explicit use](#explicit-use)), which is also the only [activation root](#activation-roots) available to a plugin that names no dependency; dependency presence is `depends-on(<name>)`. These are not mutually exclusive: a plugin can be a workspace member, a dependency, and explicitly used all at once.
+
+#### Activation roots
+
+Predicates say *when* a plugin applies, not why it was in play at all. That is a separate question, and every active plugin answers it with an **activation root**. There are three:
+
+* **Workspace membership**, for a plugin defined by the workspace root or one of its members.
+* **A dependency**, either one the plugin is embedded in, or one it names with `depends-on` and the workspace has (`depends-on = ["*"]` names every workspace).
+* **An explicit `use` entry**, which needs nothing from the workspace at all.
+
+`symposium status` reports the root each plugin came in on. A registry entry that names no dependency has none of the three until a `use` entry gives it one, so it loads and is listed but contributes nothing.
 
 #### Default content
 
@@ -211,7 +234,7 @@ Every PM implements these operations:
 |-----------|-------|--------|---------|
 | `active_plugins` | the workspace's dependency ids | set of plugin offers | discovery, sync |
 | `load_plugin` | package-id | set of plugin offers | chained references, `use` |
-| `search` | partial query string | set of package-ids + metadata | `symposium use` |
+| `search` | partial query string | set of package-ids + metadata | `symposium use`, `symposium search` |
 | `fetch` | package-id | directory with plugin content | sync/install |
 | `list_deps` | (none) | set of package-ids | auto-discovery |
 | `workspace_info` | (none) | workspace root and members | workspace plugins, scoping |
@@ -309,12 +332,13 @@ The remaining work, roughly in dependency order:
 - **Additional built-in ecosystems** — there is no `git` PM yet (git *sources* for skill groups and installations exist, but a chained `source.git` is rejected); npm/pypi are unstarted.
 - **Custom predicate dispatch across plugins (fixed-point)** — a crate-embedded plugin can *define* a custom predicate, but its definition is not yet registered, so it cannot be evaluated (only registry plugins' custom predicates are). Wiring a crate's *own* custom predicates into its facet evaluation is tractable; the general case — one plugin defines a predicate that another plugin's gate references — needs a convergence loop, since the definition must be loaded before the gate that uses it can be evaluated.
 - **Chained-edge version enforcement** — `[[plugins]] source.cargo = "widget>=1"` records the version requirement but does not enforce it: expansion enqueues the crate with no version, so it resolves against the workspace pin regardless. Enforcement would compare the resolved version to the recorded requirement and warn/skip on mismatch.
+- **Workspace-scoped `disable`**: a `use` entry can be scoped to one workspace; a `disable` entry cannot, so turning a plugin off in one project turns it off everywhere. The scoping machinery already exists on the `use` side, so this is mostly a matter of deciding how a scoped "off" and a global "on" compose.
 - **Policy plugins** — org-level enforcement (deny-lists, approval gates). Separate extension point, design TBD.
 
 ## Implementation status
 
-1. **Plugin model.** Plugins, `[defaults]`, predicates, chained plugins, dormancy.
+1. **Plugin model.** Plugins, `[defaults]`, predicates, chained plugins, activation roots.
 2. **PM interface and the cargo PM.** The identity tuple, the operation set, the JSON-RPC transport (`symposium_sdk::pm::protocol` and `pm::server` on the PM's side, `pm::RemotePm` on Symposium's), and `symposium-pm-cargo` as a standalone crate and binary. A PM answers with a `PluginOffer`: an id, a content directory, and an unvalidated manifest, so it can synthesize a plugin for a package that has none. `[[package-manager]]` config entries add ecosystems beyond cargo.
-3. **Discovery and sync.** Dependency-embedded plugin discovery, the consent prompt, and the `[plugins]` config. Recommendations are a flat registry rather than a `search` result (see the note under [the recommendations manager](#example-the-recommendations-manager)).
+3. **Discovery and sync.** Dependency-embedded plugin discovery, the consent prompt, and the `[plugins]` config. Recommendations are a flat registry rather than a `search` result (see the note under [the recommendations registry](#example-the-recommendations-registry)).
 4. **User-managed plugins.** `use` / `remove` / `status`, workspace vs. global scope.
 5. **Remaining** — see [Future work](#future-work).

@@ -173,7 +173,9 @@ If the index exceeds a reasonable size (TBD, likely ~2000 chars), the descriptio
 
 ### Registration mechanics
 
-During `init`/`sync`, Symposium writes a single MCP entry named `"symposium"` pointing to `cargo-agents mcp-serve`. The entry is identified by its well-known name — no additional ownership markers are needed. Individual plugin server entries are never written to agent config.
+With the experiment on (`[experiments] mcp-meta-server = true`; off by default), `init`/`sync` writes a single MCP entry named `"symposium"` pointing to `cargo-agents mcp-serve`. The entry is identified by its well-known name — no additional ownership markers are needed, and individual plugin server entries are not written to agent config.
+
+The flag is the whole rollout mechanism, so both directions have to hold: turning it on unregisters the per-plugin entries, turning it off unregisters `"symposium"` and puts them back, and `cargo agents mcp-serve` refuses to start while it is off. Nobody talks to a meta-server they did not opt into.
 
 ### Agent compatibility
 
@@ -438,4 +440,4 @@ The cause was one type doing three jobs: a wire format, a manifest schema, and a
 
 The design's first step rewrites agent config to the single meta-server entry, before the meta-server exists. A release cut between that step and a working `mcp-serve` ships broken MCP for every user who takes it.
 
-It is now the last step, gated on a config flag, which also keeps the old behavior measurable against the new one without reverting code.
+It is now the last step, gated on `[experiments] mcp-meta-server`, which defaults to off — so merging the meta-server changes nothing for a user who does not ask for it, and the old behavior stays measurable against the new one without reverting code.

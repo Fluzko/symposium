@@ -16,11 +16,25 @@ fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_cargo-agents"))
 }
 
-/// Point the binary at an empty config directory, so a developer's own
-/// settings cannot change what a test sees.
+/// Point the binary at a config directory carrying nothing but the
+/// meta-server experiment, so a developer's own settings cannot change what a
+/// test sees. The flag is required: `mcp-serve` refuses to start without it.
 fn isolated_home() -> tempfile::TempDir {
-    tempfile::tempdir().expect("temp dir")
+    let home = tempfile::tempdir().expect("temp dir");
+    std::fs::write(home.path().join("config.toml"), EXPERIMENT).expect("write config.toml");
+    home
 }
+
+/// Turns the meta-server on. Every config a test writes carries it, since the
+/// experiment is off by default.
+const EXPERIMENT: &str = "[experiments]\nmcp-meta-server = true\n";
+
+/// Base fixture config: project-scoped hooks, no recommendations registry, and
+/// the meta-server experiment on.
+const BASE_CONFIG: &str = concat!(
+    "hook-scope = \"project\"\n[defaults]\nsymposium-recommendations = false\n",
+    "[experiments]\nmcp-meta-server = true\n",
+);
 
 async fn connect(home: &tempfile::TempDir) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
     let mut command = tokio::process::Command::new(binary());
@@ -34,6 +48,36 @@ async fn connect(home: &tempfile::TempDir) -> rmcp::service::RunningService<rmcp
         .await
         .expect("handshake timed out")
         .expect("handshake failed")
+}
+
+/// The meta-server is an experiment: without the flag it must not serve, so a
+/// user who never opted in cannot end up talking to it — and the refusal goes
+/// to stderr, since stdout is the protocol.
+#[tokio::test(flavor = "multi_thread")]
+async fn refuses_to_serve_without_the_experiment() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let output = tokio::process::Command::new(binary())
+        .arg("mcp-serve")
+        .env("SYMPOSIUM_HOME", home.path())
+        .output()
+        .await
+        .expect("run mcp-serve");
+
+    assert!(
+        !output.status.success(),
+        "should exit non-zero, got: {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("mcp-meta-server"),
+        "stderr should name the flag to set, got: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "nothing should reach stdout, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 /// The point of the design: an agent sees two tools, not every plugin
@@ -171,7 +215,7 @@ fn workspace_serving_as(server: &str, mock: serde_json::Value) -> Workspace {
 
     std::fs::write(
         home.join("config.toml"),
-        "hook-scope = \"project\"\n[defaults]\nsymposium-recommendations = false\n",
+        BASE_CONFIG,
     )
     .unwrap();
     std::fs::write(
@@ -403,7 +447,7 @@ async fn a_script_starts_only_the_servers_it_calls() {
     std::fs::write(home.join("plugins/db/SYMPOSIUM.toml"), manifest).unwrap();
     std::fs::write(
         home.join("config.toml"),
-        "hook-scope = \"project\"\n[defaults]\nsymposium-recommendations = false\n",
+        BASE_CONFIG,
     )
     .unwrap();
     std::fs::write(
@@ -486,7 +530,7 @@ async fn a_dependency_added_mid_session_appears() {
     std::fs::write(home.join("plugins/db/SYMPOSIUM.toml"), manifest).unwrap();
     std::fs::write(
         home.join("config.toml"),
-        "hook-scope = \"project\"\n[defaults]\nsymposium-recommendations = false\n",
+        BASE_CONFIG,
     )
     .unwrap();
 
@@ -563,8 +607,7 @@ async fn exceeding_a_limit_reports_a_tagged_error() {
     let workspace = workspace_with_backing_server();
     std::fs::write(
         workspace.home.join("config.toml"),
-        "hook-scope = \"project\"\n[defaults]\nsymposium-recommendations = false\n\
-         [mcp]\nscript-timeout-secs = 2\ntool-call-timeout-secs = 1\n",
+        format!("{BASE_CONFIG}[mcp]\nscript-timeout-secs = 2\ntool-call-timeout-secs = 1\n"),
     )
     .unwrap();
     let client = connect_in(&workspace).await;
@@ -592,8 +635,7 @@ async fn a_script_left_pending_still_answers() {
     let workspace = workspace_with_backing_server();
     std::fs::write(
         workspace.home.join("config.toml"),
-        "hook-scope = \"project\"\n[defaults]\nsymposium-recommendations = false\n\
-         [mcp]\nscript-timeout-secs = 2\ntool-call-timeout-secs = 1\n",
+        format!("{BASE_CONFIG}[mcp]\nscript-timeout-secs = 2\ntool-call-timeout-secs = 1\n"),
     )
     .unwrap();
     let client = connect_in(&workspace).await;

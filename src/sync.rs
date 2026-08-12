@@ -371,17 +371,19 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
         })
         .collect();
 
-    // One entry, not one per plugin. The agent then loads two tool schemas
-    // instead of every plugin server's, and the workspace's own tools stay
-    // out of `.claude/` and its equivalents.
-    let mcp_servers = if sym.config.mcp.enabled {
+    // With the meta-server experiment on: one entry, not one per plugin. The
+    // agent then loads two tool schemas instead of every plugin server's, and
+    // the workspace's own tools stay out of `.claude/` and its equivalents.
+    // Off (the default): each applicable plugin server is registered directly.
+    let meta_server = sym.config.experiments.mcp_meta_server;
+    let mcp_servers = if meta_server {
         vec![meta_server_entry()]
     } else {
         plugin_servers.clone()
     };
     // Whichever set is not in use has to be removed, or entries written by a
     // previous configuration linger in agent config forever.
-    let stale_names: Vec<&str> = if sym.config.mcp.enabled {
+    let stale_names: Vec<&str> = if meta_server {
         plugin_server_names.clone()
     } else {
         vec![META_SERVER_NAME]

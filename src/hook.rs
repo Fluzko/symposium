@@ -488,7 +488,7 @@ async fn prewarm_hook_sources(sym: &Symposium, deps: &Arc<WorkspaceDeps>) {
 /// the author asking for a warm cache, and the alternative is the download
 /// landing on the agent's first tool call.
 async fn prewarm_mcp_servers(sym: &Symposium, deps: &Arc<WorkspaceDeps>) {
-    if !sym.config.mcp.enabled {
+    if !sym.config.experiments.mcp_meta_server {
         return;
     }
     if deps.load().is_none() {

@@ -538,9 +538,16 @@ transport = "sse"
 
 ### How registration works
 
-With the meta-server enabled (`[mcp] enabled`, the default), `sync` writes a single `symposium` entry into each agent's config instead of one entry per server. The agent sees two tools; the servers behind them are started on demand when a script calls one, and a server whose predicates do not hold is never started at all. Declaring a server is therefore all a plugin does — there is no per-agent MCP configuration to maintain.
+By default, `sync` writes each applicable entry into the agent's own MCP config, handling the format differences per agent.
 
-Setting `[mcp] enabled = false` restores the direct path: each applicable entry is written into the agent's own MCP config, and Symposium handles the format differences.
+Enabling the [MCP meta-server experiment](./configuration.md#experiments) instead writes a single `symposium` entry into each agent's config:
+
+```toml
+[experiments]
+mcp-meta-server = true
+```
+
+The agent then sees two tools; the servers behind them are started on demand when a script calls one, and a server whose predicates do not hold is never started at all. Declaring a server is all a plugin does either way — there is no per-agent MCP configuration to maintain.
 
 | Agent | Config location | Key |
 |-------|----------------|-----|

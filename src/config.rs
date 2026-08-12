@@ -93,6 +93,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "TelemetryConfig::is_default")]
     pub telemetry: TelemetryConfig,
 
+    /// Opt-in unstable features. All off by default.
+    #[serde(default, skip_serializing_if = "ExperimentsConfig::is_default")]
+    pub experiments: ExperimentsConfig,
+
     /// MCP meta-server settings.
     #[serde(default, skip_serializing_if = "McpConfig::is_default")]
     pub mcp: McpConfig,
@@ -274,6 +278,30 @@ impl Default for LoggingConfig {
     }
 }
 
+/// Opt-in unstable features (`[experiments]`).
+///
+/// Every key defaults to off and carries no stability promise: an experiment
+/// may change shape, or be withdrawn, between releases. Unknown keys are
+/// rejected like in every other section, which makes retiring an experiment a
+/// compatibility event — keep its key accepted-and-ignored for a release
+/// rather than deleting it outright, since a config naming a key this binary
+/// does not know fails to parse and falls back to *all* defaults.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExperimentsConfig {
+    /// Register the MCP meta-server (`cargo agents mcp-serve`) as the single
+    /// agent-facing MCP entry, in place of each plugin's own servers, and
+    /// serve `mcp-serve`.
+    #[serde(rename = "mcp-meta-server")]
+    pub mcp_meta_server: bool,
+}
+
+impl ExperimentsConfig {
+    fn is_default(&self) -> bool {
+        *self == ExperimentsConfig::default()
+    }
+}
+
 /// Settings for the MCP meta-server (`cargo agents mcp-serve`).
 ///
 /// Two groups of knobs with different owners. The sandbox limits
@@ -284,12 +312,13 @@ impl Default for LoggingConfig {
 ///
 /// `#[serde(default)]` on the container means every missing key falls back to
 /// the value in [`McpConfig::default`], which is the single source of truth.
+///
+/// Whether the meta-server runs at all is not decided here: that is
+/// [`ExperimentsConfig::mcp_meta_server`]. These knobs only take effect once
+/// the experiment is on.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct McpConfig {
-    /// Register the meta-server and serve `mcp-serve`.
-    pub enabled: bool,
-
     /// Wall-clock ceiling for one `execute` call.
     ///
     /// Bounds everything inside it, so it must exceed
@@ -353,7 +382,6 @@ pub struct McpConfig {
 impl Default for McpConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             script_timeout_secs: 120,
             script_memory_limit_mb: 64,
             script_stack_limit_kb: 1024,
@@ -398,6 +426,7 @@ impl Default for Config {
             hook_scope: HookScope::default(),
             auto_update: AutoUpdate::default(),
             telemetry: TelemetryConfig::default(),
+            experiments: ExperimentsConfig::default(),
             mcp: McpConfig::default(),
             plugins: PluginsConfig::default(),
             agents: Vec::new(),
@@ -423,6 +452,8 @@ struct RawConfig {
     auto_update: AutoUpdate,
     #[serde(default)]
     telemetry: TelemetryConfig,
+    #[serde(default)]
+    experiments: ExperimentsConfig,
     #[serde(default)]
     mcp: McpConfig,
     #[serde(default)]
@@ -453,6 +484,7 @@ impl RawConfig {
             hook_scope: self.hook_scope,
             auto_update: self.auto_update,
             telemetry: self.telemetry,
+            experiments: self.experiments,
             mcp: self.mcp,
             plugins: self.plugins,
             agents: self.agents,
@@ -472,6 +504,7 @@ impl From<Config> for RawConfig {
             hook_scope: config.hook_scope,
             auto_update: config.auto_update,
             telemetry: config.telemetry,
+            experiments: config.experiments,
             mcp: config.mcp,
             plugins: config.plugins,
             agents: config.agents,
@@ -1068,10 +1101,64 @@ mod tests {
     }
 
     #[test]
+    fn experiments_are_off_by_default() {
+        let config = parse_config("");
+        assert!(!config.experiments.mcp_meta_server);
+    }
+
+    #[test]
+    fn parse_experiments_mcp_meta_server() {
+        let config = parse_config(indoc! {"
+            [experiments]
+            mcp-meta-server = true
+        "});
+        assert!(config.experiments.mcp_meta_server);
+    }
+
+    /// A misspelled experiment is rejected rather than silently doing nothing:
+    /// the alternative is a user who believes a feature is on when it is not.
+    #[test]
+    fn parse_experiments_rejects_unknown_key() {
+        let err = toml::from_str::<RawConfig>(indoc! {"
+            [experiments]
+            mcp-meta-servr = true
+        "})
+        .expect_err("misspelled experiment should not parse");
+        assert!(
+            err.to_string().contains("mcp-meta-servr"),
+            "error should name the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn default_experiments_are_omitted_from_serialized_config() {
+        let config = Config::default();
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            !serialized.contains("[experiments]"),
+            "default (off) experiments should not be written to config.toml: {serialized}"
+        );
+    }
+
+    #[test]
+    fn customized_experiments_are_written_to_serialized_config() {
+        let config = Config {
+            experiments: ExperimentsConfig {
+                mcp_meta_server: true,
+            },
+            ..Config::default()
+        };
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            serialized.contains("mcp-meta-server = true"),
+            "customized experiments should round-trip: {serialized}"
+        );
+    }
+
+    #[test]
     fn parse_mcp_defaults() {
         let config = parse_config("");
         let mcp = &config.mcp;
-        assert!(mcp.enabled);
         assert!(!mcp.read_only);
         assert_eq!(mcp.script_timeout_secs, 120);
         assert_eq!(mcp.tool_call_timeout_secs, 60);
@@ -1097,15 +1184,6 @@ mod tests {
             "unnamed keys should keep their defaults, got: {:#?}",
             config.mcp
         );
-    }
-
-    #[test]
-    fn parse_mcp_disabled() {
-        let config = parse_config(indoc! {"
-            [mcp]
-            enabled = false
-        "});
-        assert!(!config.mcp.enabled);
     }
 
     /// A misspelled key is rejected rather than silently ignored.

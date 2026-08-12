@@ -162,6 +162,16 @@ async fn main() -> ExitCode {
         // Commands that need direct I/O (stdin/stdout) stay in the binary
         Some(Commands::Hook { agent, event }) => hook::run(&sym, agent, event).await,
 
+        Some(Commands::McpServe) if !sym.config.experiments.mcp_meta_server => {
+            // stderr, never stdout: an enabled run owns stdout for JSON-RPC.
+            eprintln!(
+                "Error: the MCP meta-server is experimental and off by default. \
+                 Enable it in {}:\n\n[experiments]\nmcp-meta-server = true",
+                sym.config_dir().join("config.toml").display()
+            );
+            ExitCode::FAILURE
+        }
+
         Some(Commands::McpServe) => {
             let resolution = symposium::mcp::resolve::resolve(&sym, &cwd).await;
             for rejection in &resolution.rejected {

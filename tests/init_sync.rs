@@ -415,15 +415,16 @@ async fn add_agent_is_additive() {
     .unwrap();
 }
 
-/// One entry is written, not one per plugin: the agent loads two tool
-/// schemas rather than every plugin server's, and the workspace's own tools
-/// stay out of agent configuration.
+/// With the experiment on, one entry is written, not one per plugin: the agent
+/// loads two tool schemas rather than every plugin server's, and the
+/// workspace's own tools stay out of agent configuration.
 #[tokio::test]
-async fn sync_registers_only_the_meta_server() {
+async fn sync_registers_only_the_meta_server_when_the_experiment_is_on() {
     with_fixture(
         TestMode::SimulationOnly,
         &["mcp-filtering0", "workspace0"],
         async |mut ctx| {
+            ctx.enable_experiment("mcp-meta-server")?;
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
             ctx.symposium(&["sync"]).await?;
 
@@ -446,19 +447,14 @@ async fn sync_registers_only_the_meta_server() {
     .unwrap();
 }
 
-/// Turning the meta-server off restores per-plugin registration, still
-/// filtered by `depends-on`.
+/// Without the meta-server experiment — the default — each applicable plugin
+/// server is registered directly, still filtered by `depends-on`.
 #[tokio::test]
-async fn sync_registers_plugin_servers_when_the_meta_server_is_disabled() {
+async fn sync_registers_plugin_servers_by_default() {
     with_fixture(
         TestMode::SimulationOnly,
         &["mcp-filtering0", "workspace0"],
         async |mut ctx| {
-            let config = ctx.sym.config_dir().join("config.toml");
-            let existing = std::fs::read_to_string(&config)?;
-            std::fs::write(&config, format!("{existing}\n[mcp]\nenabled = false\n"))?;
-            ctx.sym = symposium::config::Symposium::from_dir(ctx.sym.config_dir());
-
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
             ctx.symposium(&["sync"]).await?;
 
@@ -476,6 +472,44 @@ async fn sync_registers_plugin_servers_when_the_meta_server_is_disabled() {
                 "got: {settings}"
             );
             assert!(!settings.contains("\"symposium\""), "got: {settings}");
+
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Turning the experiment off after a sync with it on has to *undo* the
+/// registration, or the agent keeps calling a meta-server the user disabled.
+#[tokio::test]
+async fn sync_swaps_registration_when_the_experiment_is_turned_off() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["mcp-filtering0", "workspace0"],
+        async |mut ctx| {
+            ctx.enable_experiment("mcp-meta-server")?;
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let settings_path = ctx
+                .workspace_root
+                .as_ref()
+                .unwrap()
+                .join(".claude/settings.json");
+            let settings = std::fs::read_to_string(&settings_path)?;
+            assert!(settings.contains("\"symposium\""), "got: {settings}");
+            assert!(!settings.contains("always-server"), "got: {settings}");
+
+            let config = ctx.sym.config_dir().join("config.toml");
+            let enabled = std::fs::read_to_string(&config)?;
+            std::fs::write(&config, enabled.replace("mcp-meta-server = true", ""))?;
+            ctx.sym = symposium::config::Symposium::from_dir(ctx.sym.config_dir());
+            ctx.symposium(&["sync"]).await?;
+
+            let settings = std::fs::read_to_string(&settings_path)?;
+            assert!(!settings.contains("\"symposium\""), "got: {settings}");
+            assert!(settings.contains("always-server"), "got: {settings}");
 
             Ok(())
         },
@@ -740,9 +774,9 @@ async fn sync_installs_skill_via_crate_manifest() {
 /// reference is available to the agent — a crate-sourced plugin's MCP servers
 /// flow through the active plugin set, not just its skills.
 ///
-/// With the meta-server on (the default) the agent's config carries only the
-/// `symposium` entry, so what proves the server reached the agent is that
-/// resolution finds it behind that entry.
+/// Run with the meta-server experiment on, where the agent's config carries
+/// only the `symposium` entry — so what proves the server reached the agent is
+/// that resolution finds it behind that entry.
 ///
 /// Fixture layout:
 /// - `facet-host` depends on `crate-f` (path dep)
@@ -755,6 +789,7 @@ async fn sync_registers_mcp_server_from_chained_crate() {
         TestMode::SimulationOnly,
         &["crate-facets0"],
         async |mut ctx| {
+            ctx.enable_experiment("mcp-meta-server")?;
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
             ctx.symposium(&["sync"]).await?;
 

@@ -138,39 +138,57 @@ async fn challenge(sym: &Symposium, cwd: &std::path::Path, server: &str) -> Opti
     }
 }
 
-/// Read the one redirect request and answer it, returning the full callback url.
+/// Wait for the request that carries the authorization code.
+///
+/// Requests that are not the redirect are answered and ignored rather than
+/// taken as the callback: a browser routinely asks for `/favicon.ico`, and
+/// treating the first connection as the redirect turns that into a failed login
+/// with a misleading "missing code".
 async fn wait_for_callback(listener: &TcpListener, redirect_uri: &str) -> Result<String> {
-    let (stream, _) = listener.accept().await.context("no redirect arrived")?;
-    let mut stream = BufReader::new(stream);
-
-    let mut request_line = String::new();
-    stream
-        .read_line(&mut request_line)
-        .await
-        .context("could not read the redirect request")?;
-
-    // `GET /callback?code=...&state=... HTTP/1.1`
-    let target = request_line
-        .split_whitespace()
-        .nth(1)
-        .context("malformed redirect request")?;
-
     let base = redirect_uri
         .split('/')
         .take(3)
         .collect::<Vec<_>>()
         .join("/");
-    let full = format!("{base}{target}");
 
-    let body = "Signed in. You can close this tab and return to the terminal.";
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.get_mut().write_all(response.as_bytes()).await;
-    let _ = stream.get_mut().flush().await;
+    loop {
+        let (stream, _) = listener.accept().await.context("no redirect arrived")?;
+        let mut stream = BufReader::new(stream);
 
-    Ok(full)
+        let mut request_line = String::new();
+        stream
+            .read_line(&mut request_line)
+            .await
+            .context("could not read the redirect request")?;
+
+        // `GET /callback?code=...&state=... HTTP/1.1`
+        let target = match request_line.split_whitespace().nth(1) {
+            Some(target) => target.to_string(),
+            None => continue,
+        };
+        let carries_code = target
+            .split_once('?')
+            .is_some_and(|(_, query)| query.split('&').any(|p| p.starts_with("code=")));
+
+        let (status, body) = if carries_code {
+            (
+                "200 OK",
+                "Signed in. You can close this tab and return to the terminal.",
+            )
+        } else {
+            ("404 Not Found", "")
+        };
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.get_mut().write_all(response.as_bytes()).await;
+        let _ = stream.get_mut().flush().await;
+
+        if carries_code {
+            return Ok(format!("{base}{target}"));
+        }
+    }
 }
 
 /// Best effort: the URL is printed either way, so a failure here is not fatal.
@@ -194,6 +212,37 @@ fn open_browser(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A browser routinely fetches `/favicon.ico`. Treating the first
+    /// connection as the redirect turned that into a failed login reporting a
+    /// missing code, which is what this guards against.
+    #[tokio::test]
+    async fn a_stray_request_does_not_consume_the_callback() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+
+        tokio::spawn(async move {
+            for request in [
+                "GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                "GET /callback?code=abc&state=xyz HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            ] {
+                let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .expect("connect");
+                stream.write_all(request.as_bytes()).await.expect("write");
+                let mut sink = Vec::new();
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut sink).await;
+            }
+        });
+
+        let full = wait_for_callback(&listener, &redirect_uri)
+            .await
+            .expect("callback");
+        assert!(full.contains("code=abc"), "got: {full}");
+    }
 
     #[tokio::test]
     async fn the_callback_url_is_rebuilt_from_the_request_line() {

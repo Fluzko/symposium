@@ -430,7 +430,7 @@ async fn sync_registers_only_the_meta_server_when_the_experiment_is_on() {
 
             let workspace_root = ctx.workspace_root.as_ref().unwrap();
             let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
-                workspace_root.join(".claude/settings.json"),
+                workspace_root.join(".mcp.json"),
             )?)?;
             let servers = settings["mcpServers"]
                 .as_object()
@@ -459,7 +459,9 @@ async fn sync_registers_plugin_servers_by_default() {
             ctx.symposium(&["sync"]).await?;
 
             let workspace_root = ctx.workspace_root.as_ref().unwrap();
-            let settings = std::fs::read_to_string(workspace_root.join(".claude/settings.json"))?;
+            // `.mcp.json`, not the `settings.json` that carries hooks: Claude
+            // does not read `mcpServers` from the latter.
+            let settings = std::fs::read_to_string(workspace_root.join(".mcp.json"))?;
 
             // depends-on = ["*"], and ["serde"] which workspace0 provides.
             assert!(settings.contains("always-server"), "got: {settings}");
@@ -492,11 +494,7 @@ async fn sync_swaps_registration_when_the_experiment_is_turned_off() {
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
             ctx.symposium(&["sync"]).await?;
 
-            let settings_path = ctx
-                .workspace_root
-                .as_ref()
-                .unwrap()
-                .join(".claude/settings.json");
+            let settings_path = ctx.workspace_root.as_ref().unwrap().join(".mcp.json");
             let settings = std::fs::read_to_string(&settings_path)?;
             assert!(settings.contains("\"symposium\""), "got: {settings}");
             assert!(!settings.contains("always-server"), "got: {settings}");
@@ -794,7 +792,7 @@ async fn sync_registers_mcp_server_from_chained_crate() {
             ctx.symposium(&["sync"]).await?;
 
             let workspace_root = ctx.workspace_root.as_ref().unwrap().clone();
-            let settings = std::fs::read_to_string(workspace_root.join(".claude/settings.json"))?;
+            let settings = std::fs::read_to_string(workspace_root.join(".mcp.json"))?;
             assert!(
                 settings.contains(symposium::sync::META_SERVER_NAME),
                 "the meta-server entry should be registered:\n{settings}"

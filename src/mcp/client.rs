@@ -19,10 +19,14 @@ use std::time::Duration;
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ProtocolVersion, Tool};
-use rmcp::service::{RoleClient, RunningService};
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::service::{ClientInitializeError, RoleClient, RunningService};
+use rmcp::transport::streamable_http_client::{
+    AuthRequiredError, InsufficientScopeError, StreamableHttpClientTransportConfig,
+};
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use serde_json::{Map, Value};
+
+use super::endpoint;
 
 /// Everything needed to start a backing server.
 #[derive(Debug, Clone)]
@@ -70,6 +74,9 @@ pub enum ClientError {
     /// The tool ran and reported failure. Distinct from the above: the
     /// message is the server's own, and belongs in front of the model.
     Tool { message: String },
+    /// A remote server answered with an authorization challenge. Retrying
+    /// cannot help, so callers treat it as terminal until the user logs in.
+    AuthRequired { server: String, challenge: String },
 }
 
 impl std::fmt::Display for ClientError {
@@ -93,11 +100,39 @@ impl std::fmt::Display for ClientError {
             } => write!(f, "{server}.{tool} did not answer within {limit_secs}s"),
             Self::Protocol { server, detail } => write!(f, "{server}: {detail}"),
             Self::Tool { message } => write!(f, "{message}"),
+            Self::AuthRequired { server, .. } => {
+                write!(f, "{server} requires authorization")
+            }
         }
     }
 }
 
 impl std::error::Error for ClientError {}
+
+/// The `WWW-Authenticate` challenge behind a handshake failure, if any.
+///
+/// Read from the error chain rather than its text, so a reworded message does
+/// not silently turn a login prompt back into an opaque failure. The chain has
+/// to be entered through `TransportError`'s field: that variant renders the
+/// transport error into its own message without exposing it as a source, so
+/// walking `source()` from the top finds nothing.
+fn auth_challenge(error: &ClientInitializeError) -> Option<String> {
+    let ClientInitializeError::TransportError { error, .. } = error else {
+        return None;
+    };
+
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error.error.as_ref());
+    while let Some(error) = current {
+        if let Some(required) = error.downcast_ref::<AuthRequiredError>() {
+            return Some(required.www_authenticate_header.clone());
+        }
+        if let Some(scope) = error.downcast_ref::<InsufficientScopeError>() {
+            return Some(scope.www_authenticate_header.clone());
+        }
+        current = error.source();
+    }
+    None
+}
 
 /// A connected backing server.
 pub struct BackingServer {
@@ -197,18 +232,44 @@ impl BackingServer {
             custom.insert(name, value);
         }
 
+        let checked = endpoint::check_url(url).map_err(|e| ClientError::StartupFailed {
+            server: spec.name.clone(),
+            detail: e.to_string(),
+        })?;
+        endpoint::check_resolved(&checked)
+            .await
+            .map_err(|e| ClientError::StartupFailed {
+                server: spec.name.clone(),
+                detail: e.to_string(),
+            })?;
+
+        // Redirects are not followed: a 302 to a new host would escape the
+        // check just performed, which is the documented SSRF route.
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| ClientError::StartupFailed {
+                server: spec.name.clone(),
+                detail: e.to_string(),
+            })?;
+
         let config =
             StreamableHttpClientTransportConfig::with_uri(url.to_string()).custom_headers(custom);
-        let transport =
-            StreamableHttpClientTransport::with_client(reqwest::Client::default(), config);
+        let transport = StreamableHttpClientTransport::with_client(http, config);
 
         // No stderr to quote for a remote server; the transport error is the
         // whole account of a failure.
         match tokio::time::timeout(spec.startup_timeout, ().serve(transport)).await {
             Ok(Ok(service)) => Ok(Self::from_service(spec.name.clone(), service)),
-            Ok(Err(e)) => Err(ClientError::StartupFailed {
-                server: spec.name.clone(),
-                detail: e.to_string(),
+            Ok(Err(e)) => Err(match auth_challenge(&e) {
+                Some(challenge) => ClientError::AuthRequired {
+                    server: spec.name.clone(),
+                    challenge,
+                },
+                None => ClientError::StartupFailed {
+                    server: spec.name.clone(),
+                    detail: e.to_string(),
+                },
             }),
             Err(_) => Err(ClientError::StartupTimeout {
                 server: spec.name.clone(),

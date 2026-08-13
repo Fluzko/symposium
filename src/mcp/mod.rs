@@ -11,6 +11,7 @@ pub mod client;
 pub mod console;
 pub mod declarations;
 pub mod dispatch;
+pub mod endpoint;
 pub mod normalize;
 pub mod resolve;
 pub mod sandbox;

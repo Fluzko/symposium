@@ -181,6 +181,15 @@ impl Supervisor {
                 self.retry_after = None;
                 Ok(())
             }
+            // An authorization challenge is not a transient failure: the same
+            // request will be refused until the user logs in, so retrying only
+            // spends the restart budget.
+            Err(e @ ClientError::AuthRequired { .. }) => {
+                self.state = State::Failed {
+                    reason: e.to_string(),
+                };
+                Err(e)
+            }
             Err(e) => {
                 self.attempts += 1;
                 if self.attempts > self.policy.max_restarts {
@@ -374,6 +383,45 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "a failed server should not be retried"
         );
+    }
+
+    /// A server behind OAuth is terminal on the first refusal: retrying spends
+    /// the restart budget on an answer that cannot change until the user logs
+    /// in.
+    #[tokio::test]
+    async fn an_authorization_challenge_fails_without_retrying() {
+        let mut sup = Supervisor::new(
+            SpawnSpec {
+                name: "sentry".into(),
+                startup_timeout: Duration::from_secs(1),
+                kind: crate::mcp::client::SpawnKind::Http {
+                    // Refused before any connection is attempted, which is the
+                    // point: no network is needed to prove the state machine.
+                    url: "https://10.0.0.1/mcp".into(),
+                    headers: vec![],
+                },
+            },
+            fast_policy(),
+        );
+
+        // Stand in for the challenge the transport would surface.
+        sup.state = State::Failed {
+            reason: ClientError::AuthRequired {
+                server: "sentry".into(),
+                challenge: "Bearer resource_metadata=\"https://example.com/.well-known\"".into(),
+            }
+            .to_string(),
+        };
+
+        let err = sup
+            .call("anything", json!({}), Duration::from_secs(1))
+            .await
+            .expect_err("a failed server refuses calls");
+        assert!(
+            err.to_string().contains("requires authorization"),
+            "got: {err}"
+        );
+        assert_eq!(sup.state_name(), "failed");
     }
 
     /// Backoff grows so a crash-looping server is not hammered, but stays

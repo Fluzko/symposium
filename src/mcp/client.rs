@@ -16,23 +16,36 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ProtocolVersion, Tool};
 use rmcp::service::{RoleClient, RunningService};
-use rmcp::transport::TokioChildProcess;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use serde_json::{Map, Value};
 
 /// Everything needed to start a backing server.
 #[derive(Debug, Clone)]
 pub struct SpawnSpec {
     pub name: String,
-    pub command: PathBuf,
-    pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
-    /// Directory to run in. A server that reads the project it serves needs
-    /// this; four of the seven client config formats have it.
-    pub cwd: Option<PathBuf>,
     pub startup_timeout: Duration,
+    pub kind: SpawnKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum SpawnKind {
+    Child {
+        command: PathBuf,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+        /// Directory to run in. A server that reads the project it serves needs
+        /// this; four of the seven client config formats have it.
+        cwd: Option<PathBuf>,
+    },
+    Http {
+        url: String,
+        headers: Vec<(String, String)>,
+    },
 }
 
 /// Why talking to a backing server failed.
@@ -100,12 +113,30 @@ impl BackingServer {
     /// imposed here. A server fetched on first use can spend most of its
     /// budget just downloading.
     pub async fn spawn(spec: &SpawnSpec) -> Result<Self, ClientError> {
-        let mut command = tokio::process::Command::new(&spec.command);
-        command.args(&spec.args);
-        for (key, value) in &spec.env {
+        match &spec.kind {
+            SpawnKind::Child {
+                command,
+                args,
+                env,
+                cwd,
+            } => Self::spawn_child(spec, command, args, env, cwd.as_deref()).await,
+            SpawnKind::Http { url, headers } => Self::connect_http(spec, url, headers).await,
+        }
+    }
+
+    async fn spawn_child(
+        spec: &SpawnSpec,
+        program: &PathBuf,
+        args: &[String],
+        env: &[(String, String)],
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Self, ClientError> {
+        let mut command = tokio::process::Command::new(program);
+        command.args(args);
+        for (key, value) in env {
             command.env(key, value);
         }
-        if let Some(cwd) = &spec.cwd {
+        if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
 
@@ -144,16 +175,59 @@ impl BackingServer {
             }
         };
 
+        Ok(Self::from_service(spec.name.clone(), service))
+    }
+
+    async fn connect_http(
+        spec: &SpawnSpec,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<Self, ClientError> {
+        let mut custom = std::collections::HashMap::new();
+        for (key, value) in headers {
+            let name =
+                HeaderName::from_bytes(key.as_bytes()).map_err(|_| ClientError::StartupFailed {
+                    server: spec.name.clone(),
+                    detail: format!("`{key}` is not a valid header name"),
+                })?;
+            let value = HeaderValue::from_str(value).map_err(|_| ClientError::StartupFailed {
+                server: spec.name.clone(),
+                detail: format!("value for header `{key}` is not valid"),
+            })?;
+            custom.insert(name, value);
+        }
+
+        let config =
+            StreamableHttpClientTransportConfig::with_uri(url.to_string()).custom_headers(custom);
+        let transport =
+            StreamableHttpClientTransport::with_client(reqwest::Client::default(), config);
+
+        // No stderr to quote for a remote server; the transport error is the
+        // whole account of a failure.
+        match tokio::time::timeout(spec.startup_timeout, ().serve(transport)).await {
+            Ok(Ok(service)) => Ok(Self::from_service(spec.name.clone(), service)),
+            Ok(Err(e)) => Err(ClientError::StartupFailed {
+                server: spec.name.clone(),
+                detail: e.to_string(),
+            }),
+            Err(_) => Err(ClientError::StartupTimeout {
+                server: spec.name.clone(),
+                limit_secs: spec.startup_timeout.as_secs(),
+                detail: None,
+            }),
+        }
+    }
+
+    fn from_service(name: String, service: RunningService<RoleClient, ()>) -> Self {
         let protocol_version = service
             .peer_info()
             .map(|info| info.protocol_version.clone())
             .unwrap_or_default();
-
-        Ok(Self {
-            name: spec.name.clone(),
+        Self {
+            name,
             service,
             protocol_version,
-        })
+        }
     }
 
     pub fn name(&self) -> &str {

@@ -318,10 +318,12 @@ mod tests {
                 .iter()
                 .map(|name| crate::mcp::resolve::ResolvedServer {
                     name: name.to_string(),
-                    command: crate::mcp::resolve::ServerCommand::Path("/usr/bin/true".into()),
-                    args: Vec::new(),
-                    env: Vec::new(),
-                    cwd: None,
+                    transport: crate::mcp::resolve::ServerTransport::Stdio {
+                        command: crate::mcp::resolve::ServerCommand::Path("/usr/bin/true".into()),
+                        args: Vec::new(),
+                        env: Vec::new(),
+                        cwd: None,
+                    },
                     startup_timeout: std::time::Duration::from_secs(30),
                     tool_call_timeout: std::time::Duration::from_secs(60),
                     enabled_tools: None,

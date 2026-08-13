@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::plugins::{McpTransport, StdioCommand};
 
 use crate::config::Symposium;
-use crate::mcp::client::SpawnSpec;
+use crate::mcp::client::{SpawnKind, SpawnSpec};
 use crate::mcp::server::{EXECUTE, LIST_TOOLS};
 use crate::plugins::McpServerOverrides;
 
@@ -30,14 +30,26 @@ pub enum ServerCommand {
     Installation(Box<crate::plugins::Installation>),
 }
 
+/// How a resolved server is reached.
+#[derive(Debug, Clone)]
+pub enum ServerTransport {
+    Stdio {
+        command: ServerCommand,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+        cwd: Option<PathBuf>,
+    },
+    Http {
+        url: String,
+        headers: Vec<(String, String)>,
+    },
+}
+
 /// A backing server, ready to be started on demand.
 #[derive(Debug, Clone)]
 pub struct ResolvedServer {
     pub name: String,
-    pub command: ServerCommand,
-    pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
-    pub cwd: Option<PathBuf>,
+    pub transport: ServerTransport,
     pub startup_timeout: Duration,
     /// Ceiling on one call to this server, already reconciled with the
     /// user's script deadline.
@@ -76,7 +88,27 @@ impl ResolvedServer {
             }
         }
 
-        let (command, mut args) = match &self.command {
+        let (command, args, env, cwd) = match &self.transport {
+            ServerTransport::Http { url, headers } => {
+                return Ok(SpawnSpec {
+                    name: self.name.clone(),
+                    startup_timeout: self.startup_timeout,
+                    kind: SpawnKind::Http {
+                        url: url.clone(),
+                        headers: headers.clone(),
+                    },
+                });
+            }
+            ServerTransport::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => (command, args, env, cwd),
+        };
+        let args_from_entry = args;
+
+        let (command, mut args) = match command {
             ServerCommand::Path(path) => (path.clone(), Vec::new()),
             ServerCommand::Installation(installation) => {
                 let acquired = crate::installation::acquire_installation(
@@ -98,15 +130,17 @@ impl ResolvedServer {
                 }
             }
         };
-        args.extend(self.args.iter().cloned());
+        args.extend(args_from_entry.iter().cloned());
 
         Ok(SpawnSpec {
             name: self.name.clone(),
-            command,
-            args,
-            env: self.env.clone(),
-            cwd: self.cwd.clone(),
             startup_timeout: self.startup_timeout,
+            kind: SpawnKind::Child {
+                command,
+                args,
+                env: env.clone(),
+                cwd: cwd.clone(),
+            },
         })
     }
 
@@ -215,7 +249,11 @@ pub async fn prewarm(sym: &Symposium, resolution: &Resolution) {
             }
         }
 
-        if let ServerCommand::Installation(installation) = &server.command {
+        if let ServerTransport::Stdio {
+            command: ServerCommand::Installation(installation),
+            ..
+        } = &server.transport
+        {
             if let Err(e) =
                 crate::installation::refresh_installation_if_present(sym, installation, None).await
             {
@@ -274,27 +312,55 @@ fn build(entries: Vec<Candidate<'_>>, root: &Path, script_timeout_secs: u64) -> 
             continue;
         }
 
-        let McpTransport::Stdio(stdio) = &entry.transport else {
-            resolution.rejected.push(Rejection {
-                server: name,
-                reason: "only stdio servers are supported".to_string(),
-            });
-            continue;
-        };
-        let command = match &stdio.command {
-            StdioCommand::Path(path) => ServerCommand::Path(path.clone()),
-            StdioCommand::Installation(installation) => {
-                match plugin.get_installation(installation) {
-                    Some(found) => ServerCommand::Installation(Box::new(found.clone())),
-                    None => {
-                        resolution.rejected.push(Rejection {
-                            server: name,
-                            reason: format!(
-                                "`{owner}` names installation `{installation}`, which it does not declare"
-                            ),
-                        });
-                        continue;
+        let transport = match &entry.transport {
+            McpTransport::Sse(_) => {
+                resolution.rejected.push(Rejection {
+                    server: name,
+                    reason: "the SSE transport is deprecated; declare a streamable HTTP server \
+                             with `url` instead"
+                        .to_string(),
+                });
+                continue;
+            }
+            McpTransport::Http(remote) => match expand_remote(remote) {
+                Ok((url, headers)) => ServerTransport::Http { url, headers },
+                Err(unset) => {
+                    resolution.rejected.push(Rejection {
+                        server: name,
+                        reason: format!(
+                            "`{owner}` references environment variable `{unset}`, which is not set"
+                        ),
+                    });
+                    continue;
+                }
+            },
+            McpTransport::Stdio(stdio) => {
+                let command = match &stdio.command {
+                    StdioCommand::Path(path) => ServerCommand::Path(path.clone()),
+                    StdioCommand::Installation(installation) => {
+                        match plugin.get_installation(installation) {
+                            Some(found) => ServerCommand::Installation(Box::new(found.clone())),
+                            None => {
+                                resolution.rejected.push(Rejection {
+                                    server: name,
+                                    reason: format!(
+                                        "`{owner}` names installation `{installation}`, which it does not declare"
+                                    ),
+                                });
+                                continue;
+                            }
+                        }
                     }
+                };
+                ServerTransport::Stdio {
+                    command,
+                    args: stdio.args.clone(),
+                    env: stdio
+                        .env
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                    cwd: stdio.cwd.as_ref().map(|dir| root.join(dir)),
                 }
             }
         };
@@ -325,14 +391,7 @@ fn build(entries: Vec<Candidate<'_>>, root: &Path, script_timeout_secs: u64) -> 
         claimed.push((name.clone(), owner));
         resolution.servers.push(ResolvedServer {
             name: name.clone(),
-            command,
-            args: stdio.args.clone(),
-            env: stdio
-                .env
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-            cwd: stdio.cwd.as_ref().map(|dir| root.join(dir)),
+            transport,
             startup_timeout: Duration::from_secs(
                 entry.overrides.startup_timeout_secs.unwrap_or(30),
             ),
@@ -345,6 +404,53 @@ fn build(entries: Vec<Candidate<'_>>, root: &Path, script_timeout_secs: u64) -> 
 
     resolution.servers.sort_by(|a, b| a.name.cmp(&b.name));
     resolution
+}
+
+/// Expand `${VAR}` references in a remote server's url and headers.
+///
+/// Returns the name of the first variable that is unset and has no default, so
+/// the caller can refuse the server by name. Sending a literal `${TOKEN}` to a
+/// remote endpoint would instead look like an authentication failure.
+fn expand_remote(
+    remote: &crate::plugins::RemoteServer,
+) -> Result<(String, Vec<(String, String)>), String> {
+    let url = expand_vars(&remote.url)?;
+    let mut headers = Vec::with_capacity(remote.headers.len());
+    for (key, value) in &remote.headers {
+        headers.push((key.clone(), expand_vars(value)?));
+    }
+    Ok((url, headers))
+}
+
+/// Substitute `${VAR}` and `${VAR:-default}` from the environment.
+fn expand_vars(input: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[start..]);
+            return Ok(out);
+        };
+        let reference = &after[..end];
+        let (name, default) = match reference.split_once(":-") {
+            Some((name, default)) => (name, Some(default)),
+            None => (reference, None),
+        };
+        match std::env::var(name) {
+            Ok(value) => out.push_str(&value),
+            Err(_) => match default {
+                Some(default) => out.push_str(default),
+                None => return Err(name.to_string()),
+            },
+        }
+        rest = &after[end + 1..];
+    }
+
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// Reconcile a plugin's call timeout with the user's script deadline.
@@ -435,6 +541,13 @@ mod tests {
         )
     }
 
+    fn stdio_cwd(server: &ResolvedServer) -> Option<&Path> {
+        match &server.transport {
+            ServerTransport::Stdio { cwd, .. } => cwd.as_deref(),
+            ServerTransport::Http { .. } => None,
+        }
+    }
+
     #[test]
     fn relative_cwd_resolves_against_the_workspace_root() {
         let mut entry = stdio("sqlx");
@@ -443,10 +556,10 @@ mod tests {
         }
         let out = resolve_all(vec![(&entry, "db-plugin")], 120);
         assert_eq!(
-            out.servers[0].cwd.as_deref(),
+            stdio_cwd(&out.servers[0]),
             Some(Path::new("/ws/crates/db")),
             "got: {:?}",
-            out.servers[0].cwd
+            stdio_cwd(&out.servers[0])
         );
     }
 
@@ -457,7 +570,7 @@ mod tests {
             s.cwd = Some("/opt/db".into());
         }
         let out = resolve_all(vec![(&entry, "db-plugin")], 120);
-        assert_eq!(out.servers[0].cwd.as_deref(), Some(Path::new("/opt/db")));
+        assert_eq!(stdio_cwd(&out.servers[0]), Some(Path::new("/opt/db")));
     }
 
     #[test]
@@ -472,23 +585,101 @@ mod tests {
 
     /// A silently missing server looks like a broken workspace, so refusals
     /// are reported.
-    #[test]
-    fn http_servers_are_refused_with_a_reason() {
-        let entry = PluginMcpServer {
-            name: "remote".to_string(),
+    fn remote(name: &str, url: &str, headers: &[(&str, &str)]) -> PluginMcpServer {
+        PluginMcpServer {
+            name: name.to_string(),
             predicates: Default::default(),
             overrides: McpServerOverrides::default(),
             transport: McpTransport::Http(crate::plugins::RemoteServer {
-                url: "http://localhost:8080/mcp".to_string(),
-                headers: Default::default(),
+                url: url.to_string(),
+                headers: headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
             }),
             requirements: Vec::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn http_servers_resolve_with_their_headers() {
+        let entry = remote(
+            "sqlx",
+            "https://mcp.example.com/mcp",
+            &[("Authorization", "Bearer t")],
+        );
+        let out = resolve_all(vec![(&entry, "p")], 120);
+
+        assert_eq!(out.servers.len(), 1, "rejected: {:?}", out.rejected);
+        match &out.servers[0].transport {
+            ServerTransport::Http { url, headers } => {
+                assert_eq!(url, "https://mcp.example.com/mcp");
+                assert_eq!(
+                    headers,
+                    &vec![("Authorization".to_string(), "Bearer t".to_string())]
+                );
+            }
+            other => panic!("expected an http transport, got {other:?}"),
+        }
+    }
+
+    /// The SSE transport is deprecated in the protocol and has no client in the
+    /// SDK, so it is refused by name rather than half-supported.
+    #[test]
+    fn sse_servers_are_refused_pointing_at_streamable_http() {
+        let mut entry = remote("sqlx", "https://mcp.example.com/sse", &[]);
+        if let McpTransport::Http(remote) = entry.transport.clone() {
+            entry.transport = McpTransport::Sse(remote);
+        }
         let out = resolve_all(vec![(&entry, "p")], 120);
 
         assert!(out.servers.is_empty());
         assert_eq!(out.rejected.len(), 1);
-        assert!(out.rejected[0].reason.contains("stdio"));
+        assert!(
+            out.rejected[0].reason.contains("url"),
+            "got: {}",
+            out.rejected[0].reason
+        );
+    }
+
+    /// A literal `${TOKEN}` reaching a remote endpoint would look like an
+    /// authentication failure, so an unset variable refuses the server instead.
+    #[test]
+    fn an_unset_variable_refuses_the_server_naming_it() {
+        let entry = remote(
+            "sqlx",
+            "https://mcp.example.com/mcp",
+            &[("Authorization", "Bearer ${SYMPOSIUM_TEST_UNSET_TOKEN}")],
+        );
+        let out = resolve_all(vec![(&entry, "p")], 120);
+
+        assert!(out.servers.is_empty());
+        assert_eq!(out.rejected.len(), 1);
+        assert!(
+            out.rejected[0]
+                .reason
+                .contains("SYMPOSIUM_TEST_UNSET_TOKEN"),
+            "got: {}",
+            out.rejected[0].reason
+        );
+    }
+
+    #[test]
+    fn a_default_stands_in_for_an_unset_variable() {
+        let entry = remote(
+            "sqlx",
+            "${SYMPOSIUM_TEST_UNSET_BASE:-https://fallback.example.com}/mcp",
+            &[],
+        );
+        let out = resolve_all(vec![(&entry, "p")], 120);
+
+        assert_eq!(out.servers.len(), 1, "rejected: {:?}", out.rejected);
+        match &out.servers[0].transport {
+            ServerTransport::Http { url, .. } => {
+                assert_eq!(url, "https://fallback.example.com/mcp")
+            }
+            other => panic!("expected an http transport, got {other:?}"),
+        }
     }
 
     /// First-wins would drop one plugin's server silently, and a warning on
@@ -589,8 +780,11 @@ mod tests {
 
         assert_eq!(out.servers.len(), 1, "rejected: {:?}", out.rejected);
         assert!(matches!(
-            out.servers[0].command,
-            ServerCommand::Installation(_)
+            &out.servers[0].transport,
+            ServerTransport::Stdio {
+                command: ServerCommand::Installation(_),
+                ..
+            }
         ));
     }
 

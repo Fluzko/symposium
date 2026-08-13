@@ -24,7 +24,7 @@ use super::declarations::{
     KeyMatch, ToolBinding, ToolDecl, binding_table, render_server, resolve_key,
 };
 use super::dispatch::Namespace;
-use super::resolve::{Rejection, Resolution, ResolvedServer, ServerCommand};
+use super::resolve::{Rejection, Resolution, ResolvedServer, ServerCommand, ServerTransport};
 use super::supervisor::{RestartPolicy, Supervisor};
 
 /// How much to say about each tool.
@@ -492,16 +492,46 @@ impl CatalogState {
     }
 }
 
-/// Whether two resolutions describe the same child process. Only the spawn
-/// matters; anything else that moved in the manifest does not.
+/// Whether two resolutions describe the same connection. Only what it takes to
+/// reach the server matters; anything else that moved in the manifest does not.
 fn same_spawn(a: &ResolvedServer, b: &ResolvedServer) -> bool {
     a.name == b.name
-        && a.args == b.args
-        && a.env == b.env
-        && a.cwd == b.cwd
-        && match (&a.command, &b.command) {
-            (ServerCommand::Path(x), ServerCommand::Path(y)) => x == y,
-            (ServerCommand::Installation(x), ServerCommand::Installation(y)) => x.name == y.name,
+        && match (&a.transport, &b.transport) {
+            (
+                ServerTransport::Stdio {
+                    command: x,
+                    args: xa,
+                    env: xe,
+                    cwd: xc,
+                },
+                ServerTransport::Stdio {
+                    command: y,
+                    args: ya,
+                    env: ye,
+                    cwd: yc,
+                },
+            ) => {
+                xa == ya
+                    && xe == ye
+                    && xc == yc
+                    && match (x, y) {
+                        (ServerCommand::Path(x), ServerCommand::Path(y)) => x == y,
+                        (ServerCommand::Installation(x), ServerCommand::Installation(y)) => {
+                            x.name == y.name
+                        }
+                        _ => false,
+                    }
+            }
+            (
+                ServerTransport::Http {
+                    url: x,
+                    headers: xh,
+                },
+                ServerTransport::Http {
+                    url: y,
+                    headers: yh,
+                },
+            ) => x == y && xh == yh,
             _ => false,
         }
 }

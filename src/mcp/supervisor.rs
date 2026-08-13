@@ -251,11 +251,13 @@ mod tests {
     fn spec(fixture: &Fixture, startup_timeout: Duration) -> SpawnSpec {
         SpawnSpec {
             name: "mock".to_string(),
-            command: mock_binary(),
-            args: vec!["--config".to_string(), fixture.config.display().to_string()],
-            env: Vec::new(),
-            cwd: None,
             startup_timeout,
+            kind: crate::mcp::client::SpawnKind::Child {
+                command: mock_binary(),
+                args: vec!["--config".to_string(), fixture.config.display().to_string()],
+                env: Vec::new(),
+                cwd: None,
+            },
         }
     }
 
@@ -381,11 +383,13 @@ mod tests {
         let mut sup = Supervisor::new(
             SpawnSpec {
                 name: "x".into(),
-                command: "true".into(),
-                args: vec![],
-                env: vec![],
-                cwd: None,
                 startup_timeout: Duration::from_secs(1),
+                kind: crate::mcp::client::SpawnKind::Child {
+                    command: "true".into(),
+                    args: vec![],
+                    env: vec![],
+                    cwd: None,
+                },
             },
             RestartPolicy {
                 base_backoff: Duration::from_secs(1),
@@ -473,11 +477,13 @@ mod tests {
 
         let relative = SpawnSpec {
             name: "mock".to_string(),
-            command: mock_binary(),
-            args: vec!["--config".to_string(), "mock.json".to_string()],
-            env: Vec::new(),
-            cwd: Some(dir.clone()),
             startup_timeout: Duration::from_secs(10),
+            kind: crate::mcp::client::SpawnKind::Child {
+                command: mock_binary(),
+                args: vec!["--config".to_string(), "mock.json".to_string()],
+                env: Vec::new(),
+                cwd: Some(dir.clone()),
+            },
         };
         let mut sup = Supervisor::new(relative, fast_policy());
         sup.call("echo", json!({"ok": 1}), Duration::from_secs(5))
@@ -489,11 +495,13 @@ mod tests {
         let mut without_cwd = Supervisor::new(
             SpawnSpec {
                 name: "mock".to_string(),
-                command: mock_binary(),
-                args: vec!["--config".to_string(), "mock.json".to_string()],
-                env: Vec::new(),
-                cwd: None,
                 startup_timeout: Duration::from_secs(10),
+                kind: crate::mcp::client::SpawnKind::Child {
+                    command: mock_binary(),
+                    args: vec!["--config".to_string(), "mock.json".to_string()],
+                    env: Vec::new(),
+                    cwd: None,
+                },
             },
             fast_policy(),
         );

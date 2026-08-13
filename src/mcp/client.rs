@@ -104,9 +104,12 @@ impl std::fmt::Display for ClientError {
             } => write!(f, "{server}.{tool} did not answer within {limit_secs}s"),
             Self::Protocol { server, detail } => write!(f, "{server}: {detail}"),
             Self::Tool { message } => write!(f, "{message}"),
-            Self::AuthRequired { server, .. } => {
-                write!(f, "{server} requires authorization")
-            }
+            // Names the command, because this message is read by the agent and
+            // relayed to a user who otherwise has no way to know what to do.
+            Self::AuthRequired { server, .. } => write!(
+                f,
+                "{server} requires authorization; run `cargo agents mcp login {server}`"
+            ),
         }
     }
 }

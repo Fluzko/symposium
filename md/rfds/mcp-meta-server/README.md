@@ -422,11 +422,13 @@ The design has a `Dead` state restarted on the next call, which crash-loops fore
 
 The design also resolves two plugins claiming one server name by first-registered-wins with a warning. That silently drops one plugin's entire server, and a warning on a stdio server's stderr is invisible. Both are now refused by name, as is a server taking a name the meta-server itself uses. Refusals appear in `list_tools` output rather than only in a log, so a real session showed that a refusal nobody can see is no better than the silent drop it replaced.
 
-### v1 is stdio only
+### Remote servers arrived after stdio, and SSE never will
 
-The design says the meta-server bridges whatever transport a backing server declares. HTTP and SSE entries parse but are refused with a reason.
+The design says the meta-server bridges whatever transport a backing server declares. It shipped stdio first; streamable HTTP, with OAuth, followed.
 
-Two causes: the Rust SDK has no legacy SSE client, and SSE is still the default for URL-configured servers in most comparable projects; and forwarding credentials to a remote endpoint is an exfiltration surface not considered.
+The original note gave two reasons for deferring, and only one survived contact with the specification. Legacy HTTP+SSE has been deprecated since protocol revision 2025-03-26, is eligible for removal, and has no client in the Rust SDK, so `transport = "sse"` is now refused at validation rather than described as a temporary gap. The other reason - that forwarding credentials to a remote endpoint is an unconsidered exfiltration surface - was the wrong frame: the risk is a manifest naming an arbitrary destination, which is plugin trust plus SSRF, and neither is a property of HTTP. Both are addressed directly: URLs are checked before and after resolution, private ranges and redirects are refused, and remote endpoints appear in `cargo agents status` so a user can see where calls would go.
+
+What deferring did get right is that remote support is not useful without OAuth. Measured against six public servers, three connect anonymously and three - Sentry, Notion, GitHub - refuse to talk at all without it. Shipping HTTP with header authentication alone would have reached internal servers and none of the ones users name.
 
 ### Symposium owns the plugin manifest shape
 

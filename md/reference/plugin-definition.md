@@ -514,27 +514,53 @@ cwd = "crates/db"
 | `env` | table | Environment for the child, as a `name = "value"` table. Defaults to empty. |
 | `cwd` | string | Directory to run in, resolved against the workspace root. |
 
-### HTTP and SSE
+### Remote servers
 
-A `url` makes the entry remote. `transport` selects between the two remote transports and defaults to `http`; there is no `type` field.
+A `url` makes the entry remote, reached over streamable HTTP:
 
 ```toml
 [[mcp_servers]]
 name = "my-server"
-url = "http://localhost:8080/mcp"
-headers = { Authorization = "Bearer token" }
-
-[[mcp_servers]]
-name = "my-sse-server"
-url = "http://localhost:8080/sse"
-transport = "sse"
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "Bearer ${MY_TOKEN}" }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `url` | string | The endpoint. Setting it rejects `args`, `env` and `cwd`, which apply only to a child process. |
-| `transport` | string | `"http"` (the default) or `"sse"`. |
+| `transport` | string | `"http"`, the default and only supported value. `"sse"` is rejected (see below). |
 | `headers` | table | Headers to send, as a `name = "value"` table. Only valid with a `url`. |
+
+`url` and `headers` expand `${VAR}` and `${VAR:-default}` from the
+environment, so a manifest can name a credential without carrying it. A
+variable that is unset and has no default refuses the server by name rather
+than sending the literal text, which a server would report as an
+authentication failure.
+
+**Which endpoints are allowed.** A manifest names the destination, so the URL
+is checked before anything is attempted and again once resolved: `https` only,
+except loopback for local development; private and reserved address ranges are
+refused, including the cloud metadata address; and redirects are not followed,
+since a redirect to another host would escape the check just made.
+
+**Servers requiring OAuth.** A server that answers `401` is reported as
+requiring authorization, naming the command to fix it:
+
+```bash
+cargo agents mcp login my-server     # opens the browser, stores the token
+cargo agents mcp logout my-server    # discards it
+```
+
+Tokens live in `~/.symposium/credentials/<server>.json`, mode `0600`, one file
+per server, and are refreshed automatically. `cargo agents status` lists each
+remote server with its URL and whether a token is stored. The login flow runs
+as a command rather than inside the meta-server because that process is a child
+of the agent: its stdout carries JSON-RPC and it has no terminal, so it can
+neither open a browser nor show a URL.
+
+**SSE is not supported.** The HTTP+SSE transport has been deprecated since
+protocol revision 2025-03-26 and is eligible for removal; `transport = "sse"`
+is rejected at validation with a pointer to streamable HTTP.
 
 ### How registration works
 

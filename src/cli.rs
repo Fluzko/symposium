@@ -123,6 +123,12 @@ pub enum Commands {
         command: PluginCommand,
     },
 
+    /// Manage remote MCP servers
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+
     /// Update symposium to the latest version
     SelfUpdate,
 
@@ -173,12 +179,26 @@ pub enum TelemetryCommand {
 /// this only covers the static `Commands` variants above.
 pub fn builtin_audience(name: &str) -> Option<Audience> {
     match name {
-        "init" | "sync" | "search" | "use" | "status" | "self-update" | "plugin" | "telemetry" => {
-            Some(Audience::Humans)
-        }
+        "init" | "sync" | "search" | "use" | "status" | "self-update" | "plugin" | "telemetry"
+        | "mcp" => Some(Audience::Humans),
         "crate-info" => Some(Audience::Agents),
         _ => None,
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    /// Sign in to a remote MCP server that requires authorization
+    Login {
+        /// Server name, as the plugin declares it
+        name: String,
+    },
+
+    /// Discard stored credentials for a remote MCP server
+    Logout {
+        /// Server name, as the plugin declares it
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -343,6 +363,11 @@ pub async fn run(
         }
         // These commands can't easily be extracted since they do I/O
         // (stdin/stdout for hooks). The binary handles them directly.
+        Commands::Mcp { command } => match command {
+            McpCommand::Login { name } => crate::mcp::login::login(sym, cwd, &name, out).await,
+            McpCommand::Logout { name } => crate::mcp::login::logout(sym, &name, out).await,
+        },
+
         Commands::Hook { .. } | Commands::Plugin { .. } => {
             anyhow::bail!("command not supported in library dispatch (use binary)")
         }

@@ -99,6 +99,9 @@ async fn main() -> ExitCode {
             tracing::debug!(?agent, ?event, "cargo agents hook");
         }
         Some(Commands::McpServe) => tracing::debug!("cargo agents mcp-serve"),
+        Some(Commands::Mcp { command }) => {
+            tracing::info!(subcommand = ?command, "cargo agents mcp");
+        }
         Some(Commands::SelfUpdate) => tracing::info!("cargo agents self-update"),
         Some(Commands::CrateInfo { name, version }) => {
             tracing::debug!(%name, version = ?version, "cargo agents crate-info");

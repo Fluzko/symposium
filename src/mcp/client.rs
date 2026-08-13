@@ -13,20 +13,22 @@
 //! * **A result has to be unwrapped.** The wire form is a content envelope,
 //!   but a script wants the value. See [`unwrap_result`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ProtocolVersion, Tool};
 use rmcp::service::{ClientInitializeError, RoleClient, RunningService};
+use rmcp::transport::auth::{AuthClient, AuthorizationManager};
 use rmcp::transport::streamable_http_client::{
-    AuthRequiredError, InsufficientScopeError, StreamableHttpClientTransportConfig,
+    AuthRequiredError, InsufficientScopeError, StreamableHttpClient,
+    StreamableHttpClientTransportConfig,
 };
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use serde_json::{Map, Value};
 
-use super::endpoint;
+use super::{credentials, endpoint};
 
 /// Everything needed to start a backing server.
 #[derive(Debug, Clone)]
@@ -49,6 +51,8 @@ pub enum SpawnKind {
     Http {
         url: String,
         headers: Vec<(String, String)>,
+        /// Where stored OAuth credentials for this server are looked for.
+        config_dir: PathBuf,
     },
 }
 
@@ -155,7 +159,11 @@ impl BackingServer {
                 env,
                 cwd,
             } => Self::spawn_child(spec, command, args, env, cwd.as_deref()).await,
-            SpawnKind::Http { url, headers } => Self::connect_http(spec, url, headers).await,
+            SpawnKind::Http {
+                url,
+                headers,
+                config_dir,
+            } => Self::connect_http(spec, url, headers, config_dir).await,
         }
     }
 
@@ -217,6 +225,7 @@ impl BackingServer {
         spec: &SpawnSpec,
         url: &str,
         headers: &[(String, String)],
+        config_dir: &Path,
     ) -> Result<Self, ClientError> {
         let mut custom = std::collections::HashMap::new();
         for (key, value) in headers {
@@ -255,7 +264,56 @@ impl BackingServer {
 
         let config =
             StreamableHttpClientTransportConfig::with_uri(url.to_string()).custom_headers(custom);
-        let transport = StreamableHttpClientTransport::with_client(http, config);
+
+        // A stored token turns the plain client into an authorizing one, which
+        // also refreshes on expiry. Without one the connection is attempted
+        // anyway: a server may not require auth, and one that does answers with
+        // the challenge that tells the user to log in.
+        match Self::authorizing_client(spec, url, config_dir, http.clone()).await {
+            Some(client) => Self::serve_streamable(spec, client, config).await,
+            None => Self::serve_streamable(spec, http, config).await,
+        }
+    }
+
+    async fn authorizing_client(
+        spec: &SpawnSpec,
+        url: &str,
+        config_dir: &Path,
+        http: reqwest::Client,
+    ) -> Option<AuthClient<reqwest::Client>> {
+        let store = credentials::FileCredentialStore::new(config_dir, &spec.name);
+        if !store.exists() {
+            return None;
+        }
+
+        let mut manager = match AuthorizationManager::new(url).await {
+            Ok(manager) => manager,
+            Err(e) => {
+                tracing::warn!(server = %spec.name, error = %e, "could not prepare authorization");
+                return None;
+            }
+        };
+        manager.set_credential_store(store);
+
+        match manager.initialize_from_store().await {
+            Ok(true) => Some(AuthClient::new(http, manager)),
+            Ok(false) => None,
+            Err(e) => {
+                tracing::warn!(server = %spec.name, error = %e, "stored credentials unusable");
+                None
+            }
+        }
+    }
+
+    async fn serve_streamable<C>(
+        spec: &SpawnSpec,
+        client: C,
+        config: StreamableHttpClientTransportConfig,
+    ) -> Result<Self, ClientError>
+    where
+        C: StreamableHttpClient + Send + Sync + 'static,
+    {
+        let transport = StreamableHttpClientTransport::with_client(client, config);
 
         // No stderr to quote for a remote server; the transport error is the
         // whole account of a failure.

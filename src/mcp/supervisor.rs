@@ -399,6 +399,7 @@ mod tests {
                     // point: no network is needed to prove the state machine.
                     url: "https://10.0.0.1/mcp".into(),
                     headers: vec![],
+                    config_dir: std::path::PathBuf::from("/nonexistent"),
                 },
             },
             fast_policy(),

@@ -96,6 +96,7 @@ impl ResolvedServer {
                     kind: SpawnKind::Http {
                         url: url.clone(),
                         headers: headers.clone(),
+                        config_dir: sym.config_dir().to_path_buf(),
                     },
                 });
             }

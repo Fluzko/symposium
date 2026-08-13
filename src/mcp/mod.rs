@@ -9,9 +9,11 @@
 pub mod catalog;
 pub mod client;
 pub mod console;
+pub mod credentials;
 pub mod declarations;
 pub mod dispatch;
 pub mod endpoint;
+pub mod login;
 pub mod normalize;
 pub mod resolve;
 pub mod sandbox;

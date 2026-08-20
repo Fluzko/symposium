@@ -67,7 +67,7 @@ Other clients must ignore keys they do not know, so this costs you nothing in po
 
 ## Skills
 
-Every direct child of `skills/` that holds a `SKILL.md` is one skill, in the usual [skill format](../../reference/skill-definition.md). Deeper folders are not searched. A broken skill is skipped and reported, and the rest of the package still loads.
+Every direct child of `skills/` that holds a `SKILL.md` is one skill, in the usual [skill format](../../reference/skill-definition.md). Deeper folders are not searched. A broken skill — malformed frontmatter, or missing a field the skill format requires — is skipped and reported, and the rest of the package still loads.
 
 Where those skills end up per agent is covered in [How extensions are installed](./proposed-install.md).
 

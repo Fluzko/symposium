@@ -33,7 +33,7 @@ Symposium guarantees to an agent that it:
 - delivers the selected skills in the unit that agent understands;
 - installs at the scope of the enablement that selected the plugin, and never wider;
 - writes only into locations it marks as its own, leaving user-managed content untouched; and
-- removes what it previously installed and no longer owns.
+- removes what it previously installed and no longer owns, on the next sync — whenever a plugin stops applying, not only when Symposium itself is removed.
 
 What Symposium does not delegate is equally definite. Predicates and `depends-on` are evaluated before a directory is produced, so an agent never receives a gate and never resolves one. Hooks remain registered and dispatched by Symposium, which is what allows a hook to be authored once in a vendor-neutral format and evaluated per dispatch. Installations, custom predicates, and subcommands have no portable representation and stay where they are.
 
@@ -68,7 +68,7 @@ pdf-tools/
       SKILL.md
 ```
 
-That directory is then installed for every agent that accepts one, in whichever manifest dialect the agent reads. The change is built around three replaceable boundaries: a compiled plugin model derived from an already-gated Symposium plugin; a per-agent emitter that renders that model into a directory and installs it; and a loader that recognizes an externally authored package as an ordinary plugin.
+That directory is then installed for every agent that accepts one, in whichever manifest dialect the agent reads — see [Agent backends](#agent-backends) below for which format and mechanism each agent gets. The change is built around three replaceable boundaries: a compiled plugin model derived from an already-gated Symposium plugin; a per-agent emitter that renders that model into a directory and installs it; and a loader that recognizes an externally authored package as an ordinary plugin.
 
 ## Detailed plans
 

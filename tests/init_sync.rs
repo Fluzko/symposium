@@ -1,5 +1,6 @@
 //! Integration tests for init and sync flows.
 
+use std::ops::Not;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -2453,6 +2454,174 @@ async fn sync_crate_metadata_missing_path_dir() {
             assert!(
                 entries.is_empty(),
                 "nonexistent path entry should produce zero skills, found: {entries:?}"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+// ── Compiled agent plugin directories ────────────────────────────────
+
+/// Sync compiles each applicable plugin into an agent plugin directory, choosing
+/// the staging root by scope: a dependency-gated plugin is project-scoped, a
+/// `depends-on = ["*"]` one is workspace-independent and so goes global.
+#[tokio::test]
+async fn sync_compiles_plugins_into_scoped_staging_roots() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugin-skill-group0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            let events = ctx.sync_with_report(tracing::Level::INFO).await?;
+
+            let root = ctx.workspace_root.clone().expect("workspace root");
+            let project = root.join(".symposium/plugins/my-plugin");
+            let global = ctx.sym.config_dir().join("installed/wildcard-plugin");
+
+            let manifest: Value = serde_json::from_str(
+                &std::fs::read_to_string(project.join("plugin.json")).expect("read manifest"),
+            )
+            .expect("parse manifest");
+            assert_eq!(manifest["name"], "my-plugin");
+            assert_eq!(
+                manifest["$schema"],
+                "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+            );
+            assert!(
+                project.join("skills/serde-guidance/SKILL.md").is_file(),
+                "the plugin's skills are resolved into its own skills/ directory"
+            );
+            assert!(
+                project.join(".symposium").is_file(),
+                "compiled directories carry the ownership marker"
+            );
+            assert!(
+                !project.join(".gitignore").exists(),
+                "one .gitignore covers the whole .symposium tree"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join(".symposium/.gitignore")).expect("gitignore"),
+                "*\n"
+            );
+
+            assert!(
+                global.join("skills/wildcard-guidance/SKILL.md").is_file(),
+                "a workspace-independent plugin compiles to the global root, not the project"
+            );
+            assert!(
+                !root.join(".symposium/plugins/wildcard-plugin").exists(),
+                "and not to both"
+            );
+
+            let compiled: Vec<&Value> = events
+                .iter()
+                .filter(|e| e["kind"] == "plugin_compiled")
+                .collect();
+            let mut reported: Vec<(&str, &str)> = compiled
+                .iter()
+                .map(|e| {
+                    (
+                        e["plugin"].as_str().expect("plugin"),
+                        e["scope"].as_str().expect("scope"),
+                    )
+                })
+                .collect();
+            reported.sort();
+            assert_eq!(
+                reported,
+                vec![("my-plugin", "project"), ("wildcard-plugin", "global")]
+            );
+
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// A plugin that stops applying has its compiled directory reaped on the next
+/// sync, and the per-skill installs are unaffected by compilation.
+#[tokio::test]
+async fn compiled_directories_are_reaped_when_a_plugin_stops_applying() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugin-skill-group0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let root = ctx.workspace_root.clone().expect("workspace root");
+            let compiled = root.join(".symposium/plugins/my-plugin");
+            assert!(compiled.is_dir());
+            assert!(
+                find_installed_skills(&root.join(".claude/skills"), "serde-guidance").len() == 1,
+                "the per-skill install is untouched by compilation"
+            );
+
+            let manifest = ctx
+                .sym
+                .config_dir()
+                .join("plugins/my-plugin/SYMPOSIUM.toml");
+            std::fs::write(
+                &manifest,
+                "name = \"my-plugin\"\ndepends-on = [\"nowhere-crate\"]\n\n[[skills]]\nsource.path = \".\"\n",
+            )?;
+            ctx.symposium(&["sync"]).await?;
+
+            assert!(
+                !compiled.exists(),
+                "a plugin that no longer applies loses its compiled directory"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Global installs are shared by every project, so one project's sync must not
+/// reap what another's put there. That holds only because a globally-compiled
+/// plugin's gate is workspace-independent by construction.
+#[tokio::test]
+async fn syncing_another_workspace_leaves_global_plugins_alone() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugin-skill-group0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let global = ctx.sym.config_dir().join("installed/wildcard-plugin");
+            assert!(global.is_dir(), "first sync installs the global plugin");
+            assert!(
+                ctx.sym.config_dir().join("installed/my-plugin").exists().not(),
+                "a dependency-gated plugin must never reach the global root, or the \
+                 next project's sync would reap it"
+            );
+
+            let other = ctx.tempdir.join("other-workspace");
+            std::fs::create_dir_all(other.join("src"))?;
+            std::fs::write(
+                other.join("Cargo.toml"),
+                "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+            )?;
+            std::fs::write(other.join("src/lib.rs"), "")?;
+            ctx.workspace_root = Some(other.clone());
+            ctx.symposium(&["sync"]).await?;
+
+            assert!(
+                global.is_dir(),
+                "syncing a project with no serde must not disturb the global set"
+            );
+            assert!(
+                other.join(".symposium/plugins/wildcard-plugin").exists().not(),
+                "a global plugin is not also compiled into each project"
+            );
+            assert!(
+                other.join(".symposium/plugins/my-plugin").exists().not(),
+                "the serde-gated plugin does not apply in a workspace without serde"
             );
             Ok(())
         },

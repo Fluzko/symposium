@@ -66,6 +66,14 @@ pub enum ReportEvent {
         reason: Option<String>,
     },
 
+    /// A plugin was compiled into an agent plugin directory.
+    PluginCompiled {
+        plugin: String,
+        scope: String,
+        skills: usize,
+        dest: String,
+    },
+
     /// A skill was installed to an agent's directory.
     SkillInstalled {
         skill: String,
@@ -228,6 +236,14 @@ impl ReportEvent {
                     let r = reason.as_deref().unwrap_or("predicates not satisfied");
                     format!("      skill {skill} ({plugin}): skipped ({r})")
                 }
+            }
+            Self::PluginCompiled {
+                plugin,
+                scope,
+                skills,
+                dest,
+            } => {
+                format!("📦 compiled {plugin} ({scope}, {skills} skills) → {dest}")
             }
             Self::SkillInstalled {
                 skill,

@@ -69,7 +69,7 @@ impl Skill {
 // only a string — not a structured origin — is carried to the sync layer.
 
 /// 8-hex-char prefix of SHA-256 over the JSON-serialized origin key.
-fn hash_origin_key<T: serde::Serialize>(key: &T) -> String {
+pub(crate) fn hash_origin_key<T: serde::Serialize>(key: &T) -> String {
     use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(key).expect("origin key always serializes");
     let digest = Sha256::digest(&bytes);
@@ -100,6 +100,10 @@ pub struct SkillWithGroupContext {
     /// and dedup at sync time.
     pub origin_hash: String,
     pub plugin: String,
+    /// Canonical id of the plugin that contributed the skill. Groups skills into
+    /// compiled plugin directories, where the plugin *name* is only a display
+    /// label and two registries can supply the same one.
+    pub plugin_id: crate::pm::PackageId,
 }
 
 /// Resolve all applicable skills from the registry.
@@ -576,6 +580,7 @@ fn collect_skill_applicable_to(
         skill,
         origin_hash,
         plugin: plugin_name.to_string(),
+        plugin_id: parsed.canonical.clone(),
     });
 }
 

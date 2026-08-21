@@ -29,6 +29,18 @@ The consent prompt and the `use` / `search` / `status` commands that record deci
 
 The key code paths are in `discovery.rs`, `config.rs` (`PluginsConfig`, `UseEntry`), `pm/cargo/mod.rs` (`active_plugins`, `load_plugin`), `plugins.rs` (`Plugin::requires_use`), `predicate.rs` (`PredicateContext::is_used`), and `skills.rs` (`active_plugins`, `record_active`).
 
+## Compilation into agent plugin directories
+
+Every `cargo agents sync` compiles the plugins that apply into the directory unit agents consume. The step runs after skills are resolved, so it never re-evaluates a gate.
+
+1. `agent_plugin::compile` groups the applicable skills by their contributing plugin's `canonical` id and builds one `CompiledPlugin` each: a manifest name (slugged into the format's grammar), an optional version (the manifest's, else a crate plugin's resolved version — a registry placeholder `*` is not a version), the plugin's description, and one skill entry per distinct origin.
+2. Directory names are disambiguated across plugins, and skill directory names within each plugin, using the same origin-hash suffix rule that already governs skill installs.
+3. `Scope::of` sends each compiled plugin to `<project root>/.symposium/plugins/` or `<config dir>/installed/`. Global requires the plugin, its groups, and its skills to all be workspace-independent, and a dormant plugin to be woken by a *global* `use` entry — see [key modules](./module-structure.md#agent_plugin--compiling-an-agent-plugin-directory) for why that is a correctness requirement and not a preference.
+4. `agent_plugin::write` stages the content in a temporary directory and syncs it in through `sync::sync_managed_dir`, so an unchanged plugin is not recopied. The directory gets the `.symposium` marker; the project tree's single `.gitignore` is written at `.symposium/` rather than into each plugin.
+5. `agent_plugin::reap` removes marked directories under each root that this sync did not write. Reaping the global root from a project sync is sound only because step 3 keeps the global set a function of user config alone.
+
+Per-agent delivery of these directories is not wired up yet; the per-skill install path is still what reaches agents. The key code paths are in `agent_plugin/mod.rs` (`compile`, `Scope::of`, `write`, `reap`), `agent_plugin/manifest.rs` (`slug`, `is_valid_name`), `predicate.rs` (`is_workspace_independent`), and `sync.rs`.
+
 ## Help rendering
 
 `cargo agents --help` (and `-h`, the bare `help` keyword, or no subcommand) is rendered by `help_render`, not by clap's default help.

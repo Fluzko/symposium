@@ -160,6 +160,14 @@ impl PluginsConfig {
             .collect()
     }
 
+    /// Is `name` enabled by a `use` entry that applies in every workspace?
+    pub fn is_used_globally(&self, name: &str) -> bool {
+        self.used.iter().any(|entry| match entry {
+            UseEntry::Global(entry) => name_matches(entry, name),
+            UseEntry::Workspace { .. } => false,
+        })
+    }
+
     /// Does `name` appear in `auto-enable` (directly or via `"*"`)?
     pub fn is_auto_enabled(&self, name: &str) -> bool {
         self.auto_enable

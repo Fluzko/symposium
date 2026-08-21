@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use symposium_install::UpdateLevel;
 
+use crate::agent_plugin::Scope;
 use crate::agents::Agent;
 use crate::config::Symposium;
 use crate::output::{Output, display_path};
@@ -55,30 +56,51 @@ fn skills_parent_dir(agent: Agent, project_root: &Path) -> PathBuf {
         .to_path_buf()
 }
 
-/// Mark a directory as symposium-managed: drop the `.symposium` marker
-/// and a `.gitignore` containing `*` so the directory is recognized on
-/// future syncs and kept out of version control.
+/// Whether a managed directory also needs its own `.gitignore`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Marking {
+    /// Marker plus a `.gitignore` containing `*`. For a directory installed into
+    /// agent-owned territory such as `.claude/skills/`, where the parent holds
+    /// user content and so cannot be ignored wholesale.
+    MarkerAndGitignore,
+    /// Marker only. For a directory under `.symposium/`, which symposium owns
+    /// entirely and covers with one `.gitignore` at its root.
+    MarkerOnly,
+}
+
+/// Mark a directory as symposium-managed: drop the `.symposium` marker so the
+/// directory is recognized on future syncs, and, per `marking`, a `.gitignore`
+/// containing `*` to keep it out of version control.
 ///
 /// Idempotent: overwrites any pre-existing marker or `.gitignore` in `dir`.
-fn mark_managed_dir(dir: &Path) -> Result<()> {
+fn mark_managed_dir(dir: &Path, marking: Marking) -> Result<()> {
     fs::write(dir.join(MARKER_FILE), "")
         .with_context(|| format!("write marker in {}", dir.display()))?;
-    fs::write(dir.join(".gitignore"), "*\n")
-        .with_context(|| format!("write .gitignore in {}", dir.display()))?;
+    if marking == Marking::MarkerAndGitignore {
+        fs::write(dir.join(".gitignore"), "*\n")
+            .with_context(|| format!("write .gitignore in {}", dir.display()))?;
+    }
     Ok(())
+}
+
+/// Write the single `.gitignore` covering the project directory symposium owns.
+fn ignore_owned_dir(owned: &Path, project_root: &Path) -> Result<()> {
+    create_managed_dir_all(owned, project_root)?;
+    fs::write(owned.join(".gitignore"), "*\n")
+        .with_context(|| format!("write .gitignore in {}", owned.display()))
 }
 
 /// Does `dir` contain the `.symposium` marker, i.e. is it a symposium-managed
 /// skill directory? Returns `false` for user-authored skills and for any
 /// directory symposium did not create.
-fn has_symposium_marker(dir: &Path) -> bool {
+pub(crate) fn has_symposium_marker(dir: &Path) -> bool {
     dir.join(MARKER_FILE).exists()
 }
 
 /// Recursively copy the contents of `src` into `dst`. Creates `dst` if
 /// missing. Regular files are copied with `fs::copy`; subdirectories are
 /// walked. Symlinks and other special files are ignored.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
     for entry in fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
         let entry = entry?;
@@ -154,11 +176,12 @@ fn dir_contents_differ(source_dir: &Path, dest_dir: &Path) -> Result<bool> {
 ///
 /// Returns `Ok(true)` if the destination was created or updated (callers
 /// record it as installed). Returns `Ok(false)` if skipped (no-op).
-fn sync_managed_dir(
+pub(crate) fn sync_managed_dir(
     source_dir: &Path,
     dest_dir: &Path,
-    project_root: &Path,
+    boundary: &Path,
     debounce: Duration,
+    marking: Marking,
 ) -> Result<bool> {
     if dest_dir == source_dir {
         return Ok(false);
@@ -166,9 +189,9 @@ fn sync_managed_dir(
 
     // If the destination doesn't exist yet, do a fresh install.
     if !dest_dir.exists() {
-        create_managed_dir_all(dest_dir, project_root)?;
+        create_managed_dir_all(dest_dir, boundary)?;
         copy_dir_recursive(source_dir, dest_dir)?;
-        mark_managed_dir(dest_dir)?;
+        mark_managed_dir(dest_dir, marking)?;
         return Ok(true);
     }
 
@@ -193,9 +216,9 @@ fn sync_managed_dir(
 
     // Content changed: replace entirely.
     fs::remove_dir_all(dest_dir).with_context(|| format!("remove {}", dest_dir.display()))?;
-    create_managed_dir_all(dest_dir, project_root)?;
+    create_managed_dir_all(dest_dir, boundary)?;
     copy_dir_recursive(source_dir, dest_dir)?;
-    mark_managed_dir(dest_dir)?;
+    mark_managed_dir(dest_dir, marking)?;
     Ok(true)
 }
 
@@ -356,6 +379,62 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
         }
     }
 
+    // Compile each applicable plugin into an agent plugin directory. Nothing
+    // reads these yet — the per-agent delivery lands with the emitters — but the
+    // directories are owned and reaped from here on.
+    let compiled = crate::agent_plugin::compile(&active, &applicable, &sym.config.plugins);
+    let owned_dir = project_root.join(crate::agent_plugin::PROJECT_OWNED_DIR);
+    let project_staging = owned_dir.join(crate::agent_plugin::PROJECT_STAGING_SUBDIR);
+    let global_staging = sym
+        .config_dir()
+        .join(crate::agent_plugin::GLOBAL_STAGING_DIR);
+    let mut staged_project: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut staged_global: BTreeSet<PathBuf> = BTreeSet::new();
+
+    if compiled.iter().any(|p| p.scope == Scope::Project)
+        && let Err(e) = ignore_owned_dir(&owned_dir, &project_root)
+    {
+        tracing::info!(
+            report = %crate::report::ReportEvent::Warning {
+                message: format!("failed to prepare {}: {e}", display_path(&owned_dir)),
+            },
+        );
+    }
+
+    for plugin in &compiled {
+        let (root, boundary, staged) = match plugin.scope {
+            Scope::Project => (
+                &project_staging,
+                project_root.as_path(),
+                &mut staged_project,
+            ),
+            Scope::Global => (&global_staging, sym.config_dir(), &mut staged_global),
+        };
+        match crate::agent_plugin::write(plugin, root, boundary, debounce) {
+            Ok(dest) => {
+                tracing::info!(
+                    report = %crate::report::ReportEvent::PluginCompiled {
+                        plugin: plugin.dir_name.clone(),
+                        scope: plugin.scope.as_str().to_string(),
+                        skills: plugin.skills.len(),
+                        dest: display_path(&dest),
+                    },
+                );
+                staged.insert(dest);
+            }
+            Err(e) => tracing::info!(
+                report = %crate::report::ReportEvent::Warning {
+                    message: format!("failed to compile plugin {}: {e}", plugin.dir_name),
+                },
+            ),
+        }
+    }
+
+    // Reaping the global root from a project sync is only sound because
+    // `Scope::of` keeps the global set a function of user config alone.
+    crate::agent_plugin::reap(&project_staging, &staged_project);
+    crate::agent_plugin::reap(&global_staging, &staged_global);
+
     // Collect MCP servers from the same active plugin set.
     let mut mcp_servers: Vec<sacp::schema::McpServer> = Vec::new();
     for p in &active {
@@ -481,7 +560,13 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                 continue;
             }
 
-            match sync_managed_dir(source_dir, &dest_dir, &project_root, debounce) {
+            match sync_managed_dir(
+                source_dir,
+                &dest_dir,
+                &project_root,
+                debounce,
+                Marking::MarkerAndGitignore,
+            ) {
                 Ok(true) => {
                     installed_dirs.insert(dest_dir.clone());
                     tracing::info!(

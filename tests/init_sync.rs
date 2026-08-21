@@ -2943,3 +2943,46 @@ async fn a_packages_declared_identity_reaches_the_compiled_manifest() {
     .await
     .unwrap();
 }
+
+/// Outside a Rust workspace there is nothing project-scoped to install, but a
+/// globally-enabled plugin still applies, so sync does the global half of its
+/// work instead of refusing to run.
+#[tokio::test]
+async fn sync_outside_a_workspace_installs_the_global_plugins() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["agent-plugin-scopes0"],
+        async |mut ctx| {
+            assert!(
+                ctx.workspace_root.is_none(),
+                "this fixture carries no Cargo.toml, which is the case under test"
+            );
+
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let global = ctx.sym.config_dir().join("installed/global-tools");
+            assert!(
+                global.join("skills/global-guidance/SKILL.md").is_file(),
+                "a `use --global` plugin with a workspace-independent gate still installs"
+            );
+            assert!(
+                ctx.sym
+                    .config_dir()
+                    .join("installed/.claude-plugin/marketplace.json")
+                    .is_file(),
+                "and the global root is still indexed"
+            );
+            assert!(
+                !ctx.sym
+                    .config_dir()
+                    .join("installed/project-tools")
+                    .exists(),
+                "a dependency-gated plugin has no dependencies to match here"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}

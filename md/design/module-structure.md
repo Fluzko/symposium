@@ -28,6 +28,8 @@ Implements `cargo agents sync`. Scans workspace dependencies, finds applicable s
 
 One entry point, `sync(sym, deps, update)`: callers pass an already-built `WorkspaceDeps` so the CLI and the hook pipeline share one cached workspace resolution.
 
+**A workspace is optional.** Without one there is nothing project-scoped to install — no per-skill directories, no project staging root, no project hook registration — but globally-enabled plugins still apply, so the global half of the sync runs rather than the command refusing outright. `ProjectPaths` is the `Option` that carries the project root, its owned `.symposium/` directory, and its staging root together; every project-only step is guarded on it. `status` and a non-`--global` `use` still require a workspace, since each is about one.
+
 `sync` takes an `UpdateLevel` that it threads into skill resolution (`skills::collect_skills`), controlling how aggressively `source.git` skill groups are re-fetched. Callers choose: the auto-sync path passes `Check` on `SessionStart` (refresh) and `None` otherwise (debounced); the binary's global `--update` flag feeds manual `cargo agents sync`.
 
 ### `plugins.rs` — plugin registry

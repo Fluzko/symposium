@@ -507,11 +507,16 @@ fn the_marketplace_index_lists_each_plugin_and_is_removed_when_empty() {
 
 #[test]
 fn a_project_marketplace_is_named_per_workspace() {
-    let global = marketplace_name(Scope::Global, Path::new("/work/reporter"));
+    let global = marketplace_name(Scope::Global, Some(Path::new("/work/reporter")));
     assert_eq!(global, "symposium");
+    assert_eq!(
+        marketplace_name(Scope::Global, None),
+        "symposium",
+        "the global root needs no project to name it"
+    );
 
-    let one = marketplace_name(Scope::Project, Path::new("/work/reporter"));
-    let two = marketplace_name(Scope::Project, Path::new("/elsewhere/reporter"));
+    let one = marketplace_name(Scope::Project, Some(Path::new("/work/reporter")));
+    let two = marketplace_name(Scope::Project, Some(Path::new("/elsewhere/reporter")));
     assert!(one.starts_with("symposium-reporter-"), "{one}");
     assert_ne!(
         one, two,

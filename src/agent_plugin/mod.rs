@@ -35,16 +35,13 @@ const MARKETPLACE_NAME: &str = "symposium";
 /// A project root needs a name of its own because marketplace *registration* is
 /// user-level even for a project-scoped plugin (verified against Claude Code), so
 /// two projects both registering `symposium` would overwrite each other's path.
-pub fn marketplace_name(scope: Scope, project_root: &Path) -> String {
-    match scope {
-        Scope::Global => MARKETPLACE_NAME.to_string(),
-        Scope::Project => {
-            let scoped = format!(
-                "{MARKETPLACE_NAME}-{}",
-                crate::pm::workspace_dir_name(project_root)
-            );
+pub fn marketplace_name(scope: Scope, project_root: Option<&Path>) -> String {
+    match (scope, project_root) {
+        (Scope::Project, Some(root)) => {
+            let scoped = format!("{MARKETPLACE_NAME}-{}", crate::pm::workspace_dir_name(root));
             manifest::slug(&scoped).unwrap_or_else(|| MARKETPLACE_NAME.to_string())
         }
+        _ => MARKETPLACE_NAME.to_string(),
     }
 }
 

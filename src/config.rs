@@ -160,6 +160,17 @@ impl PluginsConfig {
             .collect()
     }
 
+    /// The names enabled by `use` entries that apply in every workspace. Stands
+    /// in for [`used_names_in`](Self::used_names_in) when there is no workspace
+    /// to scope against.
+    pub fn global_used_names(&self) -> Vec<&str> {
+        self.used
+            .iter()
+            .filter(|entry| matches!(entry, UseEntry::Global(_)))
+            .map(UseEntry::name)
+            .collect()
+    }
+
     /// Is `name` enabled by a `use` entry that applies in every workspace?
     pub fn is_used_globally(&self, name: &str) -> bool {
         self.used.iter().any(|entry| match entry {

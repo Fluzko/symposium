@@ -33,6 +33,8 @@ The key code paths are in `discovery.rs`, `config.rs` (`PluginsConfig`, `UseEntr
 
 Every `cargo agents sync` compiles the plugins that apply into the directory unit agents consume, then hands each directory to the agents that can take it. The step runs after skills are resolved, so it never re-evaluates a gate.
 
+Run outside a Rust workspace, only the global half happens: a globally-enabled plugin with a workspace-independent gate is compiled and delivered, while everything project-scoped is skipped.
+
 1. `agent_plugin::compile` groups the applicable skills by their contributing plugin's `canonical` id and builds one `CompiledPlugin` each: a manifest name (slugged into the format's grammar), an optional version (the manifest's, else a crate plugin's resolved version — a registry placeholder `*` is not a version), the plugin's description, and one skill entry per distinct origin.
 2. Directory names are disambiguated across plugins, and skill directory names within each plugin, using the same origin-hash suffix rule that already governs skill installs.
 3. `Scope::of` sends each compiled plugin to `<project root>/.symposium/plugins/` or `<config dir>/installed/`. Global requires both a `use --global` entry naming the plugin *and* every gate in its chain (plugin, groups, contributed skills) to hold workspace-independently — see [key modules](./module-structure.md#agent_plugin--compiling-an-agent-plugin-directory) for why the second half is a correctness requirement and not a preference. A scope no configured agent can take is not compiled at all.

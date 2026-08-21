@@ -290,6 +290,40 @@ async fn resolve_custom_predicate_entries(
     entries
 }
 
+/// The project-scoped paths sync writes into, when there is a workspace at all.
+struct ProjectPaths {
+    root: PathBuf,
+    /// The directory symposium owns outright, carrying the one `.gitignore`.
+    owned: PathBuf,
+    /// Staging root for project-scoped compiled plugins.
+    staging: PathBuf,
+}
+
+impl ProjectPaths {
+    fn under(root: &Path) -> Self {
+        let owned = root.join(crate::agent_plugin::PROJECT_OWNED_DIR);
+        Self {
+            root: root.to_path_buf(),
+            staging: owned.join(crate::agent_plugin::PROJECT_STAGING_SUBDIR),
+            owned,
+        }
+    }
+}
+
+/// The staging roots to consider, paired with the scope each one holds. The
+/// project root drops out when there is no workspace.
+fn staging_roots<'a>(
+    project: &'a Option<ProjectPaths>,
+    global: &'a Path,
+) -> Vec<(Scope, &'a Path)> {
+    let mut roots = Vec::new();
+    if let Some(p) = project {
+        roots.push((Scope::Project, p.staging.as_path()));
+    }
+    roots.push((Scope::Global, global));
+    roots
+}
+
 /// One skill selected for installation, with the plugin it came from.
 struct PendingSkill<'a> {
     name: String,
@@ -303,12 +337,12 @@ struct PendingSkill<'a> {
 /// clean up stale installations.
 pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLevel) -> Result<()> {
     let out = &Output::quiet();
-    let loaded = deps
-        .load()
-        .ok_or_else(|| anyhow::anyhow!("not in a Rust workspace"))?;
-    let project_root = loaded.root.clone();
-    let workspace: Vec<_> = loaded.crates.clone();
-    let loaded = loaded.clone();
+    // A workspace is optional. Without one there is nothing project-scoped to
+    // install, but globally-enabled plugins still apply, so the global half of
+    // the sync runs regardless.
+    let loaded = deps.load().cloned();
+    let project = loaded.as_ref().map(|l| ProjectPaths::under(&l.root));
+    let workspace_deps_count = loaded.as_ref().map_or(0, |l| l.crates.len());
     // The debounce keeps the per-event hook path cheap. A caller that asked for
     // an update — an explicit `sync`, or the `SessionStart` catch-up pass — wants
     // the comparison done, so a directory changed since the last sync is
@@ -317,10 +351,13 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
         UpdateLevel::None => Duration::from_secs(sym.config.sync_debounce_secs),
         _ => Duration::ZERO,
     };
-    tracing::debug!(root = %project_root.display(), "resolved workspace root");
+    match &project {
+        Some(p) => tracing::debug!(root = %p.root.display(), "resolved workspace root"),
+        None => tracing::debug!("no workspace; syncing globally-enabled plugins only"),
+    }
 
     // Load plugin registry (registry sources + workspace plugins)
-    let registry = plugins::load_registry_with_workspace(sym, Some(&loaded)).await;
+    let registry = plugins::load_registry_with_workspace(sym, loaded.as_deref()).await;
 
     for warning in &registry.warnings {
         tracing::info!(
@@ -332,7 +369,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
 
     tracing::info!(
         report = %crate::report::ReportEvent::Info {
-            message: format!("scanning {} workspace dependencies", workspace.len()),
+            message: format!("scanning {workspace_deps_count} workspace dependencies"),
         },
     );
 
@@ -344,20 +381,35 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     // custom predicate results survive across sync runs; results are persisted
     // at the end of this evaluation pass.
     let dep_ids = crate::pm::workspace_dep_ids(sym, deps).await;
-    let used_names = sym.config.plugins.used_names_in(&project_root);
-    let predicate_cache_path =
-        crate::predicate_cache::PredicateCache::path_for_workspace(sym.cache_dir(), &project_root);
+    let used_names = match &project {
+        Some(p) => sym.config.plugins.used_names_in(&p.root),
+        None => sym.config.plugins.global_used_names(),
+    };
+    // The predicate cache is keyed on a workspace, so there is nothing to cache
+    // against without one.
+    let predicate_cache_path = project.as_ref().map(|p| {
+        crate::predicate_cache::PredicateCache::path_for_workspace(sym.cache_dir(), &p.root)
+    });
     let mut ctx =
         crate::predicate::PredicateContext::with_custom_predicates(&dep_ids, custom_entries)
-            .with_used_names(&used_names)
-            .with_disk_cache(&predicate_cache_path);
+            .with_used_names(&used_names);
+    if let Some(path) = &predicate_cache_path {
+        ctx = ctx.with_disk_cache(path);
+    }
 
     // The active plugin set: registry plugins plus the crate-sourced plugins
     // reached through `[[plugins]]` chained references and dependency
     // enablement. Every facet resolves over this one set, so a crate plugin's
     // skills and MCP servers install exactly like a registry plugin's.
     let pms = sym.package_managers(deps);
-    let active = plugins::active_plugins(sym, &registry, &pms, Some(&project_root), &mut ctx).await;
+    let active = plugins::active_plugins(
+        sym,
+        &registry,
+        &pms,
+        project.as_ref().map(|p| p.root.as_path()),
+        &mut ctx,
+    )
+    .await;
 
     // Find all applicable skills.
     let applicable = skills::collect_skills(sym, &active, &mut ctx, update).await;
@@ -409,32 +461,33 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                     .any(|agent| agent.accepts_plugin_scope(plugin.scope))
             })
             .collect();
-    let owned_dir = project_root.join(crate::agent_plugin::PROJECT_OWNED_DIR);
-    let project_staging = owned_dir.join(crate::agent_plugin::PROJECT_STAGING_SUBDIR);
     let global_staging = sym
         .config_dir()
         .join(crate::agent_plugin::GLOBAL_STAGING_DIR);
     let mut staged_project: BTreeSet<PathBuf> = BTreeSet::new();
     let mut staged_global: BTreeSet<PathBuf> = BTreeSet::new();
 
-    if compiled.iter().any(|p| p.scope == Scope::Project)
-        && let Err(e) = ignore_owned_dir(&owned_dir, &project_root)
+    if let Some(p) = &project
+        && compiled.iter().any(|c| c.scope == Scope::Project)
+        && let Err(e) = ignore_owned_dir(&p.owned, &p.root)
     {
         tracing::info!(
             report = %crate::report::ReportEvent::Warning {
-                message: format!("failed to prepare {}: {e}", display_path(&owned_dir)),
+                message: format!("failed to prepare {}: {e}", display_path(&p.owned)),
             },
         );
     }
 
     for plugin in &compiled {
-        let (root, boundary, staged) = match plugin.scope {
-            Scope::Project => (
-                &project_staging,
-                project_root.as_path(),
-                &mut staged_project,
-            ),
-            Scope::Global => (&global_staging, sym.config_dir(), &mut staged_global),
+        let target = match (plugin.scope, &project) {
+            (Scope::Project, Some(p)) => Some((&p.staging, p.root.as_path(), &mut staged_project)),
+            // Nowhere to put a project-scoped plugin without a project. Its
+            // skills still reach the agents that read them individually.
+            (Scope::Project, None) => None,
+            (Scope::Global, _) => Some((&global_staging, sym.config_dir(), &mut staged_global)),
+        };
+        let Some((root, boundary, staged)) = target else {
+            continue;
         };
         match crate::agent_plugin::write(plugin, root, boundary, debounce) {
             Ok(dest) => {
@@ -458,19 +511,21 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
 
     // Reaping the global root from a project sync is only sound because
     // `Scope::of` keeps the global set a function of user config alone.
-    crate::agent_plugin::reap(&project_staging, &staged_project);
+    if let Some(p) = &project {
+        crate::agent_plugin::reap(&p.staging, &staged_project);
+    }
     crate::agent_plugin::reap(&global_staging, &staged_global);
 
-    for (scope, root) in [
-        (Scope::Project, &project_staging),
-        (Scope::Global, &global_staging),
-    ] {
+    for (scope, root) in staging_roots(&project, &global_staging) {
         let in_root: Vec<&crate::agent_plugin::CompiledPlugin> =
             compiled.iter().filter(|p| p.scope == scope).collect();
         if in_root.is_empty() && !root.exists() {
             continue;
         }
-        let name = crate::agent_plugin::marketplace_name(scope, &project_root);
+        let name = crate::agent_plugin::marketplace_name(
+            scope,
+            project.as_ref().map(|p| p.root.as_path()),
+        );
         if let Err(e) = crate::agent_plugin::write_marketplace(root, &name, &in_root) {
             tracing::info!(
                 report = %crate::report::ReportEvent::Warning {
@@ -487,9 +542,11 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             mcp_servers.extend(p.plugin.applicable_mcp_servers(&mut ctx));
         }
     }
-    if let Err(e) = ctx.persist_disk_cache(&predicate_cache_path) {
+    if let Some(path) = &predicate_cache_path
+        && let Err(e) = ctx.persist_disk_cache(path)
+    {
         tracing::warn!(
-            path = %predicate_cache_path.display(),
+            path = %path.display(),
             error = %e,
             "failed to persist predicate cache"
         );
@@ -509,7 +566,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     let agent_names: Vec<String> = sym.config.agents.iter().map(|a| a.name.clone()).collect();
 
     tracing::info!(
-        workspace_deps = workspace.len(),
+        workspace_deps = workspace_deps_count,
         agents = agent_names.len(),
         skills = to_install.len(),
         "sync started"
@@ -539,10 +596,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
         // which plugins that covers so their skills are not also installed
         // individually.
         let mut delivered: BTreeSet<crate::pm::PackageId> = BTreeSet::new();
-        for (scope, root) in [
-            (Scope::Project, &project_staging),
-            (Scope::Global, &global_staging),
-        ] {
+        for (scope, root) in staging_roots(&project, &global_staging) {
             let in_scope: Vec<&crate::agent_plugin::CompiledPlugin> = compiled
                 .iter()
                 .filter(|p| p.scope == scope && agent.accepts_plugin_scope(scope))
@@ -550,14 +604,22 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             if in_scope.is_empty() && !root.exists() {
                 continue;
             }
-            let marketplace = crate::agent_plugin::marketplace_name(scope, &project_root);
+            let marketplace = crate::agent_plugin::marketplace_name(
+                scope,
+                project.as_ref().map(|p| p.root.as_path()),
+            );
             let registration = crate::agents::Registration {
                 marketplace: &marketplace,
                 root,
                 plugins: &in_scope,
                 scope,
             };
-            match agent.install_plugins(&registration, sym.home_dir(), &project_root, debounce) {
+            // Only a project-scoped registration needs the project path, and
+            // that scope is unreachable without one.
+            let enable_in = project
+                .as_ref()
+                .map_or(sym.home_dir(), |p| p.root.as_path());
+            match agent.install_plugins(&registration, sym.home_dir(), enable_in, debounce) {
                 Ok(copies) => {
                     agent_copies
                         .entry(agent)
@@ -574,6 +636,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                                     copies
                                         .iter()
                                         .find(|c| c.ends_with(&plugin.dir_name))
+                                        .map(PathBuf::as_path)
                                         .unwrap_or(root)
                                 ),
                             },
@@ -588,9 +651,11 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             }
         }
 
-        let hook_root = match sym.config.hook_scope {
-            crate::config::HookScope::Global => sym.home_dir().to_path_buf(),
-            crate::config::HookScope::Project => project_root.clone(),
+        let hook_root = match (sym.config.hook_scope, &project) {
+            (crate::config::HookScope::Project, Some(p)) => p.root.clone(),
+            // Project hook scope has nowhere to write without a project, so the
+            // user-level registration stands in.
+            _ => sym.home_dir().to_path_buf(),
         };
 
         // Register hooks and MCP servers
@@ -600,6 +665,13 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
         agent
             .register_global_mcp_servers(&hook_root, &mcp_servers, out)
             .context("failed to register MCP servers")?;
+
+        // Individually-installed skills go under the project. Without one there
+        // is nowhere to put them, and the compiled directories above are the
+        // whole of what a no-workspace sync delivers.
+        let Some(project) = &project else {
+            continue;
+        };
 
         for pending in &to_install {
             let PendingSkill {
@@ -632,7 +704,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             // (a workspace `.agents/skills/` skill, on an agent that reads
             // that same directory) — it is in place as user content, not
             // something to copy.
-            let plain_dir = agent.project_skill_dir(&project_root, skill_name);
+            let plain_dir = agent.project_skill_dir(&project.root, skill_name);
             let in_place = match (source_dir.canonicalize(), plain_dir.canonicalize()) {
                 (Ok(a), Ok(b)) => a == b,
                 _ => false,
@@ -655,7 +727,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             } else {
                 format!("{skill_name}-{}", origin_hash)
             };
-            let dest_dir = agent.project_skill_dir(&project_root, &dir_name);
+            let dest_dir = agent.project_skill_dir(&project.root, &dir_name);
 
             // If the dest exists but is user-managed, skip it.
             if dest_dir.exists() && !has_symposium_marker(&dest_dir) {
@@ -673,7 +745,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             match sync_managed_dir(
                 source_dir,
                 &dest_dir,
-                &project_root,
+                &project.root,
                 debounce,
                 Marking::MarkerAndGitignore,
             ) {
@@ -709,7 +781,10 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     // and remove subdirs containing the marker that we didn't just install.
     let mut scanned: BTreeSet<PathBuf> = BTreeSet::new();
     for &agent in Agent::all() {
-        let parent = skills_parent_dir(agent, &project_root);
+        let Some(project) = &project else {
+            break;
+        };
+        let parent = skills_parent_dir(agent, &project.root);
         if !scanned.insert(parent.clone()) {
             continue;
         }

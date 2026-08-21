@@ -74,6 +74,14 @@ pub enum ReportEvent {
         dest: String,
     },
 
+    /// A compiled plugin directory was handed to an agent.
+    PluginDelivered {
+        plugin: String,
+        agent: String,
+        scope: String,
+        dest: String,
+    },
+
     /// A skill was installed to an agent's directory.
     SkillInstalled {
         skill: String,
@@ -244,6 +252,14 @@ impl ReportEvent {
                 dest,
             } => {
                 format!("📦 compiled {plugin} ({scope}, {skills} skills) → {dest}")
+            }
+            Self::PluginDelivered {
+                plugin,
+                agent,
+                scope,
+                dest,
+            } => {
+                format!("🔌 delivered {plugin} ({scope}) to {agent} → {dest}")
             }
             Self::SkillInstalled {
                 skill,

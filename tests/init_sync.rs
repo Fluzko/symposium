@@ -12,31 +12,89 @@ fn read_user_config(ctx: &symposium_testlib::TestContext) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|_| "(not found)".to_string())
 }
 
-/// Locate every installed skill directory under `parent` whose name is
-/// `<skill_name>` or `<skill_name>-<hash>`. Sync embeds an origin-derived
-/// hash in the directory name to keep distinct origins from colliding.
+/// Locate every delivered skill directory named `<skill_name>` or
+/// `<skill_name>-<hash>`. Sync embeds an origin-derived hash in the directory
+/// name to keep distinct origins from colliding.
+///
+/// `parent` is an agent's skills directory, e.g. `<root>/.claude/skills`. Both it
+/// and the compiled plugin directories of the same workspace are searched: Claude
+/// Code now receives a plugin directory, while an agent with no plugin unit still
+/// receives standalone skills, and which mechanism carried a skill is not what
+/// most of these tests are about.
 fn find_installed_skills(parent: &Path, skill_name: &str) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return Vec::new();
-    };
+    let mut dirs = vec![parent.to_path_buf()];
+    // `parent` may itself be a staging root, whose children are plugins.
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        dirs.extend(entries.flatten().map(|e| e.path().join("skills")));
+    }
+    // Or an agent's skills dir, in which case the project's staging root is a
+    // sibling two levels up.
+    if let Some(root) = parent.parent().and_then(Path::parent)
+        && let Ok(compiled) = std::fs::read_dir(root.join(".symposium").join("plugins"))
+    {
+        dirs.extend(compiled.flatten().map(|e| e.path().join("skills")));
+    }
+
     let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        let matches = name == skill_name
-            || (name.starts_with(skill_name)
-                && name.as_bytes().get(skill_name.len()) == Some(&b'-'));
-        if matches && path.join("SKILL.md").is_file() {
-            out.push(path);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let matches = name == skill_name
+                || (name.starts_with(skill_name)
+                    && name.as_bytes().get(skill_name.len()) == Some(&b'-'));
+            if matches && path.join("SKILL.md").is_file() {
+                out.push(path);
+            }
         }
     }
     out.sort();
     out
+}
+
+/// Is this delivered skill directory one symposium installed?
+///
+/// The ownership marker sits on the directory symposium created: the skill
+/// directory itself on the per-skill path, and the plugin directory when the
+/// skill arrived inside a compiled plugin.
+fn is_symposium_managed(skill_dir: &Path) -> bool {
+    if skill_dir.join(".symposium").is_file() {
+        return true;
+    }
+    skill_dir
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(|plugin| plugin.join(".symposium").is_file())
+}
+
+/// Is this delivered skill directory kept out of version control?
+///
+/// A per-skill install carries its own wildcard `.gitignore`, because it sits in
+/// agent-owned territory alongside user content. A compiled plugin instead lives
+/// under `.symposium/`, which symposium owns outright and covers with one
+/// `.gitignore` at its root.
+fn is_gitignored(skill_dir: &Path) -> bool {
+    let own = skill_dir.join(".gitignore");
+    if std::fs::read_to_string(&own).is_ok_and(|c| c.trim() == "*") {
+        return true;
+    }
+    let mut dir = skill_dir;
+    while let Some(parent) = dir.parent() {
+        if parent.file_name().is_some_and(|n| n == ".symposium") {
+            return std::fs::read_to_string(parent.join(".gitignore"))
+                .is_ok_and(|c| c.trim() == "*");
+        }
+        dir = parent;
+    }
+    false
 }
 
 /// Locate the unique installed skill directory by name. Panics if 0 or
@@ -151,7 +209,7 @@ async fn sync_installs_workspace_plugin_skills() {
             let skills_dir = workspace_root.join(".claude/skills");
             let skill_dir = find_installed_skill(&skills_dir, "ws-hello");
             assert!(
-                skill_dir.join(".symposium").exists(),
+                is_symposium_managed(&skill_dir),
                 "workspace skill should install as symposium-managed"
             );
             Ok(())
@@ -188,20 +246,15 @@ async fn sync_installs_skills() {
             // Each installed skill directory carries a `.symposium` marker so
             // future syncs (and other tools) can identify it as symposium-managed.
             assert!(
-                skill_dir.join(".symposium").exists(),
-                "skill dir should contain .symposium marker"
+                is_symposium_managed(&skill_dir),
+                "delivered skill should be symposium-managed"
             );
 
-            // Each skill directory gets a wildcard gitignore so the marker,
-            // SKILL.md, and gitignore itself stay out of version control.
-            let gi = skill_dir.join(".gitignore");
-            assert!(gi.exists(), "missing .gitignore at {}", gi.display());
-            let contents = std::fs::read_to_string(&gi).unwrap();
-            assert_eq!(
-                contents.trim(),
-                "*",
-                "unexpected .gitignore content at {}",
-                gi.display()
+            // Whatever carried the skill keeps it out of version control.
+            assert!(
+                is_gitignored(&skill_dir),
+                "{} is not covered by a wildcard .gitignore",
+                skill_dir.display()
             );
             // Parent directories (e.g. `.claude/skills/`) should NOT get a
             // gitignore — they are shared namespace directories.
@@ -549,13 +602,13 @@ async fn sync_installs_skill_from_crate_path() {
             let x_dir = find_installed_skill(&skills_dir, "x-guidance");
             let content = std::fs::read_to_string(x_dir.join("SKILL.md"))?;
             assert!(content.contains("Use crate-x like this"));
-            assert!(x_dir.join(".symposium").exists());
+            assert!(is_symposium_managed(&x_dir));
 
             // crate-z: custom path via [package.metadata.symposium]
             let z_dir = find_installed_skill(&skills_dir, "z-guidance");
             let content = std::fs::read_to_string(z_dir.join("SKILL.md"))?;
             assert!(content.contains("Use crate-z like this"));
-            assert!(z_dir.join(".symposium").exists());
+            assert!(is_symposium_managed(&z_dir));
             Ok(())
         },
     )
@@ -592,7 +645,7 @@ async fn auto_enable_admits_a_dependencys_embedded_skills() {
             let a_dir = find_installed_skill(&skills_dir, "a-guidance");
             let content = std::fs::read_to_string(a_dir.join("SKILL.md"))?;
             assert!(content.contains("Use crate-a like this"));
-            assert!(a_dir.join(".symposium").exists());
+            assert!(is_symposium_managed(&a_dir));
             Ok(())
         },
     )
@@ -632,8 +685,15 @@ async fn dormant_plugin_activates_only_once_used() {
             ctx.sym.save_config()?;
             ctx.symposium(&["sync"]).await?;
 
-            let dir = find_installed_skill(&skills_dir, "gateless-guidance");
-            assert!(dir.join(".symposium").exists());
+            // A *global* `use` entry asks for the plugin everywhere, so it
+            // compiles into the user's staging root rather than this project.
+            let dir =
+                find_installed_skill(&ctx.sym.config_dir().join("installed"), "gateless-guidance");
+            assert!(is_symposium_managed(&dir));
+            assert!(
+                find_installed_skills(&skills_dir, "gateless-guidance").is_empty(),
+                "and not into the project as well"
+            );
             Ok(())
         },
     )
@@ -666,7 +726,7 @@ async fn sync_installs_skill_via_chained_plugin() {
             let w_dir = find_installed_skill(&skills_dir, "w-guidance");
             let content = std::fs::read_to_string(w_dir.join("SKILL.md"))?;
             assert!(content.contains("Use crate-w like this"));
-            assert!(w_dir.join(".symposium").exists());
+            assert!(is_symposium_managed(&w_dir));
             Ok(())
         },
     )
@@ -702,7 +762,7 @@ async fn sync_installs_skill_via_crate_manifest() {
             let m_dir = find_installed_skill(&skills_dir, "m-guidance");
             let content = std::fs::read_to_string(m_dir.join("SKILL.md"))?;
             assert!(content.contains("Use crate-m via the manifest"));
-            assert!(m_dir.join(".symposium").exists());
+            assert!(is_symposium_managed(&m_dir));
             Ok(())
         },
     )
@@ -891,10 +951,7 @@ async fn sync_installations_are_gitignored() {
                 skill_dir.join("SKILL.md").exists(),
                 "skill should be installed on disk"
             );
-            assert!(
-                skill_dir.join(".symposium").exists(),
-                "marker should be on disk"
-            );
+            assert!(is_symposium_managed(&skill_dir), "marker should be on disk");
 
             // Use `-uall` so untracked dirs expand to their leaf paths —
             // gives deterministic output regardless of git's collapsing rules.
@@ -1025,17 +1082,14 @@ async fn sync_keeps_distinct_plugin_origins_with_same_skill_name() {
                 "two plugins each shipping a `code-review` skill must both install; got {installed:?}"
             );
 
-            // Each install dir has the expected disambiguating suffix.
-            let names: Vec<String> = installed
+            // The plugin directory is the namespace, so each skill keeps its
+            // plain name and the two are told apart by their owning plugin.
+            let owners: Vec<String> = installed
                 .iter()
-                .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+                .filter_map(|p| p.parent()?.parent()?.file_name()?.to_str().map(str::to_string))
                 .collect();
-            for n in &names {
-                assert!(
-                    n.starts_with("code-review-"),
-                    "expected hashed suffix on `{n}`"
-                );
-            }
+            assert_eq!(owners.len(), 2, "each install sits under its own plugin");
+            assert_ne!(owners[0], owners[1]);
 
             // And the bodies came from different plugins.
             let bodies: Vec<String> = installed
@@ -1061,7 +1115,7 @@ async fn sync_demotes_to_suffixed_when_conflict_appears() {
         TestMode::SimulationOnly,
         &["distinct-plugin-origins0", "workspace0"],
         async |mut ctx| {
-            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["init", "--add-agent", "opencode"]).await?;
 
             // Park plugin-b *outside* any plugin source dir so it isn't
             // discovered. (`tempdir/` sits next to the user config root,
@@ -1074,7 +1128,7 @@ async fn sync_demotes_to_suffixed_when_conflict_appears() {
             ctx.symposium(&["sync"]).await?;
 
             let workspace_root = ctx.workspace_root.clone().unwrap();
-            let skills_dir = workspace_root.join(".claude/skills");
+            let skills_dir = workspace_root.join(".agents/skills");
 
             // Baseline: only plugin-a's `code-review` is visible, so it
             // takes the plain slot.
@@ -1189,12 +1243,12 @@ async fn sync_falls_back_to_hashed_name_when_user_dir_in_the_way() {
         TestMode::SimulationOnly,
         &["plugins0", "workspace0"],
         async |mut ctx| {
-            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["init", "--add-agent", "opencode"]).await?;
 
             let workspace_root = ctx.workspace_root.clone().unwrap();
             // Plant a user-managed dir at the slot symposium would
             // normally pick. No `.symposium` marker → user-owned.
-            let user_dir = workspace_root.join(".claude/skills/serde-guidance");
+            let user_dir = workspace_root.join(".agents/skills/serde-guidance");
             std::fs::create_dir_all(&user_dir)?;
             std::fs::write(user_dir.join("SKILL.md"), "user content")?;
 
@@ -1215,10 +1269,10 @@ async fn sync_falls_back_to_hashed_name_when_user_dir_in_the_way() {
             // matching directory shape; the suffix variant is the only
             // one that should carry the marker.
             let installed =
-                find_installed_skills(&workspace_root.join(".claude/skills"), "serde-guidance");
+                find_installed_skills(&workspace_root.join(".agents/skills"), "serde-guidance");
             let hashed: Vec<_> = installed
                 .iter()
-                .filter(|p| p.join(".symposium").exists())
+                .filter(|p| is_symposium_managed(p))
                 .collect();
             assert_eq!(
                 hashed.len(),
@@ -1338,15 +1392,17 @@ async fn agents_syncing_propagates_user_authored_skill_to_claude() {
 
             // Propagated copy exists with SKILL.md, companion files, marker,
             // and wildcard gitignore.
-            let dest = workspace_root.join(".claude/skills/user-authored-skill");
+            let dest = find_installed_skill(
+                &workspace_root.join(".claude/skills"),
+                "user-authored-skill",
+            );
             assert!(dest.join("SKILL.md").exists(), "SKILL.md propagated");
             assert!(
                 dest.join("REFERENCE.md").exists(),
                 "companion files propagated"
             );
-            assert!(dest.join(".symposium").exists(), "marker present");
-            let gi = std::fs::read_to_string(dest.join(".gitignore"))?;
-            assert_eq!(gi.trim(), "*", "destination gitignore is wildcard");
+            assert!(is_symposium_managed(&dest), "marker present");
+            assert!(is_gitignored(&dest), "destination is gitignored");
             Ok(())
         },
     )
@@ -1433,9 +1489,11 @@ async fn agents_syncing_cleans_up_removed_user_skill() {
             ctx.symposium(&["sync"]).await?;
 
             let workspace_root = ctx.workspace_root.clone().unwrap();
-            let propagated = workspace_root.join(".claude/skills/user-authored-skill");
-            assert!(propagated.exists(), "first sync should propagate");
-            assert!(propagated.join(".symposium").exists());
+            let propagated = find_installed_skill(
+                &workspace_root.join(".claude/skills"),
+                "user-authored-skill",
+            );
+            assert!(is_symposium_managed(&propagated));
 
             // User removes the source.
             std::fs::remove_dir_all(workspace_root.join(".agents/skills/user-authored-skill"))?;
@@ -1465,14 +1523,17 @@ async fn agents_syncing_disabling_removes_previously_propagated_skills() {
             ctx.symposium(&["sync"]).await?;
 
             let workspace_root = ctx.workspace_root.clone().unwrap();
-            let propagated = workspace_root.join(".claude/skills/user-authored-skill");
-            assert!(propagated.exists(), "first sync should propagate");
+            let skills_dir = workspace_root.join(".claude/skills");
+            assert!(
+                !find_installed_skills(&skills_dir, "user-authored-skill").is_empty(),
+                "first sync should propagate"
+            );
 
             ctx.sym.config.agents_syncing = false;
             ctx.symposium(&["sync"]).await?;
 
             assert!(
-                !propagated.exists(),
+                find_installed_skills(&skills_dir, "user-authored-skill").is_empty(),
                 "disabling agents-syncing should clean up previously propagated copies"
             );
             // Source must remain untouched.
@@ -1561,7 +1622,11 @@ async fn agents_syncing_detects_modified_source_skill() {
 
             let workspace_root = ctx.workspace_root.as_ref().unwrap();
             let source = workspace_root.join(".agents/skills/user-authored-skill/SKILL.md");
-            let dest = workspace_root.join(".claude/skills/user-authored-skill/SKILL.md");
+            let dest = find_installed_skill(
+                &workspace_root.join(".claude/skills"),
+                "user-authored-skill",
+            )
+            .join("SKILL.md");
 
             // Sanity: initial propagation worked.
             assert!(dest.exists(), "skill should be propagated on first sync");
@@ -2173,7 +2238,7 @@ async fn sync_installs_skill_from_named_crate_source() {
             let b_dir = find_installed_skill(&skills_dir, "b-guidance");
             let content = std::fs::read_to_string(b_dir.join("SKILL.md"))?;
             assert!(content.contains("Use crate-b like this"));
-            assert!(b_dir.join(".symposium").exists());
+            assert!(is_symposium_managed(&b_dir));
             Ok(())
         },
     )
@@ -2231,7 +2296,7 @@ async fn sync_crate_metadata_multihop_redirect() {
                 content.contains("A → B → C redirect chain"),
                 "skill from end of multi-hop chain should be installed"
             );
-            assert!(c_dir.join(".symposium").exists());
+            assert!(is_symposium_managed(&c_dir));
             Ok(())
         },
     )
@@ -2327,12 +2392,7 @@ async fn sync_crate_metadata_hyphen_underscore_cycle() {
             );
 
             // Should be exactly one skill (no duplicates from the self-redirect).
-            let all_skills: Vec<_> = std::fs::read_dir(&skills_dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter(|e| e.path().is_dir() && e.path().join("SKILL.md").is_file())
-                .collect();
+let all_skills = find_installed_skills(&skills_dir, "foo-guidance");
             assert_eq!(
                 all_skills.len(),
                 1,
@@ -2471,26 +2531,26 @@ async fn sync_crate_metadata_missing_path_dir() {
 async fn sync_compiles_plugins_into_scoped_staging_roots() {
     with_fixture(
         TestMode::SimulationOnly,
-        &["plugin-skill-group0", "workspace0"],
+        &["agent-plugin-scopes0", "workspace0"],
         async |mut ctx| {
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
             let events = ctx.sync_with_report(tracing::Level::INFO).await?;
 
             let root = ctx.workspace_root.clone().expect("workspace root");
-            let project = root.join(".symposium/plugins/my-plugin");
-            let global = ctx.sym.config_dir().join("installed/wildcard-plugin");
+            let project = root.join(".symposium/plugins/project-tools");
+            let global = ctx.sym.config_dir().join("installed/global-tools");
 
             let manifest: Value = serde_json::from_str(
                 &std::fs::read_to_string(project.join("plugin.json")).expect("read manifest"),
             )
             .expect("parse manifest");
-            assert_eq!(manifest["name"], "my-plugin");
+            assert_eq!(manifest["name"], "project-tools");
             assert_eq!(
                 manifest["$schema"],
                 "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
             );
             assert!(
-                project.join("skills/serde-guidance/SKILL.md").is_file(),
+                project.join("skills/project-guidance/SKILL.md").is_file(),
                 "the plugin's skills are resolved into its own skills/ directory"
             );
             assert!(
@@ -2507,7 +2567,7 @@ async fn sync_compiles_plugins_into_scoped_staging_roots() {
             );
 
             assert!(
-                global.join("skills/wildcard-guidance/SKILL.md").is_file(),
+                global.join("skills/global-guidance/SKILL.md").is_file(),
                 "a workspace-independent plugin compiles to the global root, not the project"
             );
 
@@ -2532,8 +2592,8 @@ async fn sync_compiles_plugins_into_scoped_staging_roots() {
             )
             .expect("parse index");
             assert_eq!(index["name"], "symposium");
-            assert_eq!(index["plugins"][0]["name"], "wildcard-plugin");
-            assert_eq!(index["plugins"][0]["source"], "./wildcard-plugin");
+            assert_eq!(index["plugins"][0]["name"], "global-tools");
+            assert_eq!(index["plugins"][0]["source"], "./global-tools");
 
             let project_index: Value = serde_json::from_str(
                 &std::fs::read_to_string(
@@ -2550,7 +2610,7 @@ async fn sync_compiles_plugins_into_scoped_staging_roots() {
                 "a project marketplace is named per workspace, since registration is user-level"
             );
             assert!(
-                !root.join(".symposium/plugins/wildcard-plugin").exists(),
+                !root.join(".symposium/plugins/global-tools").exists(),
                 "and not to both"
             );
 
@@ -2570,7 +2630,7 @@ async fn sync_compiles_plugins_into_scoped_staging_roots() {
             reported.sort();
             assert_eq!(
                 reported,
-                vec![("my-plugin", "project"), ("wildcard-plugin", "global")]
+                vec![("global-tools", "global"), ("project-tools", "project")]
             );
 
             Ok(())
@@ -2586,26 +2646,26 @@ async fn sync_compiles_plugins_into_scoped_staging_roots() {
 async fn compiled_directories_are_reaped_when_a_plugin_stops_applying() {
     with_fixture(
         TestMode::SimulationOnly,
-        &["plugin-skill-group0", "workspace0"],
+        &["agent-plugin-scopes0", "workspace0"],
         async |mut ctx| {
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
             ctx.symposium(&["sync"]).await?;
 
             let root = ctx.workspace_root.clone().expect("workspace root");
-            let compiled = root.join(".symposium/plugins/my-plugin");
+            let compiled = root.join(".symposium/plugins/project-tools");
             assert!(compiled.is_dir());
             assert!(
-                find_installed_skills(&root.join(".claude/skills"), "serde-guidance").len() == 1,
-                "the per-skill install is untouched by compilation"
+                find_installed_skills(&root.join(".claude/skills"), "project-guidance").len() == 1,
+                "exactly one copy reaches the agent"
             );
 
             let manifest = ctx
                 .sym
                 .config_dir()
-                .join("plugins/my-plugin/SYMPOSIUM.toml");
+                .join("plugins/project-tools/SYMPOSIUM.toml");
             std::fs::write(
                 &manifest,
-                "name = \"my-plugin\"\ndepends-on = [\"nowhere-crate\"]\n\n[[skills]]\nsource.path = \".\"\n",
+                "name = \"project-tools\"\ndepends-on = [\"nowhere-crate\"]\n\n[[skills]]\nsource.path = \".\"\n",
             )?;
             ctx.symposium(&["sync"]).await?;
 
@@ -2627,15 +2687,15 @@ async fn compiled_directories_are_reaped_when_a_plugin_stops_applying() {
 async fn syncing_another_workspace_leaves_global_plugins_alone() {
     with_fixture(
         TestMode::SimulationOnly,
-        &["plugin-skill-group0", "workspace0"],
+        &["agent-plugin-scopes0", "workspace0"],
         async |mut ctx| {
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
             ctx.symposium(&["sync"]).await?;
 
-            let global = ctx.sym.config_dir().join("installed/wildcard-plugin");
+            let global = ctx.sym.config_dir().join("installed/global-tools");
             assert!(global.is_dir(), "first sync installs the global plugin");
             assert!(
-                ctx.sym.config_dir().join("installed/my-plugin").exists().not(),
+                ctx.sym.config_dir().join("installed/project-tools").exists().not(),
                 "a dependency-gated plugin must never reach the global root, or the \
                  next project's sync would reap it"
             );
@@ -2655,11 +2715,11 @@ async fn syncing_another_workspace_leaves_global_plugins_alone() {
                 "syncing a project with no serde must not disturb the global set"
             );
             assert!(
-                other.join(".symposium/plugins/wildcard-plugin").exists().not(),
+                other.join(".symposium/plugins/global-tools").exists().not(),
                 "a global plugin is not also compiled into each project"
             );
             assert!(
-                other.join(".symposium/plugins/my-plugin").exists().not(),
+                other.join(".symposium/plugins/project-tools").exists().not(),
                 "the serde-gated plugin does not apply in a workspace without serde"
             );
             Ok(())
@@ -2683,24 +2743,26 @@ async fn report_json_info_emits_installed_events() {
 
             assert!(!events.is_empty(), "expected at least one report event");
 
-            let installed: Vec<&Value> = events
+            // Claude Code takes the compiled plugin directory, so the delivery
+            // is reported per plugin rather than per skill.
+            let compiled: Vec<&Value> = events
                 .iter()
-                .filter(|e| e["kind"] == "skill_installed")
+                .filter(|e| e["kind"] == "plugin_compiled")
                 .collect();
+            assert_eq!(compiled[0]["plugin"], "serde-guidance");
+            assert_eq!(compiled[0]["skills"], 1);
 
+            let delivered: Vec<&Value> = events
+                .iter()
+                .filter(|e| e["kind"] == "plugin_delivered")
+                .collect();
             assert!(
-                !installed.is_empty(),
-                "expected at least one skill_installed event, got: {events:?}"
+                !delivered.is_empty(),
+                "expected at least one plugin_delivered event, got: {events:?}"
             );
-            assert_eq!(installed[0]["skill"], "serde-guidance");
-            assert_eq!(installed[0]["plugin"], "serde-guidance");
-            assert_eq!(installed[0]["agent"], "claude");
-            assert!(
-                installed[0]["dest"]
-                    .as_str()
-                    .unwrap()
-                    .contains("serde-guidance")
-            );
+            assert_eq!(delivered[0]["plugin"], "serde-guidance");
+            assert_eq!(delivered[0]["agent"], "claude");
+            assert_eq!(delivered[0]["scope"], "project");
 
             // At INFO level, no plugin_considered or skill_considered events
             let considered: Vec<&Value> = events
@@ -2743,14 +2805,14 @@ async fn report_json_debug_emits_decision_events() {
                 "expected skill_considered matched event for serde-guidance, got: {events:#?}"
             );
 
-            // Should also have skill_installed
+            // The install events show up at DEBUG too.
             let installed: Vec<&Value> = events
                 .iter()
-                .filter(|e| e["kind"] == "skill_installed")
+                .filter(|e| e["kind"] == "plugin_delivered" || e["kind"] == "skill_installed")
                 .collect();
             assert!(
                 !installed.is_empty(),
-                "expected skill_installed events at DEBUG level too"
+                "expected delivery events at DEBUG level too"
             );
 
             Ok(())

@@ -7,37 +7,52 @@ use symposium::output::Output;
 use symposium::status_command::StatusState;
 use symposium_testlib::{HookStep, TestContext, TestMode, with_fixture};
 
-/// Every installed skill directory under `parent` named `<skill_name>` or
-/// `<skill_name>-<hash>`.
-fn find_installed_skills(parent: &Path, skill_name: &str) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return Vec::new();
-    };
+/// Everywhere a skill named `<skill_name>` (or `<skill_name>-<hash>`) was
+/// delivered for this workspace.
+///
+/// These tests are about enablement, not about which mechanism carries a skill,
+/// so both are searched: a compiled plugin directory, which is what Claude Code
+/// now receives, and a standalone skill directory, which is what an agent with no
+/// plugin unit still gets.
+fn find_delivered_skills(workspace_root: &Path, skill_name: &str) -> Vec<PathBuf> {
+    let mut parents = vec![
+        workspace_root.join(".claude").join("skills"),
+        workspace_root.join(".agents").join("skills"),
+    ];
+    if let Ok(compiled) = std::fs::read_dir(workspace_root.join(".symposium").join("plugins")) {
+        parents.extend(compiled.flatten().map(|e| e.path().join("skills")));
+    }
+
     let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+    for parent in parents {
+        let Ok(entries) = std::fs::read_dir(&parent) else {
             continue;
         };
-        let matches = name == skill_name
-            || (name.starts_with(skill_name)
-                && name.as_bytes().get(skill_name.len()) == Some(&b'-'));
-        if matches && path.join("SKILL.md").is_file() {
-            out.push(path);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let matches = name == skill_name
+                || (name.starts_with(skill_name)
+                    && name.as_bytes().get(skill_name.len()) == Some(&b'-'));
+            if matches && path.join("SKILL.md").is_file() {
+                out.push(path);
+            }
         }
     }
     out.sort();
     out
 }
 
-/// The unique installed skill directory with this name. Panics on 0 or >1.
-fn find_installed_skill(parent: &Path, skill_name: &str) -> PathBuf {
-    let mut hits = find_installed_skills(parent, skill_name);
+/// The unique delivered skill directory with this name. Panics on 0 or >1.
+fn find_delivered_skill(workspace_root: &Path, skill_name: &str) -> PathBuf {
+    let mut hits = find_delivered_skills(workspace_root, skill_name);
     assert_eq!(
         hits.len(),
         1,
-        "expected exactly one installed skill named `{skill_name}` under {}, found {hits:?}",
-        parent.display(),
+        "expected exactly one delivered skill named `{skill_name}` under {}, found {hits:?}",
+        workspace_root.display(),
     );
     hits.pop().unwrap()
 }
@@ -74,14 +89,14 @@ async fn use_records_workspace_entry_and_installs() {
         &["auto-enable0"],
         async |mut ctx| {
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
-            let skills_dir = ctx.workspace_root.clone().unwrap().join(".claude/skills");
+            let root = ctx.workspace_root.clone().unwrap();
 
             // Unconsented, the dependency's skills stay out.
             ctx.symposium(&["sync"]).await?;
-            assert!(find_installed_skills(&skills_dir, "a-guidance").is_empty());
+            assert!(find_delivered_skills(&root, "a-guidance").is_empty());
 
             ctx.symposium(&["use", "crate-a"]).await?;
-            find_installed_skill(&skills_dir, "a-guidance");
+            find_delivered_skill(&root, "a-guidance");
 
             let config = read_config(&ctx);
             assert!(config.contains("crate-a"), "entry recorded: {config}");
@@ -176,18 +191,18 @@ async fn use_wakes_and_remove_sleeps_a_dormant_plugin() {
         &["dormant-plugin0"],
         async |mut ctx| {
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
-            let skills_dir = ctx.workspace_root.clone().unwrap().join(".claude/skills");
+            let root = ctx.workspace_root.clone().unwrap();
 
             ctx.symposium(&["sync"]).await?;
-            assert!(find_installed_skills(&skills_dir, "gateless-guidance").is_empty());
+            assert!(find_delivered_skills(&root, "gateless-guidance").is_empty());
 
             ctx.symposium(&["use", "gateless-plugin"]).await?;
-            find_installed_skill(&skills_dir, "gateless-guidance");
+            find_delivered_skill(&root, "gateless-guidance");
             assert!(read_config(&ctx).contains("gateless-plugin"));
 
             ctx.symposium(&["use", "--remove", "gateless-plugin"])
                 .await?;
-            assert!(find_installed_skills(&skills_dir, "gateless-guidance").is_empty());
+            assert!(find_delivered_skills(&root, "gateless-guidance").is_empty());
             Ok(())
         },
     )
@@ -204,10 +219,10 @@ async fn use_remove_reaps_and_then_errors() {
         &["auto-enable0"],
         async |mut ctx| {
             ctx.symposium(&["init", "--add-agent", "claude"]).await?;
-            let skills_dir = ctx.workspace_root.clone().unwrap().join(".claude/skills");
+            let root = ctx.workspace_root.clone().unwrap();
 
             ctx.symposium(&["use", "crate-a"]).await?;
-            find_installed_skill(&skills_dir, "a-guidance");
+            find_delivered_skill(&root, "a-guidance");
 
             ctx.symposium(&["use", "--remove", "crate-a"]).await?;
             assert!(
@@ -216,7 +231,7 @@ async fn use_remove_reaps_and_then_errors() {
                 read_config(&ctx)
             );
             assert!(
-                find_installed_skills(&skills_dir, "a-guidance").is_empty(),
+                find_delivered_skills(&root, "a-guidance").is_empty(),
                 "skills reaped after removal"
             );
 
@@ -498,10 +513,7 @@ async fn consent_prompt_never_fires_non_interactively() {
                 symposium::discovery::pending_candidates(&ctx.sym, &deps).await,
                 vec!["crate-a".to_string()]
             );
-            assert!(
-                find_installed_skills(&workspace_root.join(".claude/skills"), "a-guidance")
-                    .is_empty()
-            );
+            assert!(find_delivered_skills(&workspace_root, "a-guidance").is_empty());
             Ok(())
         },
     )
@@ -524,7 +536,7 @@ async fn apply_consent_records_both_answers() {
             assert!(read_config(&ctx).contains("auto-enable"));
 
             ctx.symposium(&["sync"]).await?;
-            find_installed_skill(&workspace_root.join(".claude/skills"), "a-guidance");
+            find_delivered_skill(&workspace_root, "a-guidance");
 
             let deps = ctx.sym.workspace_deps(&workspace_root);
             assert!(

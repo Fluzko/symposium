@@ -16,14 +16,17 @@ pub struct Manifest {
     #[serde(rename = "$schema")]
     pub schema: &'static str,
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
+    /// Always written, even though the format allows omitting it: Codex keys its
+    /// plugin cache directory on the version, and defaults a version-less plugin
+    /// to `1.0.0` of its own accord. Emitting one ourselves means the cache path
+    /// is the value we wrote rather than another tool's default.
+    pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
 impl Manifest {
-    pub fn new(name: String, version: Option<String>, description: Option<String>) -> Self {
+    pub fn new(name: String, version: String, description: Option<String>) -> Self {
         Self {
             schema: SCHEMA_URL,
             name,
@@ -45,20 +48,13 @@ impl Manifest {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GeminiExtension {
     pub name: String,
-    /// Gemini requires a version, unlike the Agent Plugins manifest.
+    /// Required here, unlike in the Agent Plugins manifest.
     pub version: String,
 }
 
 impl GeminiExtension {
-    /// Gemini rejects an extension with no version, so a plugin that declares
-    /// none is given one rather than being skipped.
-    pub const FALLBACK_VERSION: &'static str = "0.0.0";
-
-    pub fn new(name: String, version: Option<String>) -> Self {
-        Self {
-            name,
-            version: version.unwrap_or_else(|| Self::FALLBACK_VERSION.to_string()),
-        }
+    pub fn new(name: String, version: String) -> Self {
+        Self { name, version }
     }
 
     pub fn to_json(&self) -> String {
@@ -215,16 +211,13 @@ mod tests {
     }
 
     #[test]
-    fn gemini_manifest_always_carries_a_version() {
-        let declared = GeminiExtension::new("pdf-tools".into(), Some("1.2.0".into()));
-        assert_eq!(declared.version, "1.2.0");
-
-        let undeclared = GeminiExtension::new("pdf-tools".into(), None);
-        assert_eq!(undeclared.version, GeminiExtension::FALLBACK_VERSION);
-
-        let json: serde_json::Value = serde_json::from_str(&undeclared.to_json()).expect("json");
+    fn the_gemini_manifest_carries_only_its_own_fields() {
+        let json: serde_json::Value = serde_json::from_str(
+            &GeminiExtension::new("pdf-tools".into(), "1.2.0".into()).to_json(),
+        )
+        .expect("json");
         assert_eq!(json["name"], "pdf-tools");
-        assert_eq!(json["version"], GeminiExtension::FALLBACK_VERSION);
+        assert_eq!(json["version"], "1.2.0");
         assert!(json.get("$schema").is_none(), "gemini has its own manifest");
     }
 
@@ -251,12 +244,11 @@ mod tests {
 
     #[test]
     fn manifest_omits_absent_optional_fields() {
-        let bare = Manifest::new("pdf-tools".into(), None, None).to_json();
+        let bare = Manifest::new("pdf-tools".into(), "0.0.0".into(), None).to_json();
         assert!(bare.contains(SCHEMA_URL));
-        assert!(!bare.contains("version"));
         assert!(!bare.contains("description"));
 
-        let full = Manifest::new("pdf-tools".into(), Some("1.2.0".into()), Some("d".into()));
+        let full = Manifest::new("pdf-tools".into(), "1.2.0".into(), Some("d".into()));
         let json: serde_json::Value = serde_json::from_str(&full.to_json()).expect("json");
         assert_eq!(json["$schema"], SCHEMA_URL);
         assert_eq!(json["name"], "pdf-tools");

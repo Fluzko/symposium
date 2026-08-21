@@ -63,18 +63,23 @@ pub enum Scope {
 impl Scope {
     /// Where a plugin's compiled directory belongs.
     ///
-    /// Global installation requires the decision to be reproducible from user
-    /// config alone: a user-level directory is visible from every workspace, and
-    /// cleanup reaps whatever it did not install this run, so a global set that
-    /// varied by workspace would have two projects undoing each other. Anything
-    /// whose activation *or content* depends on this workspace is therefore
-    /// project-scoped, even when a global `use` entry named it.
+    /// Global needs two independent things to hold, and defaults to project when
+    /// either fails.
     ///
-    /// Content matters as much as activation: a plugin gated `depends-on(*)`
-    /// whose skill group is gated `depends-on(serde)` would compile to different
-    /// directories in different projects, which is the same churn by another
-    /// route. So every gate in the chain has to hold workspace-independently —
-    /// the plugin's, each declared group's, and each contributed skill's.
+    /// First, the user has to have asked for it: a `use --global` entry naming the
+    /// plugin. Scope follows the enablement that selected a plugin, so a project's
+    /// sync never writes a plugin into the user's home directory that was not
+    /// enabled there — not even one gated `depends-on(*)`.
+    ///
+    /// Second, nothing about the plugin may vary by workspace. A user-level
+    /// directory is visible from every workspace while cleanup reaps whatever it
+    /// did not install this run, so a global set that varied by workspace would
+    /// have two projects undoing each other on every session start. Content
+    /// counts as much as activation here: a plugin gated `depends-on(*)` whose
+    /// skill group is gated `depends-on(serde)` would compile to different
+    /// content per project, which is the same churn by another route. So every
+    /// gate in the chain must hold workspace-independently — the plugin's, each
+    /// declared group's, and each contributed skill's.
     pub fn of(
         parsed: &ParsedPlugin,
         contributed: &[&SkillWithGroupContext],
@@ -83,7 +88,6 @@ impl Scope {
         let workspace_bound = parsed.workspace_member
             || parsed.canonical.pm == CARGO_PM
             || !parsed.plugin.predicates.is_workspace_independent()
-            || (parsed.plugin.requires_use && !plugins.is_used_globally(&parsed.plugin.name))
             || parsed
                 .plugin
                 .skills
@@ -92,7 +96,7 @@ impl Scope {
             || contributed
                 .iter()
                 .any(|entry| !entry.skill.predicates.is_workspace_independent());
-        if workspace_bound {
+        if workspace_bound || !plugins.is_used_globally(&parsed.plugin.name) {
             Scope::Project
         } else {
             Scope::Global
@@ -116,6 +120,9 @@ pub struct CompiledSkill {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledPlugin {
+    /// The plugin this was compiled from. Lets a caller tell whether a given
+    /// skill is already covered by a delivered plugin directory.
+    pub source_id: crate::pm::PackageId,
     pub dir_name: String,
     pub manifest: Manifest,
     pub scope: Scope,
@@ -132,6 +139,10 @@ pub fn compile(
     plugins: &PluginsConfig,
 ) -> Vec<CompiledPlugin> {
     let mut compiled: Vec<(String, CompiledPlugin)> = Vec::new();
+    // One skill bundle referenced by several plugins is emitted once, by the
+    // first plugin to claim it. Emitting it per plugin would load identical
+    // guidance N times, since a plugin directory is its own namespace.
+    let mut claimed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for parsed in active {
         let mine: Vec<&SkillWithGroupContext> = skills
@@ -157,6 +168,7 @@ pub fn compile(
         compiled.push((
             crate::skills::hash_origin_key(&parsed.canonical.to_string()),
             CompiledPlugin {
+                source_id: parsed.canonical.clone(),
                 dir_name: name.clone(),
                 manifest: Manifest::new(
                     name,
@@ -164,7 +176,7 @@ pub fn compile(
                     parsed.plugin.description.clone(),
                 ),
                 scope: Scope::of(parsed, &mine, plugins),
-                skills: compile_skills(&mine),
+                skills: compile_skills(&mine, &mut claimed),
             },
         ));
     }
@@ -198,17 +210,20 @@ fn disambiguate(compiled: Vec<(String, CompiledPlugin)>) -> Vec<CompiledPlugin> 
         .collect()
 }
 
-/// One skill directory per distinct origin. Skills sharing a name within one
-/// plugin take the origin-hash suffix; across plugins they do not collide,
-/// because the agent namespaces a plugin's skills under the plugin.
-fn compile_skills(skills: &[&SkillWithGroupContext]) -> Vec<CompiledSkill> {
-    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+/// One skill directory per distinct origin, skipping origins an earlier plugin
+/// already claimed. Skills sharing a name within one plugin take the origin-hash
+/// suffix; across plugins names cannot collide, because the agent namespaces a
+/// plugin's skills under the plugin.
+fn compile_skills(
+    skills: &[&SkillWithGroupContext],
+    claimed: &mut std::collections::BTreeSet<String>,
+) -> Vec<CompiledSkill> {
     let mut name_counts: std::collections::BTreeMap<&str, usize> =
         std::collections::BTreeMap::new();
     let mut distinct: Vec<&&SkillWithGroupContext> = Vec::new();
 
     for skill in skills {
-        if seen.insert(&skill.origin_hash) {
+        if claimed.insert(skill.origin_hash.clone()) {
             *name_counts.entry(skill.skill.name()).or_default() += 1;
             distinct.push(skill);
         }
@@ -232,13 +247,21 @@ fn compile_skills(skills: &[&SkillWithGroupContext]) -> Vec<CompiledSkill> {
         .collect()
 }
 
+/// Stands in for a plugin that declares no version anywhere.
+pub const UNVERSIONED: &str = "0.0.0";
+
 /// The manifest's version wins; otherwise a crate plugin's resolved version
 /// stands in. A registry or workspace plugin has no real package identity, so
-/// its placeholder `*` is not a version and is dropped.
-fn version_of(parsed: &ParsedPlugin) -> Option<String> {
-    parsed.plugin.version.clone().or_else(|| {
-        (parsed.canonical.version != ANY_VERSION).then(|| parsed.canonical.version.clone())
-    })
+/// its placeholder `*` is not a version.
+fn version_of(parsed: &ParsedPlugin) -> String {
+    parsed
+        .plugin
+        .version
+        .clone()
+        .or_else(|| {
+            (parsed.canonical.version != ANY_VERSION).then(|| parsed.canonical.version.clone())
+        })
+        .unwrap_or_else(|| UNVERSIONED.to_string())
 }
 
 /// Write a compiled plugin into `root`, returning its directory.
@@ -322,15 +345,30 @@ pub fn write_marketplace(root: &Path, name: &str, plugins: &[&CompiledPlugin]) -
     fs::write(&file, contents).with_context(|| format!("write {}", file.display()))
 }
 
-/// Reap compiled directories under `root` that this sync did not write. Keyed on
-/// the ownership marker, so a directory the user put there is left alone.
-pub fn reap(root: &Path, written: &std::collections::BTreeSet<PathBuf>) {
+/// Reap marked directories under `root` that this sync did not write, descending
+/// at most `depth` levels. Keyed on the ownership marker, so a directory the user
+/// put there is left alone, and a marked directory is never descended into.
+///
+/// The depth is what lets one function serve both a staging root (plugins sit
+/// directly under it) and an agent's own tree, where Codex nests its copies as
+/// `<marketplace>/<plugin>/<version>`.
+pub fn reap_to_depth(root: &Path, depth: usize, written: &std::collections::BTreeSet<PathBuf>) {
+    if depth == 0 {
+        return;
+    }
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() || written.contains(&path) || !crate::sync::has_symposium_marker(&path) {
+        if !path.is_dir() {
+            continue;
+        }
+        if !crate::sync::has_symposium_marker(&path) {
+            reap_to_depth(&path, depth - 1, written);
+            continue;
+        }
+        if written.contains(&path) {
             continue;
         }
         match fs::remove_dir_all(&path) {
@@ -350,6 +388,15 @@ pub fn reap(root: &Path, written: &std::collections::BTreeSet<PathBuf>) {
         }
     }
 }
+
+/// Reap the plugins directly under a staging root.
+pub fn reap(root: &Path, written: &std::collections::BTreeSet<PathBuf>) {
+    reap_to_depth(root, 1, written)
+}
+
+/// How deep an agent nests its own plugin copies: Codex uses
+/// `<marketplace>/<plugin>/<version>`, the others one or two levels.
+pub const AGENT_COPY_DEPTH: usize = 3;
 
 #[cfg(test)]
 mod tests;

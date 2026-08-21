@@ -46,10 +46,32 @@ fn no_config() -> PluginsConfig {
 
 // ── scope ────────────────────────────────────────────────────────────
 
+fn used_globally(name: &str) -> PluginsConfig {
+    PluginsConfig {
+        used: vec![UseEntry::Global(name.to_string())],
+        ..Default::default()
+    }
+}
+
 #[test]
-fn wildcard_registry_plugin_is_global() {
+fn global_needs_both_a_global_use_entry_and_a_workspace_independent_gate() {
     let plugin = registry_plugin("pdf-tools", wildcard());
-    assert_eq!(Scope::of(&plugin, &[], &no_config()), Scope::Global);
+    assert_eq!(
+        Scope::of(&plugin, &[], &no_config()),
+        Scope::Project,
+        "a workspace-independent gate is not on its own a request to install for the user"
+    );
+    assert_eq!(
+        Scope::of(&plugin, &[], &used_globally("pdf-tools")),
+        Scope::Global
+    );
+
+    let dep_gated = registry_plugin("pdf-tools", on_serde());
+    assert_eq!(
+        Scope::of(&dep_gated, &[], &used_globally("pdf-tools")),
+        Scope::Project,
+        "a global entry on a workspace-dependent plugin installs per project instead"
+    );
 }
 
 #[test]
@@ -62,11 +84,19 @@ fn a_concrete_dependency_gate_keeps_a_plugin_project_scoped() {
 fn workspace_members_and_crate_plugins_are_project_scoped() {
     let mut member = registry_plugin("house-style", wildcard());
     member.workspace_member = true;
-    assert_eq!(Scope::of(&member, &[], &no_config()), Scope::Project);
+    assert_eq!(
+        Scope::of(&member, &[], &used_globally("house-style")),
+        Scope::Project,
+        "membership is what activates a workspace plugin, so it cannot be global"
+    );
 
     let mut from_crate = registry_plugin("widget", wildcard());
     from_crate.canonical = PackageId::new("cargo", "widget", "1.0.0");
-    assert_eq!(Scope::of(&from_crate, &[], &no_config()), Scope::Project);
+    assert_eq!(
+        Scope::of(&from_crate, &[], &used_globally("widget")),
+        Scope::Project,
+        "a crate plugin is reached through this workspace's dependency graph"
+    );
 }
 
 #[test]
@@ -102,6 +132,7 @@ fn a_dormant_plugin_goes_global_only_when_used_globally() {
 
 #[test]
 fn a_dependency_gated_group_or_skill_keeps_the_plugin_project_scoped() {
+    let globally = used_globally("pdf-tools");
     let mut grouped = registry_plugin("pdf-tools", wildcard());
     grouped.plugin.skills = vec![SkillGroup {
         predicates: on_serde(),
@@ -109,13 +140,13 @@ fn a_dependency_gated_group_or_skill_keeps_the_plugin_project_scoped() {
         source_label: None,
         workspace_member: false,
     }];
-    assert_eq!(Scope::of(&grouped, &[], &no_config()), Scope::Project);
+    assert_eq!(Scope::of(&grouped, &[], &globally), Scope::Project);
 
     let plugin = registry_plugin("pdf-tools", wildcard());
     let mut gated = skill_of(&plugin, "extract-tables", "/reg/pdf/skills/x/SKILL.md");
     gated.skill.predicates = on_serde();
     assert_eq!(
-        Scope::of(&plugin, &[&gated], &no_config()),
+        Scope::of(&plugin, &[&gated], &globally),
         Scope::Project,
         "a dep-gated skill makes the compiled content vary by workspace"
     );
@@ -134,6 +165,35 @@ fn shell_and_path_predicates_are_treated_as_workspace_dependent() {
 }
 
 // ── compile ──────────────────────────────────────────────────────────
+
+#[test]
+fn one_bundle_referenced_by_two_plugins_is_emitted_once() {
+    let first = registry_plugin("pdf-tools", wildcard());
+    let second = registry_plugin("csv-tools", wildcard());
+    let shared = "/reg/shared/skills/extract/SKILL.md";
+    let skills = vec![
+        skill_of(&first, "extract", shared),
+        skill_of(&second, "extract", shared),
+        skill_of(&second, "split-rows", "/reg/csv/skills/split/SKILL.md"),
+    ];
+
+    let compiled = compile(&[first, second], &skills, &no_config());
+    assert_eq!(
+        compiled[0].skills.len(),
+        1,
+        "the first plugin to claim the bundle carries it"
+    );
+    let second_dirs: Vec<&str> = compiled[1]
+        .skills
+        .iter()
+        .map(|s| s.dir_name.as_str())
+        .collect();
+    assert_eq!(
+        second_dirs,
+        vec!["split-rows"],
+        "the second plugin keeps its own skills but not a second copy of the shared one"
+    );
+}
 
 #[test]
 fn skills_are_grouped_under_the_plugin_that_contributed_them() {
@@ -216,17 +276,17 @@ fn same_named_skills_from_different_paths_both_survive_with_suffixes() {
 fn the_version_comes_from_the_manifest_then_the_resolved_crate() {
     let mut declared = registry_plugin("pdf-tools", wildcard());
     declared.plugin.version = Some("1.2.0".into());
-    assert_eq!(version_of(&declared).as_deref(), Some("1.2.0"));
+    assert_eq!(version_of(&declared), "1.2.0");
 
     let mut from_crate = registry_plugin("widget", wildcard());
     from_crate.canonical = PackageId::new("cargo", "widget", "0.3.1");
-    assert_eq!(version_of(&from_crate).as_deref(), Some("0.3.1"));
+    assert_eq!(version_of(&from_crate), "0.3.1");
 
     let placeholder = registry_plugin("pdf-tools", wildcard());
     assert_eq!(
         version_of(&placeholder),
-        None,
-        "the `*` placeholder is not a version"
+        UNVERSIONED,
+        "the `*` placeholder is not a version, and Codex keys its cache on one"
     );
 }
 
@@ -250,8 +310,9 @@ fn write_produces_a_manifest_beside_the_skills() {
     let skill_md = skill_on_disk(&source, "extract", "body");
 
     let compiled = CompiledPlugin {
+        source_id: PackageId::new("test", "src", ANY_VERSION),
         dir_name: "pdf-tools".into(),
-        manifest: Manifest::new("pdf-tools".into(), Some("1.2.0".into()), None),
+        manifest: Manifest::new("pdf-tools".into(), "1.2.0".into(), None),
         scope: Scope::Global,
         skills: vec![CompiledSkill {
             dir_name: "extract".into(),
@@ -302,8 +363,9 @@ fn rewriting_identical_content_leaves_the_directory_untouched() {
     let source = tmp.path().join("source");
     let skill_md = skill_on_disk(&source, "extract", "body");
     let compiled = CompiledPlugin {
+        source_id: PackageId::new("test", "src", ANY_VERSION),
         dir_name: "pdf-tools".into(),
-        manifest: Manifest::new("pdf-tools".into(), None, None),
+        manifest: Manifest::new("pdf-tools".into(), UNVERSIONED.into(), None),
         scope: Scope::Global,
         skills: vec![CompiledSkill {
             dir_name: "extract".into(),
@@ -363,12 +425,13 @@ fn reap_removes_marked_directories_and_leaves_user_ones_alone() {
 }
 
 #[test]
-fn a_plugin_with_no_version_still_gets_a_gemini_manifest() {
+fn a_plugin_with_no_version_is_emitted_as_unversioned() {
     let tmp = tempfile::tempdir().expect("tmp");
     let skill_md = skill_on_disk(&tmp.path().join("source"), "extract", "body");
     let compiled = CompiledPlugin {
+        source_id: PackageId::new("test", "src", ANY_VERSION),
         dir_name: "pdf-tools".into(),
-        manifest: Manifest::new("pdf-tools".into(), None, None),
+        manifest: Manifest::new("pdf-tools".into(), UNVERSIONED.into(), None),
         scope: Scope::Global,
         skills: vec![CompiledSkill {
             dir_name: "extract".into(),
@@ -383,23 +446,16 @@ fn a_plugin_with_no_version_still_gets_a_gemini_manifest() {
     )
     .expect("write");
 
-    let root: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(dest.join("plugin.json")).expect("read"))
-            .expect("json");
-    assert!(
-        root.get("version").is_none(),
-        "the Agent Plugins manifest leaves an unknown version out"
-    );
-
-    let gemini: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(dest.join("gemini-extension.json")).expect("read"),
-    )
-    .expect("json");
-    assert_eq!(
-        gemini["version"],
-        manifest::GeminiExtension::FALLBACK_VERSION,
-        "gemini requires one, so it is filled in rather than dropping the plugin"
-    );
+    for file in ["plugin.json", "gemini-extension.json"] {
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dest.join(file)).expect("read"))
+                .expect("json");
+        assert_eq!(
+            json["version"], UNVERSIONED,
+            "{file} needs a version even when the plugin declares none, since Codex keys its \
+             cache directory on one"
+        );
+    }
 }
 
 #[test]
@@ -409,14 +465,20 @@ fn the_marketplace_index_lists_each_plugin_and_is_removed_when_empty() {
     fs::create_dir_all(&root).expect("create root");
 
     let one = CompiledPlugin {
+        source_id: PackageId::new("test", "src", ANY_VERSION),
         dir_name: "pdf-tools-ab12cd34".into(),
-        manifest: Manifest::new("pdf-tools".into(), None, Some("Tables".into())),
+        manifest: Manifest::new(
+            "pdf-tools".into(),
+            UNVERSIONED.into(),
+            Some("Tables".into()),
+        ),
         scope: Scope::Global,
         skills: Vec::new(),
     };
     let two = CompiledPlugin {
+        source_id: PackageId::new("test", "src", ANY_VERSION),
         dir_name: "csv-tools".into(),
-        manifest: Manifest::new("csv-tools".into(), None, None),
+        manifest: Manifest::new("csv-tools".into(), UNVERSIONED.into(), None),
         scope: Scope::Global,
         skills: Vec::new(),
     };

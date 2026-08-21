@@ -29,17 +29,19 @@ The consent prompt and the `use` / `search` / `status` commands that record deci
 
 The key code paths are in `discovery.rs`, `config.rs` (`PluginsConfig`, `UseEntry`), `pm/cargo/mod.rs` (`active_plugins`, `load_plugin`), `plugins.rs` (`Plugin::requires_use`), `predicate.rs` (`PredicateContext::is_used`), and `skills.rs` (`active_plugins`, `record_active`).
 
-## Compilation into agent plugin directories
+## Compilation and delivery of agent plugin directories
 
-Every `cargo agents sync` compiles the plugins that apply into the directory unit agents consume. The step runs after skills are resolved, so it never re-evaluates a gate.
+Every `cargo agents sync` compiles the plugins that apply into the directory unit agents consume, then hands each directory to the agents that can take it. The step runs after skills are resolved, so it never re-evaluates a gate.
 
 1. `agent_plugin::compile` groups the applicable skills by their contributing plugin's `canonical` id and builds one `CompiledPlugin` each: a manifest name (slugged into the format's grammar), an optional version (the manifest's, else a crate plugin's resolved version — a registry placeholder `*` is not a version), the plugin's description, and one skill entry per distinct origin.
 2. Directory names are disambiguated across plugins, and skill directory names within each plugin, using the same origin-hash suffix rule that already governs skill installs.
-3. `Scope::of` sends each compiled plugin to `<project root>/.symposium/plugins/` or `<config dir>/installed/`. Global requires the plugin, its groups, and its skills to all be workspace-independent, and a dormant plugin to be woken by a *global* `use` entry — see [key modules](./module-structure.md#agent_plugin--compiling-an-agent-plugin-directory) for why that is a correctness requirement and not a preference.
+3. `Scope::of` sends each compiled plugin to `<project root>/.symposium/plugins/` or `<config dir>/installed/`. Global requires both a `use --global` entry naming the plugin *and* every gate in its chain (plugin, groups, contributed skills) to hold workspace-independently — see [key modules](./module-structure.md#agent_plugin--compiling-an-agent-plugin-directory) for why the second half is a correctness requirement and not a preference. A scope no configured agent can take is not compiled at all.
 4. `agent_plugin::write` stages the content in a temporary directory and syncs it in through `sync::sync_managed_dir`, so an unchanged plugin is not recopied. The directory gets the `.symposium` marker; the project tree's single `.gitignore` is written at `.symposium/` rather than into each plugin.
-5. `agent_plugin::reap` removes marked directories under each root that this sync did not write. Reaping the global root from a project sync is sound only because step 3 keeps the global set a function of user config alone.
+5. `write_marketplace` writes `.claude-plugin/marketplace.json` at each staging root, the one index path Claude Code, Codex, and Copilot all read, and removes it when a root holds no plugins.
+6. For each configured agent and each scope the agent accepts, `Agent::install_plugins` writes that agent's configuration and, where the agent loads only from its own tree, copies the directory there. The plugins an agent received are recorded, and their skills are then skipped in the per-skill loop — so a skill is installed individually only for an agent that could not take its plugin, and nothing arrives twice.
+7. `agent_plugin::reap_to_depth` removes marked directories this sync did not write, under both staging roots and under every known agent's plugin tree (so an agent dropped from the config is cleaned up too). Reaping the global root from a project sync is sound only because step 3 keeps the global set a function of user config alone.
 
-Per-agent delivery of these directories is not wired up yet; the per-skill install path is still what reaches agents. The key code paths are in `agent_plugin/mod.rs` (`compile`, `Scope::of`, `write`, `reap`), `agent_plugin/manifest.rs` (`slug`, `is_valid_name`), `predicate.rs` (`is_workspace_independent`), and `sync.rs`.
+The key code paths are in `agent_plugin/mod.rs` (`compile`, `Scope::of`, `write`, `write_marketplace`, `reap_to_depth`), `agent_plugin/manifest.rs` (`slug`, `is_valid_name`, the three manifest shapes), `agents/plugin_install.rs` (`accepts_plugin_scope`, `install_plugins`, `plugin_reap_roots`), `predicate.rs` (`is_workspace_independent`), and `sync.rs`.
 
 ## Help rendering
 

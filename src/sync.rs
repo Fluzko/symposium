@@ -295,6 +295,7 @@ struct PendingSkill<'a> {
     name: String,
     origin_hash: String,
     plugin: String,
+    plugin_id: crate::pm::PackageId,
     source: &'a Path,
 }
 
@@ -308,7 +309,14 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     let project_root = loaded.root.clone();
     let workspace: Vec<_> = loaded.crates.clone();
     let loaded = loaded.clone();
-    let debounce = Duration::from_secs(sym.config.sync_debounce_secs);
+    // The debounce keeps the per-event hook path cheap. A caller that asked for
+    // an update — an explicit `sync`, or the `SessionStart` catch-up pass — wants
+    // the comparison done, so a directory changed since the last sync is
+    // restored rather than skipped for the debounce window.
+    let debounce = match update {
+        UpdateLevel::None => Duration::from_secs(sym.config.sync_debounce_secs),
+        _ => Duration::ZERO,
+    };
     tracing::debug!(root = %project_root.display(), "resolved workspace root");
 
     // Load plugin registry (registry sources + workspace plugins)
@@ -374,6 +382,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                 name,
                 origin_hash: entry.origin_hash.clone(),
                 plugin: entry.plugin.clone(),
+                plugin_id: entry.plugin_id.clone(),
                 source: &entry.skill.path,
             });
         }
@@ -382,7 +391,24 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     // Compile each applicable plugin into an agent plugin directory. Nothing
     // reads these yet — the per-agent delivery lands with the emitters — but the
     // directories are owned and reaped from here on.
-    let compiled = crate::agent_plugin::compile(&active, &applicable, &sym.config.plugins);
+    // Only compile for a scope some configured agent can actually take. With
+    // none, the directory would sit unread and the skills still arrive through
+    // the per-skill path.
+    let configured: Vec<Agent> = sym
+        .config
+        .agents
+        .iter()
+        .filter_map(|a| Agent::from_config_name(&a.name).ok())
+        .collect();
+    let compiled: Vec<crate::agent_plugin::CompiledPlugin> =
+        crate::agent_plugin::compile(&active, &applicable, &sym.config.plugins)
+            .into_iter()
+            .filter(|plugin| {
+                configured
+                    .iter()
+                    .any(|agent| agent.accepts_plugin_scope(plugin.scope))
+            })
+            .collect();
     let owned_dir = project_root.join(crate::agent_plugin::PROJECT_OWNED_DIR);
     let project_staging = owned_dir.join(crate::agent_plugin::PROJECT_STAGING_SUBDIR);
     let global_staging = sym
@@ -502,8 +528,65 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     // we find later that has the marker file but isn't in this set is stale.
     let mut installed_dirs: BTreeSet<PathBuf> = BTreeSet::new();
 
+    // Plugin copies each agent now owns, so stale ones can be reaped below.
+    let mut agent_copies: std::collections::BTreeMap<Agent, BTreeSet<PathBuf>> =
+        std::collections::BTreeMap::new();
+
     for agent_name in &agent_names {
         let agent = Agent::from_config_name(agent_name)?;
+
+        // Hand over the compiled directories this agent can take, and note
+        // which plugins that covers so their skills are not also installed
+        // individually.
+        let mut delivered: BTreeSet<crate::pm::PackageId> = BTreeSet::new();
+        for (scope, root) in [
+            (Scope::Project, &project_staging),
+            (Scope::Global, &global_staging),
+        ] {
+            let in_scope: Vec<&crate::agent_plugin::CompiledPlugin> = compiled
+                .iter()
+                .filter(|p| p.scope == scope && agent.accepts_plugin_scope(scope))
+                .collect();
+            if in_scope.is_empty() && !root.exists() {
+                continue;
+            }
+            let marketplace = crate::agent_plugin::marketplace_name(scope, &project_root);
+            let registration = crate::agents::Registration {
+                marketplace: &marketplace,
+                root,
+                plugins: &in_scope,
+                scope,
+            };
+            match agent.install_plugins(&registration, sym.home_dir(), &project_root, debounce) {
+                Ok(copies) => {
+                    agent_copies
+                        .entry(agent)
+                        .or_default()
+                        .extend(copies.iter().cloned());
+                    for plugin in &in_scope {
+                        delivered.insert(plugin.source_id.clone());
+                        tracing::info!(
+                            report = %crate::report::ReportEvent::PluginDelivered {
+                                plugin: plugin.dir_name.clone(),
+                                agent: agent_name.clone(),
+                                scope: scope.as_str().to_string(),
+                                dest: display_path(
+                                    copies
+                                        .iter()
+                                        .find(|c| c.ends_with(&plugin.dir_name))
+                                        .unwrap_or(root)
+                                ),
+                            },
+                        );
+                    }
+                }
+                Err(e) => tracing::info!(
+                    report = %crate::report::ReportEvent::Warning {
+                        message: format!("failed to install plugins for {agent_name}: {e}"),
+                    },
+                ),
+            }
+        }
 
         let hook_root = match sym.config.hook_scope {
             crate::config::HookScope::Global => sym.home_dir().to_path_buf(),
@@ -523,8 +606,16 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                 name: skill_name,
                 origin_hash,
                 plugin,
+                plugin_id,
                 source,
             } = pending;
+
+            // Already delivered to this agent as a plugin directory, which is
+            // the whole point of compiling one. Agents that cannot take the
+            // plugin still get the skill the old way.
+            if delivered.contains(plugin_id) {
+                continue;
+            }
             // `source` is the path to the SKILL.md file; the skill directory
             // is its parent.
             let source_dir = match source.parent() {
@@ -649,6 +740,19 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                     );
                 }
             }
+        }
+    }
+
+    // Reap plugin copies we no longer own, across every known agent so an agent
+    // dropped from the config is cleaned up too.
+    for &agent in Agent::all() {
+        let written = agent_copies.get(&agent).cloned().unwrap_or_default();
+        for root in agent.plugin_reap_roots(sym.home_dir()) {
+            crate::agent_plugin::reap_to_depth(
+                &root,
+                crate::agent_plugin::AGENT_COPY_DEPTH,
+                &written,
+            );
         }
     }
 

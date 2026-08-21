@@ -151,6 +151,12 @@ pub enum ReportEvent {
         version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        /// Which manifest defined it, when the plugin has been loaded.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        plugin_kind: Option<String>,
+        /// Loaded but inactive until a `use` entry names it.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        dormant: bool,
     },
 
     /// A `[plugins] use` entry was recorded by `cargo agents use`.
@@ -164,6 +170,9 @@ pub enum ReportEvent {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         version: Option<String>,
+        /// Which manifest defined it, when the plugin has been loaded.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        plugin_kind: Option<String>,
         /// Why the entry is in the state it is: its enablement root, or the
         /// reason it will not load.
         root: String,
@@ -341,13 +350,21 @@ impl ReportEvent {
                 name,
                 version,
                 description,
+                plugin_kind,
+                dormant,
             } => {
                 let mut line = format!("  {name}");
                 if let Some(v) = version {
                     line.push_str(&format!(" {v}"));
                 }
+                if let Some(k) = plugin_kind {
+                    line.push_str(&format!(" ({k})"));
+                }
                 if let Some(d) = description {
                     line.push_str(&format!("\n      {d}"));
+                }
+                if *dormant {
+                    line.push_str("\n      dormant — enable with `cargo agents use`");
                 }
                 line
             }
@@ -370,6 +387,7 @@ impl ReportEvent {
             Self::PluginStatus {
                 name,
                 version,
+                plugin_kind,
                 root,
                 state,
             } => {
@@ -383,7 +401,11 @@ impl ReportEvent {
                     .as_deref()
                     .map(|v| format!(" {v}"))
                     .unwrap_or_default();
-                format!("{marker} {name}{version} — {root}")
+                let kind = plugin_kind
+                    .as_deref()
+                    .map(|k| format!(" ({k})"))
+                    .unwrap_or_default();
+                format!("{marker} {name}{version}{kind} — {root}")
             }
 
             Self::ProviderListed {

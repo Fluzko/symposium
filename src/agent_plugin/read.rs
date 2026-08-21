@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::manifest::IncomingManifest;
-use crate::plugins::{Plugin, PluginSource, SkillDepth, SkillGroup};
+use crate::plugins::{Plugin, PluginKind, PluginSource, SkillDepth, SkillGroup};
 use crate::report::ReportEvent;
 
 /// The manifest that marks a directory as an agent plugin package.
@@ -66,6 +66,7 @@ pub fn load(dir: &Path, gated_by_position: bool) -> Result<Plugin> {
 
     Ok(Plugin {
         name: manifest.name,
+        kind: PluginKind::AgentPlugin,
         version: manifest.version,
         description: manifest.description,
         predicates,

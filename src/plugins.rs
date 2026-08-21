@@ -167,6 +167,35 @@ impl serde::Serialize for PluginSource {
     }
 }
 
+/// Which manifest format defined a plugin.
+///
+/// Everything downstream treats the two alike; the distinction exists so the
+/// user-facing commands can say where a plugin came from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginKind {
+    /// A `SYMPOSIUM.toml` manifest, or a convention symposium infers.
+    #[default]
+    Symposium,
+    /// An externally authored [`plugin.json`](crate::agent_plugin::read) package.
+    AgentPlugin,
+}
+
+fn is_symposium_kind(kind: &PluginKind) -> bool {
+    *kind == PluginKind::Symposium
+}
+
+impl PluginKind {
+    /// How to annotate this kind in command output, or `None` for the ordinary
+    /// case that needs no annotation.
+    pub fn label(&self) -> Option<&'static str> {
+        match self {
+            PluginKind::Symposium => None,
+            PluginKind::AgentPlugin => Some("agent plugin"),
+        }
+    }
+}
+
 /// How deep a skill group's directory is searched.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub enum SkillDepth {
@@ -471,6 +500,8 @@ impl ParsedPlugin {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Plugin {
     pub name: String,
+    #[serde(skip_serializing_if = "is_symposium_kind")]
+    pub kind: PluginKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1390,6 +1421,7 @@ fn load_standalone_skill_plugin(
 
     let mut plugin = Plugin {
         name: name.clone(),
+        kind: PluginKind::Symposium,
         version: None,
         description: None,
         predicates,
@@ -1759,6 +1791,7 @@ pub struct ValidationResult {
 #[derive(Debug)]
 pub enum ValidationKind {
     Plugin,
+    AgentPlugin,
     Skill,
 }
 
@@ -1766,6 +1799,7 @@ impl std::fmt::Display for ValidationKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ValidationKind::Plugin => write!(f, "plugin"),
+            ValidationKind::AgentPlugin => write!(f, "agent plugin"),
             ValidationKind::Skill => write!(f, "skill"),
         }
     }
@@ -1785,6 +1819,10 @@ pub fn validate_source_dir(dir: &Path) -> Result<Vec<ValidationResult>> {
             // file it came from.
             Ok(parsed) => (parsed.canonical.name.clone(), Some(parsed), Ok(())),
             Err(e) => ("<unknown>".to_string(), None, Err(e)),
+        };
+        let kind = match plugin.as_ref().map(|p| p.plugin.kind) {
+            Some(PluginKind::AgentPlugin) => ValidationKind::AgentPlugin,
+            _ => ValidationKind::Plugin,
         };
 
         let mut children = Vec::new();
@@ -1844,7 +1882,7 @@ pub fn validate_source_dir(dir: &Path) -> Result<Vec<ValidationResult>> {
         });
         results.push(ValidationResult {
             id,
-            kind: ValidationKind::Plugin,
+            kind,
             result,
             warning,
             children,
@@ -2182,6 +2220,7 @@ fn validate_manifest(
 
     Ok(Plugin {
         name,
+        kind: PluginKind::Symposium,
         version: manifest.version.take(),
         description: manifest.description.take(),
         predicates,

@@ -444,10 +444,8 @@ async fn status_reports_dormant_registry_plugin() {
                 .expect("search finds the manifest plugin");
             assert_eq!(hit.origin, "user-plugins");
             assert!(
-                hit.description
-                    .as_deref()
-                    .is_some_and(|d| d.contains("dormant")),
-                "{hit:?}"
+                hit.dormant,
+                "dormancy is its own flag, so a description stays the plugin's own: {hit:?}"
             );
 
             ctx.symposium(&["use", "gateless-plugin"]).await?;
@@ -594,6 +592,138 @@ async fn session_start_hints_pending_candidates() {
             assert!(context.contains("crate-a"), "{context}");
             assert!(context.contains("cargo agents use"), "{context}");
             assert!(context.contains("Do not enable them yourself"), "{context}");
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+// ── Command coverage for agent plugin packages ───────────────────────
+
+/// `plugin validate` names the manifest that defined each entry, and contains a
+/// failure at the level where it takes effect: a rejected package, or a skipped
+/// skill inside a package that otherwise loads.
+#[test]
+fn validate_reports_agent_plugin_packages_per_level() {
+    let dir = Path::new("tests/fixtures/agent-plugin-broken0");
+    let results = symposium::plugins::validate_source_dir(dir).expect("validate");
+
+    let rejected = results
+        .iter()
+        .find(|r| r.result.is_err())
+        .expect("the package with an unusable name is rejected");
+    assert!(
+        format!("{:#}", rejected.result.as_ref().unwrap_err()).contains("not 1 to 64 characters"),
+        "{:#}",
+        rejected.result.as_ref().unwrap_err()
+    );
+
+    let partly = results
+        .iter()
+        .find(|r| r.id == "partly-broken")
+        .expect("the other package still loads");
+    assert!(partly.result.is_ok(), "a sibling's failure is contained");
+    assert_eq!(
+        partly.kind.to_string(),
+        "agent plugin",
+        "the output says which manifest defined it"
+    );
+    assert_eq!(
+        partly.children.iter().filter(|c| c.result.is_ok()).count(),
+        1,
+        "the good skill loads"
+    );
+    assert_eq!(
+        partly.children.iter().filter(|c| c.result.is_err()).count(),
+        1,
+        "and the broken one is reported as a skill, not as the package"
+    );
+}
+
+/// `search` and `status` describe a package in the vocabulary they already use,
+/// annotated with the manifest it came from.
+#[tokio::test]
+async fn search_and_status_describe_agent_plugin_packages() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["agent-plugin-read0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+
+            let hit = symposium::search_command::find_matches(&ctx.sym, "portable-tools")
+                .await
+                .into_iter()
+                .find(|m| m.name == "portable-tools")
+                .expect("search finds the package");
+            assert_eq!(hit.kind.as_deref(), Some("agent plugin"));
+            assert_eq!(
+                hit.version.as_deref(),
+                Some("2.1.0"),
+                "the version comes from the package's own manifest"
+            );
+            assert_eq!(
+                hit.description.as_deref(),
+                Some("An externally authored package")
+            );
+            assert!(!hit.dormant, "it declares a `dev.symposium` gate");
+
+            let dormant = symposium::search_command::find_matches(&ctx.sym, "dormant-portable")
+                .await
+                .into_iter()
+                .find(|m| m.name == "dormant-portable")
+                .expect("search finds the gateless package");
+            assert!(dormant.dormant, "no gate, so it waits to be used");
+            assert_eq!(
+                dormant.description.as_deref(),
+                Some("No gate, so it waits to be used"),
+                "dormancy is reported separately, so the description stays the author's"
+            );
+
+            let workspace_root = ctx.workspace_root.clone().unwrap();
+            let deps = ctx.sym.workspace_deps(&workspace_root);
+            let entries = symposium::status_command::workspace_status(&ctx.sym, &deps).await?;
+            let entry = entries
+                .iter()
+                .find(|e| e.name == "portable-tools")
+                .expect("status lists the package");
+            assert_eq!(entry.kind.as_deref(), Some("agent plugin"));
+            assert_eq!(entry.state, StatusState::Active);
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// `use` wakes a dormant package and installs it the same way any other plugin
+/// is installed; `use --remove` takes it back out.
+#[tokio::test]
+async fn use_and_remove_a_dormant_agent_plugin_package() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["agent-plugin-read0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let root = ctx.workspace_root.clone().unwrap();
+            let compiled = root.join(".symposium/plugins/dormant-portable");
+            assert!(!compiled.exists(), "dormant, so nothing is installed");
+
+            ctx.symposium(&["use", "dormant-portable"]).await?;
+            assert!(
+                compiled.join("plugin.json").is_file(),
+                "`use` wakes it and the same install path runs"
+            );
+            assert!(compiled.join("skills/dormant-guidance/SKILL.md").is_file());
+
+            ctx.symposium(&["use", "--remove", "dormant-portable"])
+                .await?;
+            assert!(
+                !compiled.exists(),
+                "`remove` disables it and the next sync reaps the directory"
+            );
             Ok(())
         },
     )

@@ -244,7 +244,7 @@ Global compiled directories go in a sibling instead:
 ~/.symposium/installed/   compiled directories symposium writes
 ```
 
-Workspace scope is unaffected — `<project root>/.symposium/plugins/`, as described above — and the whole `.symposium/` directory is symposium's own, so one `.gitignore` containing `*` sits at its root rather than one per compiled directory.
+Workspace scope is unaffected (`<project root>/.symposium/plugins/`, as described above), and the whole `.symposium/` directory is symposium's own, so one `.gitignore` containing `*` sits at its root rather than one per compiled directory.
 
 ### A global installation needs a workspace-independent gate
 
@@ -258,9 +258,72 @@ Run where `lopdf` is a dependency, the gate holds and the directory is written u
 
 Removal has the mirror problem. Cleanup removes marked directories it did not install on this run, so a global set that varies by workspace makes two projects undo each other: syncing the project without `lopdf` removes the directory, syncing the one with it writes it back, on every session start.
 
-Both follow from evaluating a workspace-dependent gate once and keeping the result somewhere workspace-independent. A plugin therefore installs globally only when its gate cannot vary by workspace: an empty gate — a dormant plugin woken by a global `use` entry, which is the case [the walkthrough](#walkthrough) shows — or `depends-on = ["*"]`. A global entry on any other plugin installs per project, and the install report names the scope it got.
+Both follow from evaluating a workspace-dependent gate once and keeping the result somewhere workspace-independent. A plugin therefore installs globally only when its gate cannot vary by workspace: an empty gate (a dormant plugin woken by a global `use` entry, which is the case [the walkthrough](#walkthrough) shows) or `depends-on = ["*"]`. A global entry on any other plugin installs per project, and the install report names the scope it got.
 
 The test is conservative. `depends-on(<name>)` and `workspace-member()` are workspace-dependent by definition, `shell(...)` and a relative `path_exists(...)` resolve against the workspace as their working directory, and a custom predicate is opaque. Only the empty set and `depends-on(*)` qualify; widening the test per predicate kind later is additive.
+
+### One directory, several manifests
+
+[Agent backends](#agent-backends) treats Claude Code and Gemini CLI as separate emitters. Probing the
+installed agents shows they do not need to be. Claude Code ignores a `plugin.json` at a package root
+and falls back to the directory name for identity; Agent Plugins clients ignore `.claude-plugin/`;
+Gemini CLI reads only its own file. So one compiled directory carrying all three manifests, with the
+same content in each, satisfies every one of them:
+
+```text
+pdf-tools/
+  plugin.json                    Codex CLI, Copilot CLI, VS Code
+  .claude-plugin/plugin.json     Claude Code
+  gemini-extension.json          Gemini CLI
+  skills/extract-tables/SKILL.md every one of them
+```
+
+Verified against Claude Code 2.1.237, Codex CLI 0.147.0, Copilot CLI 1.0.79 and Gemini CLI 0.55.1:
+both validators accept that directory, and Claude Code resolves the declared name from it rather than
+the directory name.
+
+The staging root needs one manifest of its own, because Claude Code, Codex CLI and Copilot CLI all
+take a *marketplace* (a directory of packages) plus a per-package enablement entry, rather than a
+path to one package. `.claude-plugin/marketplace.json` is the one file all three read. Codex CLI also
+accepts `.agents/plugins/marketplace.json` and prefers it when both are present; Claude Code rejects
+it.
+
+So there is one emitter with several manifest renderers, not one emitter per agent.
+
+### Only Claude Code can scope a plugin to a project
+
+[Scope of an installation](#scope-of-an-installation) expects Codex CLI, Kiro and Claude Code to offer
+a project-scoped location, and VS Code to accept a workspace-scoped path registration. Of the agents
+installed here, only Claude Code does:
+
+| Agent | Result |
+|---|---|
+| Claude Code | `plugin install -s project` |
+| Codex CLI | a project `.codex/config.toml` marketplace entry is ignored, and there is no folder discovery at `.codex/plugins/` or `$CODEX_HOME/plugins/` |
+| Copilot CLI | a project `.copilot/settings.json` is ignored, a working-directory marketplace manifest is not discovered, and `plugin install` has no scope flag |
+| Gemini CLI | a project `.gemini/extensions/` is ignored |
+| VS Code | `chat.pluginLocations` is machine-scoped and workspace-trust restricted, so it cannot be set per workspace |
+
+Kiro is not installed here and remains unconfirmed.
+
+The consequence is that a workspace-scoped plugin can be delivered as a compiled directory to Claude
+Code alone. On the others it arrives as individual skill directories, as it does today. So the
+per-skill path is not reduced in scope: it stays the mechanism for workspace-scoped plugins on six of
+the seven agents, and compilation pays off for global installations plus Claude Code project
+installations. That is a reason to treat global delivery as part of the first increment rather than
+as follow-up work.
+
+### Two mechanics worth recording
+
+Codex CLI's install step copies a package into a version-keyed cache under `$CODEX_HOME/plugins/cache/`.
+Writing its `config.toml` entries alone registers enablement against an empty cache, so the copy has
+to happen too. Re-running the install after editing the source at the same version does re-copy, so
+there is no stale-content trap. Its removal step clears both config tables but leaves the cache
+directory behind, which symposium has to delete itself.
+
+Gemini CLI needs no configuration write at all: a package present at `~/.gemini/extensions/<name>/`
+is listed and enabled. Its own `extensions link` command blocks waiting on input, which is another
+reason the file is written directly rather than shelling out.
 
 ## Implementation status
 

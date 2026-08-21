@@ -137,8 +137,7 @@ fn a_dependency_gated_group_or_skill_keeps_the_plugin_project_scoped() {
     grouped.plugin.skills = vec![SkillGroup {
         predicates: on_serde(),
         source: PluginSource::Path(PathBuf::from("skills")),
-        source_label: None,
-        workspace_member: false,
+        ..Default::default()
     }];
     assert_eq!(Scope::of(&grouped, &[], &globally), Scope::Project);
 

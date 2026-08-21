@@ -5,7 +5,7 @@
 //! names (which are crate names or free-form manifest strings), so a name has
 //! to be slugged before it can be written.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_URL: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
 
@@ -39,6 +39,88 @@ impl Manifest {
         let mut json = serde_json::to_string_pretty(self).expect("manifest always serializes");
         json.push('\n');
         json
+    }
+}
+
+/// An externally authored `plugin.json`, as symposium reads it.
+///
+/// Separate from [`Manifest`], which is what symposium *writes*: a package we
+/// read may carry fields we do not emit, and the format requires a client to
+/// ignore a namespace it does not implement without inspecting it. Unknown
+/// top-level keys are captured rather than rejected so the package still loads
+/// and the surprise can be reported.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IncomingManifest {
+    pub name: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub extensions: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(flatten)]
+    pub unknown: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// The `extensions` namespace through which a portable package can carry
+/// symposium gating. Keyed on a domain the project controls, as the format asks.
+pub const SYMPOSIUM_NAMESPACE: &str = "dev.symposium";
+
+/// Fields the format itself defines, so an unknown-key report does not flag the
+/// ones we simply do not use.
+const KNOWN_FIELDS: &[&str] = &[
+    "$schema",
+    "author",
+    "homepage",
+    "repository",
+    "license",
+    "keywords",
+];
+
+/// Symposium's gate, read from `extensions["dev.symposium"]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SymposiumExtension {
+    #[serde(default, rename = "depends-on")]
+    pub depends_on: Option<crate::predicate::DependsOnList>,
+    #[serde(default)]
+    pub predicates: crate::predicate::PredicateSet,
+}
+
+impl IncomingManifest {
+    /// Parse a manifest, rejecting one whose name breaks the format's grammar —
+    /// a package with an unusable identity cannot be installed anywhere.
+    pub fn parse(text: &str) -> anyhow::Result<Self> {
+        let manifest: Self = serde_json::from_str(text)?;
+        if !is_valid_name(&manifest.name) {
+            anyhow::bail!(
+                "plugin name `{}` is not 1 to 64 characters of lowercase letters, digits, \
+                 hyphens, and periods starting and ending alphanumeric",
+                manifest.name
+            );
+        }
+        Ok(manifest)
+    }
+
+    /// Top-level keys that are neither ours nor the format's, for reporting.
+    pub fn unknown_fields(&self) -> Vec<&str> {
+        self.unknown
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !KNOWN_FIELDS.contains(key))
+            .collect()
+    }
+
+    /// The symposium gate, or `None` when the package declares none. An
+    /// unparseable one is an error: it was written for us, so ignoring it
+    /// silently would activate the package more widely than intended.
+    pub fn symposium_extension(&self) -> anyhow::Result<Option<SymposiumExtension>> {
+        let Some(raw) = self.extensions.get(SYMPOSIUM_NAMESPACE) else {
+            return Ok(None);
+        };
+        let parsed = serde_json::from_value(raw.clone())
+            .map_err(|e| anyhow::anyhow!("invalid `extensions.{SYMPOSIUM_NAMESPACE}`: {e}"))?;
+        Ok(Some(parsed))
     }
 }
 

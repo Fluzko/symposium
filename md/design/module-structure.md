@@ -74,6 +74,18 @@ The manifest always carries a `version`, even though the format allows omitting 
 
 `write` assembles the directory in a temporary directory and hands it to `sync::sync_managed_dir`, so the install is change-aware and debounced exactly like a skill directory: recompiling identical content leaves the destination untouched. `reap_to_depth` removes marked directories the current sync did not write, keyed on the `.symposium` marker so a directory the user placed there is left alone; the depth lets one function serve both a staging root and an agent's own tree, where Codex nests copies as `<marketplace>/<plugin>/<version>`.
 
+### `agent_plugin/read.rs` — reading an externally authored package
+
+A directory holding a `plugin.json` is a third kind of plugin entry beside one holding a `SYMPOSIUM.toml` and one holding a bare `SKILL.md`, recognized in the same three positions with each position keeping its meaning: a registry entry is curated but ungated, a workspace member is gated by membership, a dependency is an untrusted offer subject to consent.
+
+`IncomingManifest` is the read counterpart of the [`Manifest`](#agent_plugin--compiling-an-agent-plugin-directory) symposium writes, and the two are deliberately separate: an incoming package may carry fields we never emit. Unknown top-level keys are captured through a flattened map and reported rather than rejected, since the format asks a client to tolerate what it does not recognize. A name that breaks the format's grammar does reject the package, because a package with an unusable identity cannot be installed anywhere.
+
+The format cannot express *when* a package applies, so gating comes from `extensions["dev.symposium"]` (`depends-on` and `predicates`, in the same syntax a `SYMPOSIUM.toml` gate uses — the existing deserializers read them straight from JSON). Other namespaces are ignored without being inspected, as the format requires. A malformed `dev.symposium` object *is* an error: it was written for symposium, so ignoring it would activate the package more widely than its author asked. A package declaring no gate is dormant under the ordinary rule, unless its position already gates it.
+
+Skills map without adaptation except in one respect: the format fixes `skills/` at one level, so the group carries `SkillDepth::ImmediateChildren` while every symposium-declared group keeps the recursive walk. Discovery also refuses a skill whose real path leaves the directory it was found in — a symlink out would otherwise be read here and silently dropped at install time, since the copy ignores symlinks, producing an empty skill rather than a reported one.
+
+A directory carrying both manifests loads as a symposium plugin, `SYMPOSIUM.toml` being the richer one, but `sibling_identity` fills the name, version, and description the TOML omits so an author need not repeat what they already declared portably. A broken companion is reported and ignored rather than rejecting the plugin the TOML defines.
+
 ### `agents/plugin_install.rs` — handing a directory to an agent
 
 Two mechanisms, and which one applies is a property of the agent. Each row below was established by installing a directory and asking the running agent what it could see, then deleting parts of the installation to find what was actually required:

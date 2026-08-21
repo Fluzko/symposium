@@ -6,6 +6,7 @@
 //! receives a gate and never resolves one.
 
 pub mod manifest;
+pub mod read;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -398,5 +399,7 @@ pub fn reap(root: &Path, written: &std::collections::BTreeSet<PathBuf>) {
 /// `<marketplace>/<plugin>/<version>`, the others one or two levels.
 pub const AGENT_COPY_DEPTH: usize = 3;
 
+#[cfg(test)]
+mod read_tests;
 #[cfg(test)]
 mod tests;

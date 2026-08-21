@@ -2862,3 +2862,84 @@ async fn report_json_shows_skipped_skills() {
     .await
     .unwrap();
 }
+
+// ── Externally authored agent plugin packages ────────────────────────
+
+/// A `plugin.json` directory is recognized in all three positions a plugin can
+/// occupy, and each position keeps its existing meaning.
+#[tokio::test]
+async fn agent_plugin_packages_load_in_every_position() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["agent-plugin-read0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let root = ctx.workspace_root.clone().expect("workspace root");
+            let skills_dir = root.join(".claude/skills");
+
+            // Registry entry, gated through the `dev.symposium` namespace.
+            find_installed_skill(&skills_dir, "portable-guidance");
+            // Workspace member: membership is the gate.
+            find_installed_skill(&skills_dir, "member-guidance");
+            // Dependency, consented to through `auto-enable`.
+            find_installed_skill(&skills_dir, "dep-guidance");
+
+            assert!(
+                find_installed_skills(&skills_dir, "too-deep").is_empty(),
+                "the format fixes skills at one level, so deeper folders are not searched"
+            );
+            assert!(
+                find_installed_skills(&skills_dir, "dormant-guidance").is_empty(),
+                "a package with no gate waits for a `use` entry"
+            );
+
+            // Each package is compiled like any other plugin.
+            let compiled = root.join(".symposium/plugins");
+            for name in ["portable-tools", "member-portable", "dep-portable"] {
+                assert!(
+                    compiled.join(name).join("plugin.json").is_file(),
+                    "{name} should have a compiled directory"
+                );
+            }
+            assert!(
+                !compiled.join("dormant-portable").exists(),
+                "a dormant package compiles to nothing"
+            );
+
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// The package's identity reaches the compiled manifest, so an agent sees the
+/// name and version its author declared.
+#[tokio::test]
+async fn a_packages_declared_identity_reaches_the_compiled_manifest() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["agent-plugin-read0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let root = ctx.workspace_root.clone().expect("workspace root");
+            let manifest: Value = serde_json::from_str(
+                &std::fs::read_to_string(
+                    root.join(".symposium/plugins/portable-tools/plugin.json"),
+                )
+                .expect("read compiled manifest"),
+            )
+            .expect("parse");
+            assert_eq!(manifest["name"], "portable-tools");
+            assert_eq!(manifest["version"], "2.1.0");
+            assert_eq!(manifest["description"], "An externally authored package");
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}

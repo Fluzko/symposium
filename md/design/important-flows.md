@@ -43,6 +43,17 @@ Every `cargo agents sync` compiles the plugins that apply into the directory uni
 
 The key code paths are in `agent_plugin/mod.rs` (`compile`, `Scope::of`, `write`, `write_marketplace`, `reap_to_depth`), `agent_plugin/manifest.rs` (`slug`, `is_valid_name`, the three manifest shapes), `agents/plugin_install.rs` (`accepts_plugin_scope`, `install_plugins`, `plugin_reap_roots`), `predicate.rs` (`is_workspace_independent`), and `sync.rs`.
 
+## Reading an externally authored package
+
+A directory holding a `plugin.json` loads as an ordinary symposium plugin, so everything downstream — compilation, delivery, `status` — treats it like any other.
+
+1. `pm::layout::classify` returns `EntryKind::AgentPlugin` for a directory carrying the manifest. Precedence runs `SYMPOSIUM.toml`, `plugin.json`, `SKILL.md`, so a directory with both TOML and JSON loads as a symposium plugin. A claimed directory is not descended into, so nesting a package inside a package is not a way to ship two; a source root that is itself a package is an error.
+2. `agent_plugin::read::load` parses the manifest, reports unknown top-level fields and an unsupported `mcp.json`, reads the gate from `extensions["dev.symposium"]`, and returns a `Plugin` with one `skills/` group limited to immediate children.
+3. The three positions call it: `plugins::load_entry` for a registry entry (dormancy applies), `workspace_plugin_for_dir` for a member, and `CargoPm::build_from_fetched` for a dependency (both gated by position, so no `use` entry is needed). `embedded_plugin_kind` counts a `plugin.json` as plugin content, so a dependency carrying one is offered for consent.
+4. Containment is per unit: a bad manifest rejects that package alone, an unknown field is reported and ignored, a broken skill is skipped while the rest load, and a skill resolving outside the package is refused.
+
+The key code paths are in `agent_plugin/read.rs`, `agent_plugin/manifest.rs` (`IncomingManifest`), `pm/layout.rs` (`classify`, `AGENT_PLUGIN_FILE`), `plugins.rs` (`load_entry`, `workspace_plugin_for_dir`, `apply_sibling_identity`, `dormant_without_gate`), and `skills.rs` (`discover_skills`, `SkillDepth`).
+
 ## Help rendering
 
 `cargo agents --help` (and `-h`, the bare `help` keyword, or no subcommand) is rendered by `help_render`, not by clap's default help.

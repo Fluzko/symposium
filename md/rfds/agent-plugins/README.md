@@ -227,6 +227,41 @@ Emitting and reading `mcp.json` removes the last per-agent configuration format 
 
 Beyond that, Claude Code and Gemini CLI can both carry hooks inside a plugin directory, which would trade the vendor-neutral hook format and per-dispatch predicates for native dispatch. Publishing a compiled Symposium plugin as a portable package for other clients is a short step once compilation exists. A package's `version` can drive update checks and cache freshness, which the format explicitly permits.
 
+## Implementation details
+
+Two points the sections above leave open, found while mapping this proposal onto the current code. They constrain the implementation rather than change the design.
+
+### Where a global compiled directory goes
+
+[Installation](#installation) writes a global plugin's directory under the user configuration directory. That directory already holds one: `~/.symposium/plugins/` is the builtin `user-plugins` registry (`Symposium::registry_instances` in `src/config.rs`), a directory symposium *reads* entries from.
+
+Compiling into it makes symposium read its own output. A compiled directory carries a `plugin.json`, which registry enumeration claims as an entry once [external packages](#external-packages) are recognized, so every global install reappears as a plugin of the `user-plugins` registry on the next load.
+
+Global compiled directories go in a sibling instead:
+
+```text
+~/.symposium/plugins/     registry symposium reads
+~/.symposium/installed/   compiled directories symposium writes
+```
+
+Workspace scope is unaffected — `<project root>/.symposium/plugins/`, as described above — and the whole `.symposium/` directory is symposium's own, so one `.gitignore` containing `*` sits at its root rather than one per compiled directory.
+
+### A global installation needs a workspace-independent gate
+
+[Scope of an installation](#scope-of-an-installation) matches an installation to the enablement that produced it, so a `use --global` entry installs for the user. Predicates, though, are evaluated against the workspace being synced, while a user-level directory is visible from every workspace. The two do not compose:
+
+```console
+$ cargo agents use --global pdf-tools   # gated depends-on = ["lopdf"]
+```
+
+Run where `lopdf` is a dependency, the gate holds and the directory is written under the user configuration directory. Every other project on the machine now sees the plugin, without the dependency that gates it.
+
+Removal has the mirror problem. Cleanup removes marked directories it did not install on this run, so a global set that varies by workspace makes two projects undo each other: syncing the project without `lopdf` removes the directory, syncing the one with it writes it back, on every session start.
+
+Both follow from evaluating a workspace-dependent gate once and keeping the result somewhere workspace-independent. A plugin therefore installs globally only when its gate cannot vary by workspace: an empty gate — a dormant plugin woken by a global `use` entry, which is the case [the walkthrough](#walkthrough) shows — or `depends-on = ["*"]`. A global entry on any other plugin installs per project, and the install report names the scope it got.
+
+The test is conservative. `depends-on(<name>)` and `workspace-member()` are workspace-dependent by definition, `shell(...)` and a relative `path_exists(...)` resolve against the workspace as their working directory, and a custom predicate is opaque. Only the empty set and `depends-on(*)` qualify; widening the test per predicate kind later is additive.
+
 ## Implementation status
 
 This RFD describes proposed work. Implementation has not begun.

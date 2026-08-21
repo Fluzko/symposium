@@ -69,6 +69,7 @@ pub enum ReportEvent {
     /// A skill was installed to an agent's directory.
     SkillInstalled {
         skill: String,
+        plugin: String,
         agent: String,
         dest: String,
     },
@@ -228,8 +229,13 @@ impl ReportEvent {
                     format!("      skill {skill} ({plugin}): skipped ({r})")
                 }
             }
-            Self::SkillInstalled { skill, agent, dest } => {
-                format!("✅ installed skill {skill} for {agent} → {dest}")
+            Self::SkillInstalled {
+                skill,
+                plugin,
+                agent,
+                dest,
+            } => {
+                format!("✅ installed skill {skill} from {plugin} for {agent} → {dest}")
             }
             Self::SkillRemoved { path } => {
                 format!("➖ removed {path}")

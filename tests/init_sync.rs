@@ -2485,6 +2485,7 @@ async fn report_json_info_emits_installed_events() {
                 "expected at least one skill_installed event, got: {events:?}"
             );
             assert_eq!(installed[0]["skill"], "serde-guidance");
+            assert_eq!(installed[0]["plugin"], "serde-guidance");
             assert_eq!(installed[0]["agent"], "claude");
             assert!(
                 installed[0]["dest"]

@@ -942,7 +942,6 @@ fn dispatched_hooks_for_payload(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use crate::pm::{ANY_VERSION, PackageId};
 
@@ -1157,12 +1156,7 @@ mod tests {
             },
             installations: vec![install],
             hooks: vec![hook],
-            skills: vec![],
-            mcp_servers: vec![],
-            subcommands: BTreeMap::new(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
         crate::plugins::ParsedPlugin {
             plugin,

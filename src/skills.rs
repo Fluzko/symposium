@@ -99,6 +99,7 @@ pub struct SkillWithGroupContext {
     /// The hash of where the skill was discovered. Drives install-path disambiguation
     /// and dedup at sync time.
     pub origin_hash: String,
+    pub plugin: String,
 }
 
 /// Resolve all applicable skills from the registry.
@@ -159,13 +160,7 @@ pub(crate) async fn collect_skills(
         for group in &parsed.plugin.skills {
             let skills = load_skills_for_group(sym, parsed, group, ctx, update).await;
             for (skill, origin_hash) in skills {
-                collect_skill_applicable_to(
-                    skill,
-                    origin_hash,
-                    &parsed.plugin.name,
-                    ctx,
-                    &mut results,
-                );
+                collect_skill_applicable_to(skill, origin_hash, parsed, ctx, &mut results);
             }
         }
     }
@@ -552,10 +547,11 @@ fn load_skill(
 fn collect_skill_applicable_to(
     skill: Skill,
     origin_hash: String,
-    plugin_name: &str,
+    parsed: &ParsedPlugin,
     ctx: &mut PredicateContext,
     results: &mut Vec<SkillWithGroupContext>,
 ) {
+    let plugin_name = parsed.plugin.name.as_str();
     if !skill.predicates.evaluate(ctx) {
         tracing::debug!(
             report = %crate::report::ReportEvent::SkillConsidered {
@@ -576,7 +572,11 @@ fn collect_skill_applicable_to(
             reason: None,
         },
     );
-    results.push(SkillWithGroupContext { skill, origin_hash });
+    results.push(SkillWithGroupContext {
+        skill,
+        origin_hash,
+        plugin: plugin_name.to_string(),
+    });
 }
 
 /// Raw frontmatter fields extracted from a SKILL.md file.
@@ -1076,19 +1076,13 @@ mod tests {
         let plugin = Plugin {
             name: "other-crate-plugin".to_string(),
             predicates: pred_set("other-crate"),
-            hooks: vec![],
             skills: vec![SkillGroup {
                 predicates: pred_set("serde"), // Group targets serde
                 source: PluginSource::Path(PathBuf::from("skills")),
                 source_label: None,
                 workspace_member: false,
             }],
-            mcp_servers: vec![],
-            installations: Vec::new(),
-            subcommands: BTreeMap::new(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
 
         let registry = PluginRegistry {
@@ -1135,19 +1129,13 @@ mod tests {
         let plugin = Plugin {
             name: "wildcard-plugin".to_string(),
             predicates: pred_set("*"), // Plugin applies to all
-            hooks: vec![],
             skills: vec![SkillGroup {
                 predicates: pred_set("other-crate"), // But group targets other-crate
                 source: PluginSource::Path(PathBuf::from("skills")),
                 source_label: None,
                 workspace_member: false,
             }],
-            mcp_servers: vec![],
-            installations: Vec::new(),
-            subcommands: BTreeMap::new(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
 
         let registry = PluginRegistry {
@@ -1212,19 +1200,13 @@ mod tests {
         let plugin = Plugin {
             name: "serde-plugin".to_string(),
             predicates: pred_set("serde"), // Plugin targets serde
-            hooks: vec![],
             skills: vec![SkillGroup {
                 predicates: pred_set("serde"), // Group also targets serde
                 source: PluginSource::Path(skill_dir.to_path_buf()),
                 source_label: None,
                 workspace_member: false,
             }],
-            mcp_servers: vec![],
-            installations: Vec::new(),
-            subcommands: BTreeMap::new(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
 
         let registry = PluginRegistry {
@@ -1294,19 +1276,14 @@ mod tests {
                     Predicate::Shell("false".into()),
                 ],
             },
-            hooks: vec![],
             skills: vec![SkillGroup {
                 predicates: pred_set("serde"),
                 source: PluginSource::Path(skill_dir.to_path_buf()),
                 source_label: None,
                 workspace_member: false,
             }],
-            mcp_servers: vec![],
-            installations: Vec::new(),
             subcommands: Default::default(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
 
         let registry = PluginRegistry {
@@ -1372,7 +1349,6 @@ mod tests {
                     Predicate::Shell("true".into()),
                 ],
             },
-            hooks: vec![],
             skills: vec![SkillGroup {
                 predicates: PredicateSet {
                     predicates: vec![
@@ -1384,12 +1360,8 @@ mod tests {
                 source_label: None,
                 workspace_member: false,
             }],
-            mcp_servers: vec![],
-            installations: Vec::new(),
             subcommands: Default::default(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
 
         let registry = PluginRegistry {
@@ -1504,8 +1476,6 @@ mod tests {
         let plugin = Plugin {
             name: "my-skill".to_string(),
             predicates: pred_set("serde"),
-            installations: vec![],
-            hooks: vec![],
             skills: vec![SkillGroup {
                 predicates: PredicateSet::default(),
                 // A PM returns absolute skill dirs; the bare-skill group's "."
@@ -1514,11 +1484,8 @@ mod tests {
                 source_label: None,
                 workspace_member: false,
             }],
-            mcp_servers: vec![],
             subcommands: Default::default(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
         let registry = PluginRegistry {
             plugins: vec![ParsedPlugin {

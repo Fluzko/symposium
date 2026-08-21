@@ -448,9 +448,13 @@ impl ParsedPlugin {
 /// This is a table of contents — it describes what skills and hooks are
 /// available, but does not load skill content. The skills layer handles
 /// discovery and loading.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Plugin {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Activation predicates for this plugin — the plugin's `depends-on`
     /// (lowered to `any(depends-on(...))`) merged with its `predicates`. Holds
     /// when every entry holds. Evaluated at sync time (for skills/MCP), at
@@ -1009,6 +1013,8 @@ struct RawPluginManifest {
     /// Required for registry plugins; defaults to the directory name for
     /// workspace plugins.
     name: Option<String>,
+    version: Option<String>,
+    description: Option<String>,
     /// Default-content opt-outs. Only meaningful for workspace plugins.
     #[serde(default)]
     defaults: Option<RawDefaults>,
@@ -1059,6 +1065,12 @@ impl RawPluginManifest {
             .extend(over.predicates.predicates);
         if over.name.is_some() {
             self.name = over.name;
+        }
+        if over.version.is_some() {
+            self.version = over.version;
+        }
+        if over.description.is_some() {
+            self.description = over.description;
         }
         if over.defaults.is_some() {
             self.defaults = over.defaults;
@@ -1327,6 +1339,8 @@ fn load_standalone_skill_plugin(
 
     let mut plugin = Plugin {
         name: name.clone(),
+        version: None,
+        description: None,
         predicates,
         installations: Vec::new(),
         hooks: Vec::new(),
@@ -2078,6 +2092,8 @@ fn validate_manifest(
 
     Ok(Plugin {
         name,
+        version: manifest.version.take(),
+        description: manifest.description.take(),
         predicates,
         installations,
         hooks,
@@ -2230,7 +2246,6 @@ fn build_custom_predicate_registry(
 mod tests {
     use super::*;
     use indoc::indoc;
-    use std::collections::BTreeMap;
 
     use crate::predicate::PredicateSet;
 
@@ -2541,6 +2556,41 @@ mod tests {
         assert_eq!(plugin.name, "example-plugin");
         assert_eq!(plugin.hooks.len(), 1);
         assert!(plugin.skills.is_empty());
+    }
+
+    #[test]
+    fn parse_manifest_version_and_description() {
+        let toml = indoc! {r#"
+            name = "pdf-tools"
+            version = "1.2.0"
+            description = "Table extraction guidance"
+            depends-on = ["lopdf"]
+        "#};
+        let plugin = from_str(toml).expect("parse");
+        assert_eq!(plugin.version.as_deref(), Some("1.2.0"));
+        assert_eq!(
+            plugin.description.as_deref(),
+            Some("Table extraction guidance")
+        );
+
+        let bare = from_str("name = \"bare\"\ndepends-on = [\"serde\"]\n").expect("parse");
+        assert_eq!(bare.version, None);
+        assert_eq!(bare.description, None);
+    }
+
+    #[test]
+    fn crate_manifest_merge_prefers_the_file_layer_for_version_and_description() {
+        let metadata: toml::Table = toml::from_str(indoc! {r#"
+            version = "0.1.0"
+            description = "from Cargo.toml"
+        "#})
+        .expect("metadata");
+        let file = indoc! {r#"
+            version = "0.2.0"
+        "#};
+        let plugin = load_crate_manifest(Some(metadata), Some(file), "widget").expect("merge");
+        assert_eq!(plugin.version.as_deref(), Some("0.2.0"));
+        assert_eq!(plugin.description.as_deref(), Some("from Cargo.toml"));
     }
 
     #[test]
@@ -3174,14 +3224,7 @@ mod tests {
         let plugin_wildcard = Plugin {
             name: "wildcard".to_string(),
             predicates: pred_set("*"),
-            hooks: vec![],
-            skills: vec![],
-            mcp_servers: vec![],
-            installations: Vec::new(),
-            subcommands: BTreeMap::new(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
         assert!(plugin_wildcard.applies(&mut ctx(&workspace_crates)));
 
@@ -3189,14 +3232,7 @@ mod tests {
         let plugin_serde = Plugin {
             name: "serde-plugin".to_string(),
             predicates: pred_set("serde"),
-            hooks: vec![],
-            skills: vec![],
-            mcp_servers: vec![],
-            installations: Vec::new(),
-            subcommands: BTreeMap::new(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
         assert!(plugin_serde.applies(&mut ctx(&workspace_crates)));
 
@@ -3204,14 +3240,7 @@ mod tests {
         let plugin_other = Plugin {
             name: "other-plugin".to_string(),
             predicates: pred_set("other-crate"),
-            hooks: vec![],
-            skills: vec![],
-            mcp_servers: vec![],
-            installations: Vec::new(),
-            subcommands: BTreeMap::new(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
         assert!(!plugin_other.applies(&mut ctx(&workspace_crates)));
 
@@ -3219,14 +3248,7 @@ mod tests {
         let plugin_version = Plugin {
             name: "version-plugin".to_string(),
             predicates: pred_set("tokio>=2.0"),
-            hooks: vec![],
-            skills: vec![],
-            mcp_servers: vec![],
-            installations: Vec::new(),
-            subcommands: BTreeMap::new(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
         assert!(!plugin_version.applies(&mut ctx(&workspace_crates)));
     }
@@ -3416,14 +3438,7 @@ mod tests {
             predicates: PredicateSet {
                 predicates: vec![crate::predicate::Predicate::WorkspaceMember],
             },
-            hooks: vec![],
-            skills: vec![],
-            mcp_servers: vec![],
-            installations: Vec::new(),
-            subcommands: BTreeMap::new(),
-            custom_predicates: vec![],
-            chained: vec![],
-            requires_use: false,
+            ..Default::default()
         };
         let mut parsed = ParsedPlugin {
             plugin,
@@ -4864,17 +4879,12 @@ mod tests {
                     requirements: vec![],
                     install_commands: vec![],
                 }],
-                hooks: vec![],
-                skills: vec![],
-                mcp_servers: vec![],
-                subcommands: BTreeMap::new(),
                 custom_predicates: vec![CustomPredicate {
                     name: predicate_name.to_string(),
                     command: "checker".to_string(),
                     args: vec![],
                 }],
-                chained: vec![],
-                requires_use: false,
+                ..Default::default()
             },
             workspace_member: false,
             canonical: PackageId::new("test", plugin_name, ANY_VERSION),

@@ -205,14 +205,8 @@ mod tests {
             plugin: Plugin {
                 name: name.into(),
                 predicates: crate_set(depends_on),
-                installations: vec![],
-                hooks: vec![],
-                skills: vec![],
-                mcp_servers: vec![],
                 subcommands,
-                custom_predicates: vec![],
-                chained: vec![],
-                requires_use: false,
+                ..Default::default()
             },
             workspace_member: false,
         }

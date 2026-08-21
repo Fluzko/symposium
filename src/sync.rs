@@ -55,14 +55,12 @@ fn skills_parent_dir(agent: Agent, project_root: &Path) -> PathBuf {
         .to_path_buf()
 }
 
-/// Mark a directory as symposium-generated: drop the `.symposium` marker
+/// Mark a directory as symposium-managed: drop the `.symposium` marker
 /// and a `.gitignore` containing `*` so the directory is recognized on
 /// future syncs and kept out of version control.
 ///
-/// Idempotent — overwrites any pre-existing marker or `.gitignore` in
-/// `dir`. Callers use this both for freshly-installed plugin skills and
-/// for skills propagated by the agents-syncing feature.
-fn mark_generated_skill_directory(dir: &Path) -> Result<()> {
+/// Idempotent: overwrites any pre-existing marker or `.gitignore` in `dir`.
+fn mark_managed_dir(dir: &Path) -> Result<()> {
     fs::write(dir.join(MARKER_FILE), "")
         .with_context(|| format!("write marker in {}", dir.display()))?;
     fs::write(dir.join(".gitignore"), "*\n")
@@ -144,10 +142,9 @@ fn dir_contents_differ(source_dir: &Path, dest_dir: &Path) -> Result<bool> {
     Ok(src != dst)
 }
 
-/// Synchronize a skill directory from `source_dir` into `dest_dir`.
+/// Synchronize a symposium-managed directory from `source_dir` into `dest_dir`.
 ///
-/// This is the single function used by both the plugin-skill and
-/// user-authored-skill code paths. It:
+/// Used by every install path that copies a directory symposium owns. It:
 /// 1. Checks whether `dest_dir` is debounce-fresh (marker mtime < `debounce`)
 ///    — if so, skips entirely.
 /// 2. Compares source and dest content — if identical, touches the marker
@@ -157,7 +154,7 @@ fn dir_contents_differ(source_dir: &Path, dest_dir: &Path) -> Result<bool> {
 ///
 /// Returns `Ok(true)` if the destination was created or updated (callers
 /// record it as installed). Returns `Ok(false)` if skipped (no-op).
-fn sync_skill_dir(
+fn sync_managed_dir(
     source_dir: &Path,
     dest_dir: &Path,
     project_root: &Path,
@@ -171,7 +168,7 @@ fn sync_skill_dir(
     if !dest_dir.exists() {
         create_managed_dir_all(dest_dir, project_root)?;
         copy_dir_recursive(source_dir, dest_dir)?;
-        mark_generated_skill_directory(dest_dir)?;
+        mark_managed_dir(dest_dir)?;
         return Ok(true);
     }
 
@@ -198,7 +195,7 @@ fn sync_skill_dir(
     fs::remove_dir_all(dest_dir).with_context(|| format!("remove {}", dest_dir.display()))?;
     create_managed_dir_all(dest_dir, project_root)?;
     copy_dir_recursive(source_dir, dest_dir)?;
-    mark_generated_skill_directory(dest_dir)?;
+    mark_managed_dir(dest_dir)?;
     Ok(true)
 }
 
@@ -270,6 +267,14 @@ async fn resolve_custom_predicate_entries(
     entries
 }
 
+/// One skill selected for installation, with the plugin it came from.
+struct PendingSkill<'a> {
+    name: String,
+    origin_hash: String,
+    plugin: String,
+    source: &'a Path,
+}
+
 /// Run the full sync: discover applicable skills, install into agent dirs,
 /// clean up stale installations.
 pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLevel) -> Result<()> {
@@ -334,7 +339,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     // plain name and their origin hash so we can decide later whether each one
     // needs an `<name>-<hash>` suffix to avoid collisions.
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
-    let mut to_install: Vec<(String, String, &std::path::Path)> = Vec::new();
+    let mut to_install: Vec<PendingSkill<'_>> = Vec::new();
     let mut name_counts: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
 
@@ -342,7 +347,12 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
         let name = entry.skill.name().to_string();
         if seen.insert((name.clone(), entry.origin_hash.clone())) {
             *name_counts.entry(name.clone()).or_default() += 1;
-            to_install.push((name, entry.origin_hash.clone(), &entry.skill.path));
+            to_install.push(PendingSkill {
+                name,
+                origin_hash: entry.origin_hash.clone(),
+                plugin: entry.plugin.clone(),
+                source: &entry.skill.path,
+            });
         }
     }
 
@@ -410,10 +420,16 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             .register_global_mcp_servers(&hook_root, &mcp_servers, out)
             .context("failed to register MCP servers")?;
 
-        for (skill_name, origin_hash, skill_source) in &to_install {
-            // `skill_source` is the path to the SKILL.md file; the skill
-            // directory is its parent.
-            let source_dir = match skill_source.parent() {
+        for pending in &to_install {
+            let PendingSkill {
+                name: skill_name,
+                origin_hash,
+                plugin,
+                source,
+            } = pending;
+            // `source` is the path to the SKILL.md file; the skill directory
+            // is its parent.
+            let source_dir = match source.parent() {
                 Some(p) => p,
                 None => {
                     out.warn(format!(
@@ -465,12 +481,13 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                 continue;
             }
 
-            match sync_skill_dir(source_dir, &dest_dir, &project_root, debounce) {
+            match sync_managed_dir(source_dir, &dest_dir, &project_root, debounce) {
                 Ok(true) => {
                     installed_dirs.insert(dest_dir.clone());
                     tracing::info!(
                         report = %crate::report::ReportEvent::SkillInstalled {
                             skill: dir_name.clone(),
+                            plugin: plugin.clone(),
                             agent: agent_name.clone(),
                             dest: display_path(&dest_dir),
                         },

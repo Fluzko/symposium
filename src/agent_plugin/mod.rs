@@ -17,7 +17,7 @@ use crate::config::PluginsConfig;
 use crate::plugins::ParsedPlugin;
 use crate::pm::{ANY_VERSION, CARGO_PM};
 use crate::skills::SkillWithGroupContext;
-use manifest::Manifest;
+use manifest::{GeminiExtension, Manifest, Marketplace, MarketplaceEntry};
 
 /// The directory under a project root that symposium owns outright, so one
 /// `.gitignore` at its root covers everything below it.
@@ -25,6 +25,27 @@ pub const PROJECT_OWNED_DIR: &str = ".symposium";
 
 /// Staging directory for compiled plugins within [`PROJECT_OWNED_DIR`].
 pub const PROJECT_STAGING_SUBDIR: &str = "plugins";
+
+/// Marketplace name for the global staging root.
+const MARKETPLACE_NAME: &str = "symposium";
+
+/// Marketplace name for a staging root.
+///
+/// A project root needs a name of its own because marketplace *registration* is
+/// user-level even for a project-scoped plugin (verified against Claude Code), so
+/// two projects both registering `symposium` would overwrite each other's path.
+pub fn marketplace_name(scope: Scope, project_root: &Path) -> String {
+    match scope {
+        Scope::Global => MARKETPLACE_NAME.to_string(),
+        Scope::Project => {
+            let scoped = format!(
+                "{MARKETPLACE_NAME}-{}",
+                crate::pm::workspace_dir_name(project_root)
+            );
+            manifest::slug(&scoped).unwrap_or_else(|| MARKETPLACE_NAME.to_string())
+        }
+    }
+}
 
 /// Staging directory under the user configuration directory.
 ///
@@ -233,11 +254,7 @@ pub fn write(
     debounce: Duration,
 ) -> Result<PathBuf> {
     let staged = tempfile::tempdir().context("create staging dir")?;
-    fs::write(
-        staged.path().join("plugin.json"),
-        compiled.manifest.to_json(),
-    )
-    .context("write plugin.json")?;
+    write_manifests(staged.path(), &compiled.manifest)?;
 
     for skill in &compiled.skills {
         let dest = staged.path().join("skills").join(&skill.dir_name);
@@ -255,6 +272,54 @@ pub fn write(
         crate::sync::Marking::MarkerOnly,
     )?;
     Ok(dest)
+}
+
+/// Every dialect of the same identity, side by side. Claude Code ignores a root
+/// `plugin.json` and Agent Plugins agents ignore `.claude-plugin/`, so carrying
+/// both costs nothing and saves a second directory; Gemini reads only its own
+/// file. Verified by loading one directory in Claude Code, Codex, and Copilot.
+fn write_manifests(dir: &Path, manifest: &Manifest) -> Result<()> {
+    fs::write(dir.join("plugin.json"), manifest.to_json()).context("write plugin.json")?;
+
+    let claude_dir = dir.join(".claude-plugin");
+    fs::create_dir_all(&claude_dir).context("create .claude-plugin")?;
+    fs::write(claude_dir.join("plugin.json"), manifest.to_json())
+        .context("write .claude-plugin/plugin.json")?;
+
+    let gemini = GeminiExtension::new(manifest.name.clone(), manifest.version.clone());
+    fs::write(dir.join("gemini-extension.json"), gemini.to_json())
+        .context("write gemini-extension.json")
+}
+
+/// Write the marketplace index for a staging root, or remove it when the root no
+/// longer holds any compiled plugin. Claude Code, Codex, and Copilot all
+/// discover plugins through this one file.
+pub fn write_marketplace(root: &Path, name: &str, plugins: &[&CompiledPlugin]) -> Result<()> {
+    let dir = root.join(".claude-plugin");
+    let file = dir.join("marketplace.json");
+
+    if plugins.is_empty() {
+        if file.exists() {
+            fs::remove_file(&file).with_context(|| format!("remove {}", file.display()))?;
+        }
+        return Ok(());
+    }
+
+    let entries = plugins
+        .iter()
+        .map(|plugin| MarketplaceEntry {
+            name: plugin.manifest.name.clone(),
+            source: format!("./{}", plugin.dir_name),
+            description: plugin.manifest.description.clone(),
+        })
+        .collect();
+
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let contents = Marketplace::new(name.to_string(), entries).to_json();
+    if fs::read_to_string(&file).is_ok_and(|existing| existing == contents) {
+        return Ok(());
+    }
+    fs::write(&file, contents).with_context(|| format!("write {}", file.display()))
 }
 
 /// Reap compiled directories under `root` that this sync did not write. Keyed on

@@ -39,6 +39,77 @@ impl Manifest {
     }
 }
 
+/// Gemini CLI reads its own manifest name, carrying just the identity. The
+/// directory is otherwise the same, so this is a second file rather than a
+/// second layout.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GeminiExtension {
+    pub name: String,
+    /// Gemini requires a version, unlike the Agent Plugins manifest.
+    pub version: String,
+}
+
+impl GeminiExtension {
+    /// Gemini rejects an extension with no version, so a plugin that declares
+    /// none is given one rather than being skipped.
+    pub const FALLBACK_VERSION: &'static str = "0.0.0";
+
+    pub fn new(name: String, version: Option<String>) -> Self {
+        Self {
+            name,
+            version: version.unwrap_or_else(|| Self::FALLBACK_VERSION.to_string()),
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        let mut json = serde_json::to_string_pretty(self).expect("manifest always serializes");
+        json.push('\n');
+        json
+    }
+}
+
+/// The marketplace manifest at a staging root: the index Claude Code, Codex, and
+/// Copilot all read to discover the plugins under it. Written at
+/// `.claude-plugin/marketplace.json`, which is the one path all three accept.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Marketplace {
+    pub name: String,
+    pub owner: MarketplaceOwner,
+    pub plugins: Vec<MarketplaceEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MarketplaceOwner {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MarketplaceEntry {
+    pub name: String,
+    /// Relative to the marketplace root.
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl Marketplace {
+    pub fn new(name: String, plugins: Vec<MarketplaceEntry>) -> Self {
+        Self {
+            name,
+            owner: MarketplaceOwner {
+                name: "symposium".to_string(),
+            },
+            plugins,
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        let mut json = serde_json::to_string_pretty(self).expect("marketplace always serializes");
+        json.push('\n');
+        json
+    }
+}
+
 /// `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`, 1 to 64 characters.
 pub fn is_valid_name(name: &str) -> bool {
     if name.is_empty() || name.len() > MAX_NAME_LEN {
@@ -141,6 +212,41 @@ mod tests {
         assert!(!is_valid_name("has space"));
         assert!(!is_valid_name("under_score"));
         assert!(!is_valid_name(&"x".repeat(MAX_NAME_LEN + 1)));
+    }
+
+    #[test]
+    fn gemini_manifest_always_carries_a_version() {
+        let declared = GeminiExtension::new("pdf-tools".into(), Some("1.2.0".into()));
+        assert_eq!(declared.version, "1.2.0");
+
+        let undeclared = GeminiExtension::new("pdf-tools".into(), None);
+        assert_eq!(undeclared.version, GeminiExtension::FALLBACK_VERSION);
+
+        let json: serde_json::Value = serde_json::from_str(&undeclared.to_json()).expect("json");
+        assert_eq!(json["name"], "pdf-tools");
+        assert_eq!(json["version"], GeminiExtension::FALLBACK_VERSION);
+        assert!(json.get("$schema").is_none(), "gemini has its own manifest");
+    }
+
+    #[test]
+    fn marketplace_indexes_each_plugin_by_relative_path() {
+        let market = Marketplace::new(
+            "symposium".into(),
+            vec![MarketplaceEntry {
+                name: "pdf-tools".into(),
+                source: "./pdf-tools".into(),
+                description: Some("Table extraction guidance".into()),
+            }],
+        );
+        let json: serde_json::Value = serde_json::from_str(&market.to_json()).expect("json");
+        assert_eq!(json["name"], "symposium");
+        assert_eq!(json["owner"]["name"], "symposium");
+        assert_eq!(json["plugins"][0]["name"], "pdf-tools");
+        assert_eq!(json["plugins"][0]["source"], "./pdf-tools");
+        assert_eq!(
+            json["plugins"][0]["description"],
+            "Table extraction guidance"
+        );
     }
 
     #[test]

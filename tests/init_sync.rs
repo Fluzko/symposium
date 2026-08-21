@@ -2510,6 +2510,45 @@ async fn sync_compiles_plugins_into_scoped_staging_roots() {
                 global.join("skills/wildcard-guidance/SKILL.md").is_file(),
                 "a workspace-independent plugin compiles to the global root, not the project"
             );
+
+            for dir in [&project, &global] {
+                assert!(
+                    dir.join(".claude-plugin/plugin.json").is_file(),
+                    "Claude Code reads its own manifest path"
+                );
+                assert!(
+                    dir.join("gemini-extension.json").is_file(),
+                    "Gemini reads its own manifest"
+                );
+            }
+
+            let index: Value = serde_json::from_str(
+                &std::fs::read_to_string(
+                    ctx.sym
+                        .config_dir()
+                        .join("installed/.claude-plugin/marketplace.json"),
+                )
+                .expect("read global marketplace index"),
+            )
+            .expect("parse index");
+            assert_eq!(index["name"], "symposium");
+            assert_eq!(index["plugins"][0]["name"], "wildcard-plugin");
+            assert_eq!(index["plugins"][0]["source"], "./wildcard-plugin");
+
+            let project_index: Value = serde_json::from_str(
+                &std::fs::read_to_string(
+                    root.join(".symposium/plugins/.claude-plugin/marketplace.json"),
+                )
+                .expect("read project marketplace index"),
+            )
+            .expect("parse index");
+            assert!(
+                project_index["name"]
+                    .as_str()
+                    .expect("name")
+                    .starts_with("symposium-"),
+                "a project marketplace is named per workspace, since registration is user-level"
+            );
             assert!(
                 !root.join(".symposium/plugins/wildcard-plugin").exists(),
                 "and not to both"

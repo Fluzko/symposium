@@ -269,6 +269,22 @@ fn write_produces_a_manifest_beside_the_skills() {
     assert_eq!(manifest["version"], "1.2.0");
     assert_eq!(manifest["$schema"], manifest::SCHEMA_URL);
 
+    let claude: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(dest.join(".claude-plugin/plugin.json")).expect("read claude manifest"),
+    )
+    .expect("parse claude manifest");
+    assert_eq!(
+        claude, manifest,
+        "Claude Code reads its own path but the same content"
+    );
+
+    let gemini: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(dest.join("gemini-extension.json")).expect("read gemini manifest"),
+    )
+    .expect("parse gemini manifest");
+    assert_eq!(gemini["name"], "pdf-tools");
+    assert_eq!(gemini["version"], "1.2.0");
+
     assert!(dest.join("skills/extract/SKILL.md").is_file());
     assert!(
         dest.join(crate::sync::MARKER_FILE).is_file(),
@@ -344,4 +360,103 @@ fn reap_removes_marked_directories_and_leaves_user_ones_alone() {
         "a marked directory we did not write is reaped"
     );
     assert!(user.is_dir(), "an unmarked directory is never touched");
+}
+
+#[test]
+fn a_plugin_with_no_version_still_gets_a_gemini_manifest() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let skill_md = skill_on_disk(&tmp.path().join("source"), "extract", "body");
+    let compiled = CompiledPlugin {
+        dir_name: "pdf-tools".into(),
+        manifest: Manifest::new("pdf-tools".into(), None, None),
+        scope: Scope::Global,
+        skills: vec![CompiledSkill {
+            dir_name: "extract".into(),
+            source_dir: skill_md.parent().unwrap().to_path_buf(),
+        }],
+    };
+    let dest = write(
+        &compiled,
+        &tmp.path().join("staging"),
+        tmp.path(),
+        Duration::ZERO,
+    )
+    .expect("write");
+
+    let root: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dest.join("plugin.json")).expect("read"))
+            .expect("json");
+    assert!(
+        root.get("version").is_none(),
+        "the Agent Plugins manifest leaves an unknown version out"
+    );
+
+    let gemini: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(dest.join("gemini-extension.json")).expect("read"),
+    )
+    .expect("json");
+    assert_eq!(
+        gemini["version"],
+        manifest::GeminiExtension::FALLBACK_VERSION,
+        "gemini requires one, so it is filled in rather than dropping the plugin"
+    );
+}
+
+#[test]
+fn the_marketplace_index_lists_each_plugin_and_is_removed_when_empty() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("staging");
+    fs::create_dir_all(&root).expect("create root");
+
+    let one = CompiledPlugin {
+        dir_name: "pdf-tools-ab12cd34".into(),
+        manifest: Manifest::new("pdf-tools".into(), None, Some("Tables".into())),
+        scope: Scope::Global,
+        skills: Vec::new(),
+    };
+    let two = CompiledPlugin {
+        dir_name: "csv-tools".into(),
+        manifest: Manifest::new("csv-tools".into(), None, None),
+        scope: Scope::Global,
+        skills: Vec::new(),
+    };
+
+    write_marketplace(&root, "symposium", &[&one, &two]).expect("write index");
+    let file = root.join(".claude-plugin/marketplace.json");
+    let index: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&file).expect("read")).expect("json");
+    assert_eq!(index["name"], "symposium");
+    assert_eq!(
+        index["plugins"][0]["source"], "./pdf-tools-ab12cd34",
+        "the entry points at the directory, which may be disambiguated"
+    );
+    assert_eq!(
+        index["plugins"][0]["name"], "pdf-tools",
+        "while the plugin keeps its declared name"
+    );
+    assert_eq!(index["plugins"][1]["name"], "csv-tools");
+    assert!(index["plugins"][1].get("description").is_none());
+
+    write_marketplace(&root, "symposium", &[]).expect("remove index");
+    assert!(
+        !file.exists(),
+        "a root with no compiled plugins must not advertise a marketplace"
+    );
+}
+
+#[test]
+fn a_project_marketplace_is_named_per_workspace() {
+    let global = marketplace_name(Scope::Global, Path::new("/work/reporter"));
+    assert_eq!(global, "symposium");
+
+    let one = marketplace_name(Scope::Project, Path::new("/work/reporter"));
+    let two = marketplace_name(Scope::Project, Path::new("/elsewhere/reporter"));
+    assert!(one.starts_with("symposium-reporter-"), "{one}");
+    assert_ne!(
+        one, two,
+        "registration is user-level, so two projects must not claim one name"
+    );
+    for name in [&global, &one, &two] {
+        assert!(manifest::is_valid_name(name), "{name}");
+    }
 }

@@ -435,6 +435,25 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     crate::agent_plugin::reap(&project_staging, &staged_project);
     crate::agent_plugin::reap(&global_staging, &staged_global);
 
+    for (scope, root) in [
+        (Scope::Project, &project_staging),
+        (Scope::Global, &global_staging),
+    ] {
+        let in_root: Vec<&crate::agent_plugin::CompiledPlugin> =
+            compiled.iter().filter(|p| p.scope == scope).collect();
+        if in_root.is_empty() && !root.exists() {
+            continue;
+        }
+        let name = crate::agent_plugin::marketplace_name(scope, &project_root);
+        if let Err(e) = crate::agent_plugin::write_marketplace(root, &name, &in_root) {
+            tracing::info!(
+                report = %crate::report::ReportEvent::Warning {
+                    message: format!("failed to index {}: {e}", display_path(root)),
+                },
+            );
+        }
+    }
+
     // Collect MCP servers from the same active plugin set.
     let mut mcp_servers: Vec<sacp::schema::McpServer> = Vec::new();
     for p in &active {

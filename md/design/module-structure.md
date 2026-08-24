@@ -96,9 +96,11 @@ Two mechanisms, and which one applies is a property of the agent. Each row below
 |---|---|---|
 | Claude Code | `extraKnownMarketplaces` in user settings, an entry in `~/.claude/plugins/known_marketplaces.json`, and `enabledPlugins` in the project's `.claude/settings.json` (project scope) or user settings (global) | **not copied** — resolved from the registered `installLocation` |
 | Codex CLI | `[marketplaces.<name>]` and `[plugins."<plugin>@<name>"] enabled` in `config.toml` | copied to `plugins/cache/<marketplace>/<plugin>/<version>/` |
-| Copilot CLI | `extraKnownMarketplaces` and `enabledPlugins` in `~/.copilot/settings.json` | copied to `installed-plugins/<marketplace>/<plugin>/` |
+| Copilot CLI | `extraKnownMarketplaces` and `enabledPlugins` in `~/.copilot/settings.json`, then `copilot plugin install` for the record it keeps itself | copied to `installed-plugins/<marketplace>/<plugin>/` |
 | Gemini CLI | none at all | copied to `~/.gemini/extensions/<directory>/` |
 | Kiro, OpenCode, Goose | none | no plugin unit; skills keep arriving individually |
+
+Copilot is the one agent where symposium drives the CLI rather than writing every file. It treats a plugin as installed only once it appears in its machine-managed `~/.copilot/config.json`, and that record carries a `source_sha` Copilot computes itself; guessing it would couple us to an internal we cannot verify. So the settings entries and the copy go in as usual, and then `copilot plugin install` is run for any plugin not already recorded — it needs no terminal, and the marketplace registration it resolves against is in place by then. This was found by asking the running agent: with the settings entries and the copy present but no such record, Copilot reported the skill as absent.
 
 Claude Code needs both of its records: with `known_marketplaces.json` missing the plugin does not load, and Claude regenerates it from settings only in time for the *next* session. Its `installed_plugins.json` record and version-keyed cache copy are **not** required — deleting them leaves the plugin working.
 

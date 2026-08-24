@@ -273,9 +273,90 @@ fn install_copilot(reg: &Registration, home: &Path, debounce: Duration) -> Resul
         .join(".copilot")
         .join("installed-plugins")
         .join(reg.marketplace);
-    copy_each(reg, home, debounce, |plugin| {
+    let written = copy_each(reg, home, debounce, |plugin| {
         installed.join(&plugin.manifest.name)
-    })
+    })?;
+
+    reconcile_copilot_records(reg, home);
+    Ok(written)
+}
+
+/// Copilot only treats a plugin as installed once it appears in
+/// `~/.copilot/config.json`, and that record carries a `source_sha` it computes
+/// itself. Guessing that hash would couple us to an internal we cannot verify,
+/// so this is the one agent where symposium drives the CLI instead of writing
+/// the file: `copilot plugin install` needs no terminal, and by this point the
+/// marketplace registration it resolves against is already in place.
+///
+/// Verified the hard way — with the settings entries and the copy present but no
+/// such record, Copilot reports the skill as absent.
+fn reconcile_copilot_records(reg: &Registration, home: &Path) {
+    let recorded = copilot_recorded_plugins(home);
+    let keep = reg.qualified_names();
+
+    for stale in recorded.iter().filter(|r| ours(r) && !keep.contains(*r)) {
+        let name = stale.split_once('@').map_or(stale.as_str(), |(n, _)| n);
+        run_copilot(home, &["plugin", "uninstall", name]);
+    }
+    for plugin in reg.plugins {
+        let qualified = reg.qualified(plugin);
+        if !recorded.contains(&qualified) {
+            run_copilot(home, &["plugin", "install", &qualified]);
+        }
+    }
+}
+
+/// The `<plugin>@<marketplace>` keys Copilot currently records as installed.
+///
+/// Its `config.json` is machine-managed and carries `//` comment lines, so it is
+/// read leniently: an unreadable file just means nothing is recorded yet.
+fn copilot_recorded_plugins(home: &Path) -> BTreeSet<String> {
+    let path = home.join(".copilot").join("config.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return BTreeSet::new();
+    };
+    let body: String = raw
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    let Ok(value) = serde_json::from_str::<Value>(&body) else {
+        return BTreeSet::new();
+    };
+    value
+        .get("installedPlugins")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let name = entry.get("name")?.as_str()?;
+                    let market = entry.get("marketplace")?.as_str()?;
+                    Some(format!("{name}@{market}"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Best-effort: a missing or failing `copilot` leaves the config we wrote in
+/// place, and the next sync tries again.
+fn run_copilot(home: &Path, args: &[&str]) {
+    let result = std::process::Command::new("copilot")
+        .args(args)
+        .env("HOME", home)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match result {
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::debug!(?args, ?status, "copilot plugin command failed"),
+        Err(e) => tracing::debug!(?args, error = %e, "could not run copilot"),
+    }
 }
 
 /// Gemini discovers extensions by their presence in its directory, so the copy

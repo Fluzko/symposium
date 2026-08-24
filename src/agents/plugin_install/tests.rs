@@ -372,3 +372,97 @@ fn every_copy_carries_the_marker_so_it_can_be_reaped() {
         "Claude copies nothing, so there is nothing of ours to reap"
     );
 }
+
+// ── resilience ───────────────────────────────────────────────────────
+
+#[test]
+fn a_corrupt_agent_config_is_an_error_rather_than_a_panic() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path().join("home");
+    let settings = home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).expect("create");
+    std::fs::write(&settings, "{ this is not json").expect("seed");
+
+    let one = plugin("pdf-tools", "pdf-tools", "1.2.0");
+    let result = Agent::Claude.install_plugins(
+        &registration(
+            &tmp.path().join("staging"),
+            "symposium",
+            &[&one],
+            Scope::Global,
+        ),
+        &home,
+        tmp.path(),
+        Duration::ZERO,
+    );
+    assert!(
+        result.is_err(),
+        "an unreadable config is reported to the caller, which turns it into a warning"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).expect("read"),
+        "{ this is not json",
+        "and the file is left exactly as the user had it"
+    );
+}
+
+#[test]
+fn copilots_own_record_is_read_leniently() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path().join("home");
+    assert!(
+        copilot_recorded_plugins(&home).is_empty(),
+        "no config yet means nothing is recorded"
+    );
+
+    let config = home.join(".copilot/config.json");
+    std::fs::create_dir_all(config.parent().unwrap()).expect("create");
+
+    std::fs::write(&config, "{ not json at all").expect("seed");
+    assert!(
+        copilot_recorded_plugins(&home).is_empty(),
+        "an unparseable file means nothing is recorded, not a failure"
+    );
+
+    // Copilot writes this file itself, with `//` comment lines.
+    std::fs::write(
+        &config,
+        "// This file is managed automatically.\n{\n  \"installedPlugins\": [\n    \
+         {\"name\": \"pdf-tools\", \"marketplace\": \"symposium\"},\n    \
+         {\"name\": \"other\", \"marketplace\": \"elsewhere\"}\n  ]\n}\n",
+    )
+    .expect("seed");
+    let recorded = copilot_recorded_plugins(&home);
+    assert!(recorded.contains("pdf-tools@symposium"));
+    assert!(
+        recorded.contains("other@elsewhere"),
+        "entries we do not own are still read, so they are not treated as missing"
+    );
+}
+
+#[test]
+fn a_missing_copilot_binary_does_not_fail_the_install() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path().join("home");
+    let root = tmp.path().join("staging");
+    let one = staged_plugin(&root, "pdf-tools");
+
+    // `run_copilot` spawns by name, so an absent binary surfaces as a spawn
+    // error. Proven directly rather than by manipulating PATH, which is
+    // process-global and would race other tests.
+    run_copilot(&home, &["definitely-not-a-subcommand"]);
+
+    let written = Agent::Copilot
+        .install_plugins(
+            &registration(&root, "symposium", &[&one], Scope::Global),
+            &home,
+            tmp.path(),
+            Duration::ZERO,
+        )
+        .expect("the config and copy still land even if the CLI cannot be driven");
+    assert_eq!(written.len(), 1);
+    assert!(
+        home.join(".copilot/settings.json").is_file(),
+        "settings are ours to write, and do not depend on the binary"
+    );
+}

@@ -49,6 +49,40 @@ cargo test --test init_sync        # just the init/sync tests
 cargo test --test dispatch         # just the CLI dispatch tests
 ```
 
+## Agent contract tests
+
+`tests/agent_plugin_contract.rs` answers one question the rest of the suite cannot: does the agent
+*actually load and use* what symposium installed? Asserting on the bytes we write is not enough — a
+Copilot install once passed a unit test that reproduced its own CLI's output exactly, and Copilot
+still ignored the plugin, because the missing piece was a record Copilot keeps for itself.
+
+These are **opt-in**, because they write into your real agent configuration:
+
+```bash
+SYMPOSIUM_AGENT_CONTRACT=1 cargo test --test agent_plugin_contract -- --test-threads=1
+```
+
+Real configuration is the only place a real agent reads. Redirecting `HOME` would isolate it but also
+cut the agent off from its credentials, which live under that same directory. So every file the tests
+touch is snapshotted first and restored on the way out, including on panic, and every directory they
+copy into is removed.
+
+Each agent runs the same three checks — install, update, remove — driven through that agent's own CLI:
+
+| Check | Assertion |
+|---|---|
+| install | the agent invokes the skill and returns its token |
+| update | after the source changes, the agent returns the *new* token |
+| remove | once the plugin stops applying, the agent no longer has the skill |
+
+The probe plugin is deliberately dormant, activated only by a `use` entry, so that removing that entry
+genuinely deactivates it. A `depends-on = ["*"]` probe would stay active regardless and the removal
+check would prove nothing.
+
+An agent whose CLI is missing or cannot authenticate is **skipped with the reason printed**, never
+failed: a missing login is not a symposium bug. A green run therefore does not by itself mean every
+agent was covered — read the skips.
+
 ## Debugging test failures
 
 Add `--nocapture` to see test output (agent messages, hook traces):

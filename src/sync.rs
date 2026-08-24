@@ -46,14 +46,43 @@ pub(crate) fn create_managed_dir_all(path: &Path, boundary: &Path) -> Result<()>
     Ok(())
 }
 
-/// Skills parent directory for an agent (e.g. `.claude/skills/` or
-/// `.agents/skills/`), derived from `Agent::project_skill_dir`.
-fn skills_parent_dir(agent: Agent, project_root: &Path) -> PathBuf {
-    agent
-        .project_skill_dir(project_root, "_")
-        .parent()
-        .expect("skill dir must have parent")
-        .to_path_buf()
+/// Where individually-installed skills go for one sync: under the project when
+/// there is one, and otherwise under the user's home, which is the only place a
+/// globally-enabled plugin's skills can land for an agent that has no plugin
+/// unit to receive instead.
+#[derive(Clone, Copy)]
+enum SkillHome<'a> {
+    Project(&'a Path),
+    Global(&'a Path),
+}
+
+impl<'a> SkillHome<'a> {
+    /// The directory this agent should hold `skill_name` in. `None` when the
+    /// agent has no such location at all — Copilot has no global skills path.
+    fn dir_for(&self, agent: Agent, skill_name: &str) -> Option<PathBuf> {
+        match self {
+            SkillHome::Project(root) => Some(agent.project_skill_dir(root, skill_name)),
+            SkillHome::Global(home) => agent.global_skill_dir(home, skill_name),
+        }
+    }
+
+    /// The boundary `create_managed_dir_all` may not walk above.
+    fn boundary(&self) -> &'a Path {
+        match self {
+            SkillHome::Project(root) => root,
+            SkillHome::Global(home) => home,
+        }
+    }
+
+    /// The shared parent those directories sit in, for stale cleanup.
+    fn parent_for(&self, agent: Agent) -> Option<PathBuf> {
+        Some(
+            self.dir_for(agent, "_")?
+                .parent()
+                .expect("skill dir must have parent")
+                .to_path_buf(),
+        )
+    }
 }
 
 /// Whether a managed directory also needs its own `.gitignore`.
@@ -290,6 +319,18 @@ async fn resolve_custom_predicate_entries(
     entries
 }
 
+/// Whether a sync may skip a directory it synced very recently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Debounce {
+    /// Honor `sync-debounce-secs`. For the per-event hook path, which runs on
+    /// every tool call and has to stay near free.
+    Recent,
+    /// Compare content regardless of how recently we last looked. For anything a
+    /// person triggered, and for the `SessionStart` catch-up pass — otherwise
+    /// editing a skill and re-running `sync` appears to do nothing.
+    Always,
+}
+
 /// The project-scoped paths sync writes into, when there is a workspace at all.
 struct ProjectPaths {
     root: PathBuf,
@@ -335,7 +376,12 @@ struct PendingSkill<'a> {
 
 /// Run the full sync: discover applicable skills, install into agent dirs,
 /// clean up stale installations.
-pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLevel) -> Result<()> {
+pub async fn sync(
+    sym: &Symposium,
+    deps: &Arc<WorkspaceDeps>,
+    update: UpdateLevel,
+    debounce: Debounce,
+) -> Result<()> {
     let out = &Output::quiet();
     // A workspace is optional. Without one there is nothing project-scoped to
     // install, but globally-enabled plugins still apply, so the global half of
@@ -343,13 +389,9 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     let loaded = deps.load().cloned();
     let project = loaded.as_ref().map(|l| ProjectPaths::under(&l.root));
     let workspace_deps_count = loaded.as_ref().map_or(0, |l| l.crates.len());
-    // The debounce keeps the per-event hook path cheap. A caller that asked for
-    // an update — an explicit `sync`, or the `SessionStart` catch-up pass — wants
-    // the comparison done, so a directory changed since the last sync is
-    // restored rather than skipped for the debounce window.
-    let debounce = match update {
-        UpdateLevel::None => Duration::from_secs(sym.config.sync_debounce_secs),
-        _ => Duration::ZERO,
+    let debounce = match debounce {
+        Debounce::Recent => Duration::from_secs(sym.config.sync_debounce_secs),
+        Debounce::Always => Duration::ZERO,
     };
     match &project {
         Some(p) => tracing::debug!(root = %p.root.display(), "resolved workspace root"),
@@ -581,6 +623,15 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
         return Ok(());
     }
 
+    // Individually-installed skills go under the project when there is one. A
+    // no-workspace sync still has to deliver a globally-enabled plugin's skills
+    // to agents that cannot take the compiled directory, so they land under the
+    // user's home instead.
+    let skill_home = match &project {
+        Some(p) => SkillHome::Project(&p.root),
+        None => SkillHome::Global(sym.home_dir()),
+    };
+
     // Track every skill directory we (re)install during this sync. Anything
     // we find later that has the marker file but isn't in this set is stale.
     let mut installed_dirs: BTreeSet<PathBuf> = BTreeSet::new();
@@ -666,13 +717,6 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             .register_global_mcp_servers(&hook_root, &mcp_servers, out)
             .context("failed to register MCP servers")?;
 
-        // Individually-installed skills go under the project. Without one there
-        // is nowhere to put them, and the compiled directories above are the
-        // whole of what a no-workspace sync delivers.
-        let Some(project) = &project else {
-            continue;
-        };
-
         for pending in &to_install {
             let PendingSkill {
                 name: skill_name,
@@ -704,7 +748,9 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             // (a workspace `.agents/skills/` skill, on an agent that reads
             // that same directory) — it is in place as user content, not
             // something to copy.
-            let plain_dir = agent.project_skill_dir(&project.root, skill_name);
+            let Some(plain_dir) = skill_home.dir_for(agent, skill_name) else {
+                continue;
+            };
             let in_place = match (source_dir.canonicalize(), plain_dir.canonicalize()) {
                 (Ok(a), Ok(b)) => a == b,
                 _ => false,
@@ -727,7 +773,9 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             } else {
                 format!("{skill_name}-{}", origin_hash)
             };
-            let dest_dir = agent.project_skill_dir(&project.root, &dir_name);
+            let Some(dest_dir) = skill_home.dir_for(agent, &dir_name) else {
+                continue;
+            };
 
             // If the dest exists but is user-managed, skip it.
             if dest_dir.exists() && !has_symposium_marker(&dest_dir) {
@@ -745,7 +793,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             match sync_managed_dir(
                 source_dir,
                 &dest_dir,
-                &project.root,
+                skill_home.boundary(),
                 debounce,
                 Marking::MarkerAndGitignore,
             ) {
@@ -781,10 +829,9 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     // and remove subdirs containing the marker that we didn't just install.
     let mut scanned: BTreeSet<PathBuf> = BTreeSet::new();
     for &agent in Agent::all() {
-        let Some(project) = &project else {
-            break;
+        let Some(parent) = skill_home.parent_for(agent) else {
+            continue;
         };
-        let parent = skills_parent_dir(agent, &project.root);
         if !scanned.insert(parent.clone()) {
             continue;
         }

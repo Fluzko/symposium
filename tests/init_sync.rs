@@ -2986,3 +2986,191 @@ async fn sync_outside_a_workspace_installs_the_global_plugins() {
     .await
     .unwrap();
 }
+
+// ── Delivery across a mixed agent set, and its lifecycle ─────────────
+
+/// A plugin reaches each agent exactly once, by whichever mechanism that agent
+/// has: Claude Code takes the compiled directory, and an agent with no plugin
+/// unit still receives the skill on its own. Neither gets both.
+#[tokio::test]
+async fn a_plugin_reaches_each_agent_once_by_its_own_mechanism() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["agent-plugin-scopes0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude", "--add-agent", "opencode"])
+                .await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let root = ctx.workspace_root.clone().expect("workspace root");
+            assert!(
+                root.join(".symposium/plugins/project-tools/skills/project-guidance/SKILL.md")
+                    .is_file(),
+                "the compiled directory is what Claude Code is given"
+            );
+            assert!(
+                !root.join(".claude/skills/project-guidance").exists(),
+                "so Claude must not also receive the skill on its own"
+            );
+            assert!(
+                root.join(".agents/skills/project-guidance/SKILL.md")
+                    .is_file(),
+                "OpenCode has no plugin unit, so it still receives the skill individually"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Dropping an agent from the config reaps the copies it was given, the same way
+/// dropping a plugin does.
+#[tokio::test]
+async fn removing_an_agent_from_the_config_reaps_its_plugin_copies() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["agent-plugin-scopes0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude", "--add-agent", "codex"])
+                .await?;
+            ctx.symposium(&["sync"]).await?;
+
+            // Codex loads only from its own tree, so it was given a copy.
+            let copy = ctx
+                .sym
+                .config_dir()
+                .join(".codex/plugins/cache/symposium/global-tools/0.0.0");
+            assert!(
+                copy.join("skills/global-guidance/SKILL.md").is_file(),
+                "codex should have received a copy, found: {:?}",
+                std::fs::read_dir(ctx.sym.config_dir().join(".codex/plugins/cache/symposium"))
+                    .ok()
+                    .map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
+            );
+
+            ctx.symposium(&["init", "--remove-agent", "codex"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            assert!(
+                !copy.exists(),
+                "an agent dropped from the config keeps nothing of ours"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Editing a skill upstream reaches the copy an agent already holds, not just the
+/// staging root.
+#[tokio::test]
+async fn editing_a_skill_updates_the_copy_an_agent_holds() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["agent-plugin-scopes0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "codex"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let delivered = ctx.sym.config_dir().join(
+                ".codex/plugins/cache/symposium/global-tools/0.0.0/skills/global-guidance/SKILL.md",
+            );
+            assert!(delivered.is_file());
+            assert!(!std::fs::read_to_string(&delivered)?.contains("SECOND EDITION"));
+
+            let source = ctx
+                .sym
+                .config_dir()
+                .join("plugins/global-tools/global-guidance/SKILL.md");
+            let edited = std::fs::read_to_string(&source)?.replace("Body.", "SECOND EDITION");
+            std::fs::write(&source, edited)?;
+
+            ctx.symposium(&["sync"]).await?;
+            assert!(
+                std::fs::read_to_string(&delivered)?.contains("SECOND EDITION"),
+                "the agent's own copy has to follow the source, not just the staging root"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Two registry entries may declare the same name. They are still two plugins:
+/// an entry's identity is where it sits, not what it calls itself, or the second
+/// would take the first's directory and its skills.
+#[tokio::test]
+async fn two_entries_with_one_declared_name_compile_separately() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["distinct-standalone-paths0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let root = ctx.workspace_root.clone().expect("workspace root");
+            let compiled: Vec<PathBuf> = std::fs::read_dir(root.join(".symposium/plugins"))?
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.join("plugin.json").is_file())
+                .collect();
+            assert_eq!(
+                compiled.len(),
+                2,
+                "one directory per entry, not per name; got {compiled:?}"
+            );
+            for dir in &compiled {
+                assert!(
+                    dir.join("skills/my-skill/SKILL.md").is_file(),
+                    "{} lost its skill",
+                    dir.display()
+                );
+            }
+
+            let bodies: Vec<String> = compiled
+                .iter()
+                .map(|d| std::fs::read_to_string(d.join("skills/my-skill/SKILL.md")).unwrap())
+                .collect();
+            assert!(bodies.iter().any(|b| b.contains("Foo body")));
+            assert!(bodies.iter().any(|b| b.contains("Bar body")));
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// A skill's companion files travel with it into the compiled plugin, not just
+/// its `SKILL.md`.
+#[tokio::test]
+async fn companion_files_travel_into_the_compiled_plugin() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["agent-plugin-scopes0", "workspace0"],
+        async |mut ctx| {
+            let companion = ctx
+                .sym
+                .config_dir()
+                .join("plugins/project-tools/project-guidance/REFERENCE.md");
+            std::fs::write(&companion, "companion content\n")?;
+
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let root = ctx.workspace_root.clone().expect("workspace root");
+            let delivered = root.join(".symposium/plugins/project-tools/skills/project-guidance");
+            assert!(delivered.join("SKILL.md").is_file());
+            assert_eq!(
+                std::fs::read_to_string(delivered.join("REFERENCE.md"))?,
+                "companion content\n",
+                "the whole skill directory is copied, not only its SKILL.md"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}

@@ -1341,11 +1341,30 @@ fn load_agent_plugin_entry(
 ) -> Result<ParsedPlugin> {
     let mut plugin = crate::agent_plugin::read::load(dir, false)?;
     resolve_group_sources(&mut plugin, dir, source_dir);
+    let canonical = entry_id(source_name, source_dir, dir, &plugin.name);
     Ok(ParsedPlugin {
-        canonical: PackageId::new(source_name, &plugin.name, ANY_VERSION),
+        canonical,
         plugin,
         workspace_member: false,
     })
+}
+
+/// The canonical id for a registry entry: the entry's subpath within its source.
+///
+/// The subpath, not the plugin's name, because a name is not unique — two bare
+/// `SKILL.md` entries can declare the same frontmatter `name`, and two manifests
+/// can declare the same `name`. Sharing an id would make them one plugin as far
+/// as grouping and dedup are concerned, so the second would overwrite the first.
+/// This is also what [`PathPm::load_plugin`](crate::pm::PathPm) already expects
+/// an id to mean.
+fn entry_id(source_name: &str, source_dir: &Path, entry_dir: &Path, fallback: &str) -> PackageId {
+    let subpath = entry_dir
+        .strip_prefix(source_dir)
+        .ok()
+        .map(crate::pm::layout::subpath_key)
+        .filter(|key| !key.is_empty())
+        .unwrap_or_else(|| fallback.to_string());
+    PackageId::new(source_name, subpath, ANY_VERSION)
 }
 
 /// Resolve each `source.path` skill group to an absolute directory and a
@@ -1436,8 +1455,9 @@ fn load_standalone_skill_plugin(
     };
     let base = skill_md.parent().unwrap_or(source_dir);
     resolve_group_sources(&mut plugin, base, source_dir);
+    let canonical = entry_id(source_name, source_dir, base, &name);
     Ok(ParsedPlugin {
-        canonical: PackageId::new(source_name, &name, ANY_VERSION),
+        canonical,
         plugin,
         workspace_member: false,
     })
@@ -1965,8 +1985,9 @@ fn load_plugin_as(
     let mut plugin = validate_manifest(manifest, origin)
         .with_context(|| format!("validating `{}`", manifest_path.display()))?;
     resolve_group_sources(&mut plugin, base, source_dir);
+    let canonical = entry_id(source_name, source_dir, base, &plugin.name);
     Ok(ParsedPlugin {
-        canonical: PackageId::new(source_name, &plugin.name, ANY_VERSION),
+        canonical,
         plugin,
         // Registry sources are never workspace members; the workspace-plugin
         // loader is the only place that stamps true.

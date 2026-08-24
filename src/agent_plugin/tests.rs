@@ -526,3 +526,30 @@ fn a_project_marketplace_is_named_per_workspace() {
         assert!(manifest::is_valid_name(name), "{name}");
     }
 }
+
+#[test]
+fn a_plugin_whose_name_cannot_be_slugged_is_skipped() {
+    let unnameable = registry_plugin("___", wildcard());
+    let skills = vec![skill_of(
+        &unnameable,
+        "guidance",
+        "/reg/x/skills/g/SKILL.md",
+    )];
+    assert!(
+        compile(&[unnameable], &skills, &no_config()).is_empty(),
+        "a package with no usable name cannot be installed anywhere, so it is dropped"
+    );
+}
+
+#[test]
+fn one_unnameable_plugin_does_not_stop_the_others() {
+    let bad = registry_plugin("!!!", wildcard());
+    let good = registry_plugin("pdf-tools", wildcard());
+    let skills = vec![
+        skill_of(&bad, "lost", "/reg/bad/skills/lost/SKILL.md"),
+        skill_of(&good, "extract", "/reg/good/skills/extract/SKILL.md"),
+    ];
+    let compiled = compile(&[bad, good], &skills, &no_config());
+    let names: Vec<&str> = compiled.iter().map(|p| p.dir_name.as_str()).collect();
+    assert_eq!(names, vec!["pdf-tools"]);
+}

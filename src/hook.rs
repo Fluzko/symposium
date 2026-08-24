@@ -390,7 +390,14 @@ async fn run_auto_sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, session_start
     };
 
     tracing::debug!("auto-sync running");
-    if let Err(e) = crate::sync::sync(sym, deps, update).await {
+    // The catch-up pass at session start looks at everything; a per-event sync
+    // stays cheap.
+    let debounce = if session_start {
+        crate::sync::Debounce::Always
+    } else {
+        crate::sync::Debounce::Recent
+    };
+    if let Err(e) = crate::sync::sync(sym, deps, update, debounce).await {
         tracing::warn!(error = %e, "auto-sync during hook failed (continuing)");
         return;
     }

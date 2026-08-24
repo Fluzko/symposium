@@ -67,6 +67,12 @@ cut the agent off from its credentials, which live under that same directory. So
 touch is snapshotted first and restored on the way out, including on panic, and every directory they
 copy into is removed.
 
+Both scopes are covered, because they take different paths: a global plugin is enabled in the user's
+own settings and compiled under the symposium home, while a project-scoped one is enabled in the
+*project's* settings, compiled under the project, and registered under a marketplace named for that
+workspace. Claude Code is the only agent that can bound a plugin to a project; for the rest, the suite
+checks that a project-scoped plugin still reaches them as individual skills.
+
 Each agent runs the same three checks — install, update, remove — driven through that agent's own CLI:
 
 | Check | Assertion |

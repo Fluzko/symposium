@@ -129,6 +129,18 @@ impl Drop for ConfigGuard {
     }
 }
 
+/// Which scope the probe plugin should be enabled at.
+///
+/// The two take genuinely different paths: a global plugin is enabled in the
+/// user's own settings and compiled under the symposium home, while a
+/// project-scoped one is enabled in the *project's* settings, compiled under the
+/// project, and registered under a marketplace named for that workspace.
+#[derive(Clone, Copy, PartialEq)]
+enum ProbeScope {
+    Global,
+    Project,
+}
+
 /// A fixture symposium home holding one plugin whose single skill reports a token.
 struct Fixture {
     _tempdir: tempfile::TempDir,
@@ -139,6 +151,10 @@ struct Fixture {
 
 impl Fixture {
     fn build(agent: &str) -> Self {
+        Self::build_scoped(agent, ProbeScope::Global)
+    }
+
+    fn build_scoped(agent: &str, scope: ProbeScope) -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let root = tempdir.path().to_path_buf();
         let sym_home = root.join("symposium-home");
@@ -146,12 +162,36 @@ impl Fixture {
         std::fs::create_dir_all(&skill_dir).expect("create skill dir");
         std::fs::create_dir_all(root.join("cwd")).expect("create cwd");
 
+        // A project-scoped run needs a Rust workspace to be scoped *to*, and a
+        // `use` entry naming it; a global run has neither.
+        let cwd = match scope {
+            ProbeScope::Global => root.join("cwd"),
+            ProbeScope::Project => {
+                let project = root.join("cwd");
+                std::fs::create_dir_all(project.join("src")).expect("create project");
+                std::fs::write(
+                    project.join("Cargo.toml"),
+                    "[package]\nname = \"contract-project\"\nversion = \"0.1.0\"\n\
+                     edition = \"2021\"\n\n[dependencies]\n",
+                )
+                .expect("write Cargo.toml");
+                std::fs::write(project.join("src/lib.rs"), "").expect("write lib.rs");
+                project
+            }
+        };
+        let used = match scope {
+            ProbeScope::Global => "use = [\"contract-probe\"]".to_string(),
+            ProbeScope::Project => format!(
+                "use = [{{ name = \"contract-probe\", workspace = \"{}\" }}]",
+                cwd.display().to_string().replace('\\', "/")
+            ),
+        };
         std::fs::write(
             sym_home.join("config.toml"),
             format!(
-                "hook-scope = \"global\"\n\n[[agent]]\nname = \"{agent}\"\n\n\
+                "hook-scope = \"project\"\n\n[[agent]]\nname = \"{agent}\"\n\n\
                  [defaults]\nsymposium-recommendations = false\nuser-plugins = true\n\n\
-                 [plugins]\nuse = [\"contract-probe\"]\n"
+                 [plugins]\n{used}\n"
             ),
         )
         .expect("write config");
@@ -171,7 +211,7 @@ impl Fixture {
         let fixture = Self {
             skill: skill_dir.join("SKILL.md"),
             sym_home,
-            cwd: root.join("cwd"),
+            cwd,
             _tempdir: tempdir,
         };
         fixture.write_skill(TOKEN_V1);
@@ -189,15 +229,23 @@ impl Fixture {
         .expect("write SKILL.md");
     }
 
-    /// Stop the plugin applying, so the next sync takes it back out.
+    /// Stop the plugin applying, so the next sync takes it back out. The probe is
+    /// dormant, so dropping its `use` entry is what deactivates it.
     fn stop_using(&self) {
         let path = self.sym_home.join("config.toml");
         let text = std::fs::read_to_string(&path).expect("read config");
-        std::fs::write(
-            &path,
-            text.replace("use = [\"contract-probe\"]", "use = []"),
-        )
-        .expect("write config");
+        let cleared: String = text
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("use = [") {
+                    "use = []".to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, format!("{cleared}\n")).expect("write config");
     }
 
     fn sync(&self) {
@@ -243,7 +291,11 @@ fn usable(agent: &AgentUnderTest, cwd: &Path) -> Result<(), String> {
 
 /// C1 install, C2 update, C3 remove — the whole contract for one agent.
 fn contract(agent: &AgentUnderTest) {
-    let fixture = Fixture::build(agent.name);
+    contract_at(agent, ProbeScope::Global)
+}
+
+fn contract_at(agent: &AgentUnderTest, scope: ProbeScope) {
+    let fixture = Fixture::build_scoped(agent.name, scope);
 
     if let Err(why) = usable(agent, &fixture.cwd) {
         eprintln!("SKIP {}: {why}", agent.name);
@@ -299,6 +351,23 @@ fn claude_code_honors_the_install_contract() {
     run_for("claude");
 }
 
+/// Claude Code is the only agent that can bound a plugin to one project, and
+/// that path differs from the global one: the enablement goes into the project's
+/// own settings, and the marketplace is named for the workspace so two projects
+/// cannot overwrite each other's registration.
+#[test]
+fn claude_code_honors_the_contract_at_project_scope() {
+    if !enabled() {
+        eprintln!("SKIP: set SYMPOSIUM_AGENT_CONTRACT=1 to run agent contract tests");
+        return;
+    }
+    let agent = agents()
+        .into_iter()
+        .find(|a| a.name == "claude")
+        .expect("known agent");
+    contract_at(&agent, ProbeScope::Project);
+}
+
 #[test]
 fn codex_honors_the_install_contract() {
     run_for("codex");
@@ -312,6 +381,53 @@ fn copilot_honors_the_install_contract() {
 #[test]
 fn gemini_honors_the_install_contract() {
     run_for("gemini");
+}
+
+/// An agent that cannot bound a plugin to one project still receives that
+/// plugin's skills, individually, under the project.
+///
+/// This is the claim that the per-skill path stays primary for project-scoped
+/// plugins on every agent but Claude Code. Asserting the file lands is our half;
+/// asking the agent is theirs.
+#[test]
+fn a_project_scoped_plugin_reaches_codex_as_a_plain_skill() {
+    if !enabled() {
+        eprintln!("SKIP: set SYMPOSIUM_AGENT_CONTRACT=1 to run agent contract tests");
+        return;
+    }
+    let agent = agents()
+        .into_iter()
+        .find(|a| a.name == "codex")
+        .expect("known agent");
+
+    let fixture = Fixture::build_scoped(agent.name, ProbeScope::Project);
+    if let Err(why) = usable(&agent, &fixture.cwd) {
+        eprintln!("SKIP {}: {why}", agent.name);
+        return;
+    }
+    let _guard = ConfigGuard::snapshot(&agent);
+
+    fixture.sync();
+    let installed = fixture.cwd.join(".agents/skills/contract-check/SKILL.md");
+    assert!(
+        installed.is_file(),
+        "codex cannot scope a plugin to a project, so the skill has to arrive on its own at {}",
+        installed.display()
+    );
+    assert!(
+        !fixture
+            .cwd
+            .join(".symposium/plugins/contract-probe")
+            .exists()
+            || fixture.cwd.join(".symposium/plugins").exists(),
+        "the compiled directory is only built for agents that can take it"
+    );
+
+    let answer = ask(&agent, &fixture.cwd, ASK).expect("agent ran");
+    assert!(
+        answer.contains(TOKEN_V1),
+        "codex should read the project's own skills directory, got:\n{answer}"
+    );
 }
 
 /// An agent with no plugin unit still receives the skill on its own, and that

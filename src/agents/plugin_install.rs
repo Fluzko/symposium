@@ -1,18 +1,17 @@
 //! Handing a compiled plugin directory to an agent.
 //!
-//! Two mechanisms exist, and which applies is a property of the agent, verified
-//! by installing a directory and asking the running agent what it can see:
+//! Two mechanisms, and which applies is a property of the agent, established by
+//! installing a directory and asking the running agent what it can see:
 //!
 //! - **Registered** — the agent is pointed at the staging root and reads it in
-//!   place. Only Claude Code does this, and it is also the only agent that can
-//!   express a project-scoped plugin.
-//! - **Copied** — the agent loads only from its own directory, so the content is
-//!   copied there. Codex CLI, Copilot CLI, and Gemini CLI all require this;
-//!   deleting the copy makes the skill disappear.
+//!   place. Only Claude Code, which is also the only agent that can express a
+//!   project-scoped plugin.
+//! - **Copied** — the agent loads only from its own tree. Codex, Copilot and
+//!   Gemini all require this; deleting the copy makes the skill disappear.
 //!
-//! Symposium writes each agent's configuration itself rather than driving the
-//! agent's own install command, which is what it already does for hooks and MCP
-//! entries and the only option on the auto-sync path, where there is no terminal.
+//! Symposium writes each agent's configuration itself, as it already does for
+//! hooks and MCP entries, since the auto-sync path has no terminal to prompt at.
+//! Copilot is the one exception, and [`reconcile_copilot_records`] says why.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

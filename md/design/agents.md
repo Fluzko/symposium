@@ -29,7 +29,7 @@ Where these files go depends on whether the agent is configured at the user leve
 
 ### Plugin directories
 
-An agent with a plugin unit receives a compiled directory instead of loose skill files. Only Claude Code can scope one to a project; for the others a project-scoped plugin falls back to the per-skill paths below, and OpenCode, Goose, and Kiro use those paths for everything.
+An agent with a plugin unit receives a compiled directory instead of loose skill files. Only Claude Code can scope one to a project; for the others a project-scoped plugin falls back to the per-skill paths below.
 
 | Agent | How it is given the directory | Project scope |
 |-------|-------------------------------|---------------|

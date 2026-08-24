@@ -31,30 +31,26 @@ The key code paths are in `discovery.rs`, `config.rs` (`PluginsConfig`, `UseEntr
 
 ## Compilation and delivery of agent plugin directories
 
-Every `cargo agents sync` compiles the plugins that apply into the directory unit agents consume, then hands each directory to the agents that can take it. The step runs after skills are resolved, so it never re-evaluates a gate.
+Every `cargo agents sync` compiles the plugins that apply into the unit agents consume, then hands each directory to the agents that can take it. It runs after skills are resolved, so it never re-evaluates a gate. Outside a Rust workspace only the global half happens.
 
-Run outside a Rust workspace, only the global half happens: a globally-enabled plugin with a workspace-independent gate is compiled and delivered, while everything project-scoped is skipped.
+1. `agent_plugin::compile` groups applicable skills by their plugin's `canonical` id and builds one `CompiledPlugin` each: a slugged name, a version, the description, and one entry per distinct skill origin. Directory names and skill names are disambiguated with the same origin-hash suffix rule that governs skill installs.
+2. `Scope::of` sends each to `<project root>/.symposium/plugins/` or `<config dir>/installed/` — see [key modules](./module-structure.md#agent_plugin--compiling-an-agent-plugin-directory) for what global requires and why. A scope no configured agent can take is not compiled.
+3. `agent_plugin::write` stages into a tempdir and syncs it in through `sync::sync_managed_dir`, so an unchanged plugin is not recopied. `write_marketplace` writes `.claude-plugin/marketplace.json` at each staging root, and removes it when the root empties.
+4. For each configured agent and each scope it accepts, `Agent::install_plugins` writes that agent's configuration and, where the agent loads only from its own tree, copies the directory there. Plugins an agent received are recorded, so their skills are skipped in the per-skill loop and nothing arrives twice.
+5. `agent_plugin::reap_to_depth` removes marked directories this sync did not write, under both staging roots and every known agent's plugin tree. Reaping the global root from a project sync is sound only because step 2 keeps the global set a function of user config alone.
 
-1. `agent_plugin::compile` groups the applicable skills by their contributing plugin's `canonical` id and builds one `CompiledPlugin` each: a manifest name (slugged into the format's grammar), an optional version (the manifest's, else a crate plugin's resolved version — a registry placeholder `*` is not a version), the plugin's description, and one skill entry per distinct origin.
-2. Directory names are disambiguated across plugins, and skill directory names within each plugin, using the same origin-hash suffix rule that already governs skill installs.
-3. `Scope::of` sends each compiled plugin to `<project root>/.symposium/plugins/` or `<config dir>/installed/`. Global requires both a `use --global` entry naming the plugin *and* every gate in its chain (plugin, groups, contributed skills) to hold workspace-independently — see [key modules](./module-structure.md#agent_plugin--compiling-an-agent-plugin-directory) for why the second half is a correctness requirement and not a preference. A scope no configured agent can take is not compiled at all.
-4. `agent_plugin::write` stages the content in a temporary directory and syncs it in through `sync::sync_managed_dir`, so an unchanged plugin is not recopied. The directory gets the `.symposium` marker; the project tree's single `.gitignore` is written at `.symposium/` rather than into each plugin.
-5. `write_marketplace` writes `.claude-plugin/marketplace.json` at each staging root, the one index path Claude Code, Codex, and Copilot all read, and removes it when a root holds no plugins.
-6. For each configured agent and each scope the agent accepts, `Agent::install_plugins` writes that agent's configuration and, where the agent loads only from its own tree, copies the directory there. The plugins an agent received are recorded, and their skills are then skipped in the per-skill loop — so a skill is installed individually only for an agent that could not take its plugin, and nothing arrives twice.
-7. `agent_plugin::reap_to_depth` removes marked directories this sync did not write, under both staging roots and under every known agent's plugin tree (so an agent dropped from the config is cleaned up too). Reaping the global root from a project sync is sound only because step 3 keeps the global set a function of user config alone.
-
-The key code paths are in `agent_plugin/mod.rs` (`compile`, `Scope::of`, `write`, `write_marketplace`, `reap_to_depth`), `agent_plugin/manifest.rs` (`slug`, `is_valid_name`, the three manifest shapes), `agents/plugin_install.rs` (`accepts_plugin_scope`, `install_plugins`, `plugin_reap_roots`), `predicate.rs` (`is_workspace_independent`), and `sync.rs`.
+The key code paths are in `agent_plugin/mod.rs`, `agent_plugin/manifest.rs`, `agents/plugin_install.rs`, `predicate.rs` (`is_workspace_independent`), and `sync.rs`.
 
 ## Reading an externally authored package
 
-A directory holding a `plugin.json` loads as an ordinary symposium plugin, so everything downstream — compilation, delivery, `status` — treats it like any other.
+A directory holding a `plugin.json` loads as an ordinary symposium plugin, so compilation, delivery and `status` treat it like any other.
 
-1. `pm::layout::classify` returns `EntryKind::AgentPlugin` for a directory carrying the manifest. Precedence runs `SYMPOSIUM.toml`, `plugin.json`, `SKILL.md`, so a directory with both TOML and JSON loads as a symposium plugin. A claimed directory is not descended into, so nesting a package inside a package is not a way to ship two; a source root that is itself a package is an error.
-2. `agent_plugin::read::load` parses the manifest, reports unknown top-level fields and an unsupported `mcp.json`, reads the gate from `extensions["dev.symposium"]`, and returns a `Plugin` with one `skills/` group limited to immediate children.
-3. The three positions call it: `plugins::load_entry` for a registry entry (dormancy applies), `workspace_plugin_for_dir` for a member, and `CargoPm::build_from_fetched` for a dependency (both gated by position, so no `use` entry is needed). `embedded_plugin_kind` counts a `plugin.json` as plugin content, so a dependency carrying one is offered for consent.
-4. Containment is per unit: a bad manifest rejects that package alone, an unknown field is reported and ignored, a broken skill is skipped while the rest load, and a skill resolving outside the package is refused.
+1. `pm::layout::classify` returns `EntryKind::AgentPlugin`. Precedence runs `SYMPOSIUM.toml`, `plugin.json`, `SKILL.md`. A claimed directory is not descended into, so a package cannot nest another; a source root that is itself a package is an error.
+2. `agent_plugin::read::load` parses the manifest, reports unknown fields and an unsupported `mcp.json`, reads the gate from `extensions["dev.symposium"]`, and returns a `Plugin` with one `skills/` group limited to immediate children.
+3. The three positions call it: `plugins::load_entry` (registry, dormancy applies), `workspace_plugin_for_dir` (member), and `CargoPm::build_from_fetched` (dependency) — the latter two gated by position. `embedded_plugin_kind` counts a `plugin.json`, so a dependency carrying one is offered for consent.
+4. Containment is per unit: a bad manifest rejects that package alone, an unknown field is ignored, a broken skill is skipped, and a skill resolving outside the package is refused.
 
-The key code paths are in `agent_plugin/read.rs`, `agent_plugin/manifest.rs` (`IncomingManifest`), `pm/layout.rs` (`classify`, `AGENT_PLUGIN_FILE`), `plugins.rs` (`load_entry`, `workspace_plugin_for_dir`, `apply_sibling_identity`, `dormant_without_gate`), and `skills.rs` (`discover_skills`, `SkillDepth`).
+The key code paths are in `agent_plugin/read.rs`, `pm/layout.rs`, `plugins.rs` (`load_entry`, `workspace_plugin_for_dir`, `apply_sibling_identity`, `dormant_without_gate`), and `skills.rs` (`discover_skills`, `SkillDepth`).
 
 ## Help rendering
 

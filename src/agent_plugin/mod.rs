@@ -59,25 +59,16 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// Where a plugin's compiled directory belongs.
+    /// Where a plugin's compiled directory belongs. Global needs both a
+    /// `use --global` entry naming it and every gate in its chain — the plugin's,
+    /// each declared group's, each contributed skill's — to hold
+    /// workspace-independently; anything else is project-scoped.
     ///
-    /// Global needs two independent things to hold, and defaults to project when
-    /// either fails.
-    ///
-    /// First, the user has to have asked for it: a `use --global` entry naming the
-    /// plugin. Scope follows the enablement that selected a plugin, so a project's
-    /// sync never writes a plugin into the user's home directory that was not
-    /// enabled there — not even one gated `depends-on(*)`.
-    ///
-    /// Second, nothing about the plugin may vary by workspace. A user-level
-    /// directory is visible from every workspace while cleanup reaps whatever it
-    /// did not install this run, so a global set that varied by workspace would
-    /// have two projects undoing each other on every session start. Content
-    /// counts as much as activation here: a plugin gated `depends-on(*)` whose
-    /// skill group is gated `depends-on(serde)` would compile to different
-    /// content per project, which is the same churn by another route. So every
-    /// gate in the chain must hold workspace-independently — the plugin's, each
-    /// declared group's, and each contributed skill's.
+    /// The second half is correctness, not preference: a user-level directory is
+    /// visible everywhere while cleanup reaps what it did not install this run,
+    /// so a global set that varied by workspace would have two projects undoing
+    /// each other every session. Content counts as much as activation, hence the
+    /// group and skill gates.
     pub fn of(
         parsed: &ParsedPlugin,
         contributed: &[&SkillWithGroupContext],

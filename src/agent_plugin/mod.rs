@@ -154,6 +154,13 @@ pub fn compile(
             continue;
         };
 
+        // Every skill this plugin declares may already have been claimed by an
+        // earlier one, so emptiness is only known after dedup.
+        let skills = compile_skills(&mine, &mut claimed);
+        if skills.is_empty() {
+            continue;
+        }
+
         compiled.push((
             crate::skills::hash_origin_key(&parsed.canonical.to_string()),
             CompiledPlugin {
@@ -165,7 +172,7 @@ pub fn compile(
                     parsed.plugin.description.clone(),
                 ),
                 scope: Scope::of(parsed, &mine, plugins),
-                skills: compile_skills(&mine, &mut claimed),
+                skills,
             },
         ));
     }
@@ -177,6 +184,10 @@ pub fn compile(
 /// one plugin claims a slug, every claimant takes the suffixed form. Suffixing
 /// all of them rather than all-but-one keeps a name stable when an unrelated
 /// plugin appears or disappears.
+///
+/// The manifest name is suffixed alongside the directory: agents key a plugin
+/// by its manifest name, so leaving that colliding would give two plugins one
+/// enablement entry and one cache path.
 fn disambiguate(compiled: Vec<(String, CompiledPlugin)>) -> Vec<CompiledPlugin> {
     let mut claims: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for (_, plugin) in &compiled {
@@ -192,7 +203,9 @@ fn disambiguate(compiled: Vec<(String, CompiledPlugin)>) -> Vec<CompiledPlugin> 
         .into_iter()
         .map(|(hash, mut plugin)| {
             if contested.contains(&plugin.dir_name) {
-                plugin.dir_name = format!("{}-{hash}", plugin.dir_name);
+                let name = manifest::suffixed(&plugin.dir_name, &hash);
+                plugin.dir_name = name.clone();
+                plugin.manifest.name = name;
             }
             plugin
         })

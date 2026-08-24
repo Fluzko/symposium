@@ -238,10 +238,55 @@ fn names_that_slug_alike_are_both_suffixed() {
         assert!(manifest::is_valid_name(&plugin.dir_name));
     }
     assert_ne!(compiled[0].dir_name, compiled[1].dir_name);
+    for plugin in &compiled {
+        assert_eq!(
+            plugin.manifest.name, plugin.dir_name,
+            "agents key a plugin by its manifest name, so it is suffixed too"
+        );
+        assert!(manifest::is_valid_name(&plugin.manifest.name));
+    }
+    assert_ne!(compiled[0].manifest.name, compiled[1].manifest.name);
+}
+
+#[test]
+fn a_suffixed_name_stays_within_the_length_limit() {
+    let long = "x".repeat(64);
+    let a = registry_plugin(&long, wildcard());
+    let b = registry_plugin(&format!("{long}!"), wildcard());
+    let skills = vec![
+        skill_of(&a, "a", "/reg/one/skills/a/SKILL.md"),
+        skill_of(&b, "b", "/reg/two/skills/b/SKILL.md"),
+    ];
+
+    let compiled = compile(&[a, b], &skills, &no_config());
+    assert_eq!(compiled.len(), 2);
+    for plugin in &compiled {
+        assert!(
+            manifest::is_valid_name(&plugin.manifest.name),
+            "{} is not a valid manifest name",
+            plugin.manifest.name
+        );
+    }
+    assert_ne!(compiled[0].manifest.name, compiled[1].manifest.name);
+}
+
+#[test]
+fn a_plugin_whose_skills_were_all_claimed_compiles_to_nothing() {
+    let first = registry_plugin("first", wildcard());
+    let second = registry_plugin("second", wildcard());
+    let shared = "/reg/shared/skills/guide/SKILL.md";
+    let skills = vec![
+        skill_of(&first, "guide", shared),
+        skill_of(&second, "guide", shared),
+    ];
+
+    let compiled = compile(&[first, second], &skills, &no_config());
     assert_eq!(
-        compiled[0].manifest.name, "pdf-tools",
-        "the manifest keeps the undisambiguated name; only the directory moves"
+        compiled.len(),
+        1,
+        "the second plugin has nothing left after dedup, so it must not be emitted"
     );
+    assert_eq!(compiled[0].manifest.name, "first");
 }
 
 #[test]

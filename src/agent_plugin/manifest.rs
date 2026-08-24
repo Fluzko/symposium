@@ -232,6 +232,25 @@ pub fn slug(name: &str) -> Option<String> {
     (!capped.is_empty()).then_some(capped)
 }
 
+/// Append a disambiguating suffix to an already-slugged name, keeping the
+/// result inside the grammar's length limit.
+///
+/// The suffix goes on the *manifest* name as well as the directory, because a
+/// plugin's agent-facing identity (its enablement key, and the cache path Codex
+/// and Copilot derive) is the manifest name.
+pub fn suffixed(slugged: &str, hash: &str) -> String {
+    let room = MAX_NAME_LEN.saturating_sub(hash.len() + 1);
+    let base = if slugged.len() > room {
+        trim_to_alnum(&slugged[..room])
+    } else {
+        slugged.to_string()
+    };
+    if base.is_empty() {
+        return hash.to_string();
+    }
+    format!("{base}-{hash}")
+}
+
 fn trim_to_alnum(s: &str) -> String {
     s.trim_matches(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit()))
         .to_string()

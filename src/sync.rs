@@ -409,6 +409,13 @@ pub async fn sync(
         );
     }
 
+    // Removing anything means knowing the complete set of what should exist,
+    // and an unreadable source means we do not. An unmounted registry path
+    // would otherwise read as "these plugins no longer apply" and uninstall
+    // them from every agent. A single skipped *entry* is not this: it loses one
+    // plugin, which genuinely should then be removed.
+    let degraded = !registry.sources_readable;
+
     tracing::info!(
         report = %crate::report::ReportEvent::Info {
             message: format!("scanning {workspace_deps_count} workspace dependencies"),
@@ -482,9 +489,6 @@ pub async fn sync(
         }
     }
 
-    // Compile each applicable plugin into an agent plugin directory. Nothing
-    // reads these yet — the per-agent delivery lands with the emitters — but the
-    // directories are owned and reaped from here on.
     // Only compile for a scope some configured agent can actually take. With
     // none, the directory would sit unread and the skills still arrive through
     // the per-skill path.
@@ -553,15 +557,17 @@ pub async fn sync(
 
     // Reaping the global root from a project sync is only sound because
     // `Scope::of` keeps the global set a function of user config alone.
-    if let Some(p) = &project {
-        crate::agent_plugin::reap(&p.staging, &staged_project);
+    if !degraded {
+        if let Some(p) = &project {
+            crate::agent_plugin::reap(&p.staging, &staged_project);
+        }
+        crate::agent_plugin::reap(&global_staging, &staged_global);
     }
-    crate::agent_plugin::reap(&global_staging, &staged_global);
 
     for (scope, root) in staging_roots(&project, &global_staging) {
         let in_root: Vec<&crate::agent_plugin::CompiledPlugin> =
             compiled.iter().filter(|p| p.scope == scope).collect();
-        if in_root.is_empty() && !root.exists() {
+        if in_root.is_empty() && (degraded || !root.exists()) {
             continue;
         }
         let name = crate::agent_plugin::marketplace_name(
@@ -652,7 +658,7 @@ pub async fn sync(
                 .iter()
                 .filter(|p| p.scope == scope && agent.accepts_plugin_scope(scope))
                 .collect();
-            if in_scope.is_empty() && !root.exists() {
+            if in_scope.is_empty() && (degraded || !root.exists()) {
                 continue;
             }
             let marketplace = crate::agent_plugin::marketplace_name(
@@ -867,14 +873,16 @@ pub async fn sync(
 
     // Reap plugin copies we no longer own, across every known agent so an agent
     // dropped from the config is cleaned up too.
-    for &agent in Agent::all() {
-        let written = agent_copies.get(&agent).cloned().unwrap_or_default();
-        for root in agent.plugin_reap_roots(sym.home_dir()) {
-            crate::agent_plugin::reap_to_depth(
-                &root,
-                crate::agent_plugin::AGENT_COPY_DEPTH,
-                &written,
-            );
+    if !degraded {
+        for &agent in Agent::all() {
+            let written = agent_copies.get(&agent).cloned().unwrap_or_default();
+            for root in agent.plugin_reap_roots(sym.home_dir()) {
+                crate::agent_plugin::reap_to_depth(
+                    &root,
+                    crate::agent_plugin::AGENT_COPY_DEPTH,
+                    &written,
+                );
+            }
         }
     }
 

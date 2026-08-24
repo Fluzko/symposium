@@ -979,6 +979,10 @@ pub struct PluginRegistry {
     pub plugins: Vec<ParsedPlugin>,
     /// Non-fatal load warnings for entries that were skipped.
     pub warnings: Vec<LoadWarning>,
+    /// Whether every trusted source could be read. False means the plugin list
+    /// is incomplete for a reason that says nothing about what still applies,
+    /// so callers must not treat an absence here as a removal.
+    pub sources_readable: bool,
     /// Global custom predicate registry. Built from all plugins' `custom_predicates`.
     pub custom_predicates: CustomPredicateRegistry,
 }
@@ -1500,7 +1504,12 @@ async fn load_registry_impl(
     // Dependency-embedded crate plugins are not trust roots — they reach the
     // active set through discovery / consent and the driver's `load_plugin`,
     // never here. Each registry instance logs its own load failures.
+    let mut sources_readable = true;
     for inst in pms.instances().filter(|i| i.trusted) {
+        if !inst.pm.source_readable().await {
+            sources_readable = false;
+            tracing::warn!(registry = %inst.name, "registry source unreadable");
+        }
         plugins.extend(inst.pm.active_plugins(&[]).await);
     }
 
@@ -1518,6 +1527,7 @@ async fn load_registry_impl(
     PluginRegistry {
         plugins,
         warnings,
+        sources_readable,
         custom_predicates,
     }
 }

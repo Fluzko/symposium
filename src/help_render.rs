@@ -245,6 +245,7 @@ mod tests {
         PluginRegistry {
             plugins,
             warnings: vec![],
+            sources_readable: true,
             custom_predicates: crate::plugins::CustomPredicateRegistry::default(),
         }
     }

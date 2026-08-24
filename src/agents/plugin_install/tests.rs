@@ -441,17 +441,15 @@ fn copilots_own_record_is_read_leniently() {
 }
 
 #[test]
-fn a_missing_copilot_binary_does_not_fail_the_install() {
+fn the_config_and_copy_land_without_driving_the_copilot_cli() {
     let tmp = tempfile::tempdir().expect("tmp");
     let home = tmp.path().join("home");
     let root = tmp.path().join("staging");
     let one = staged_plugin(&root, "pdf-tools");
 
-    // `run_copilot` spawns by name, so an absent binary surfaces as a spawn
-    // error. Proven directly rather than by manipulating PATH, which is
-    // process-global and would race other tests.
-    run_copilot(&home, &["definitely-not-a-subcommand"]);
-
+    // `run_copilot` is a no-op in tests, so this is the whole of what symposium
+    // writes for itself: whether Copilot then records the plugin is Copilot's
+    // half, and driving its CLI from a unit test is what we do not do.
     let written = Agent::Copilot
         .install_plugins(
             &registration(&root, "symposium", &[&one], Scope::Global),
@@ -459,10 +457,9 @@ fn a_missing_copilot_binary_does_not_fail_the_install() {
             tmp.path(),
             Duration::ZERO,
         )
-        .expect("the config and copy still land even if the CLI cannot be driven");
+        .expect("install");
+
     assert_eq!(written.len(), 1);
-    assert!(
-        home.join(".copilot/settings.json").is_file(),
-        "settings are ours to write, and do not depend on the binary"
-    );
+    assert!(home.join(".copilot/settings.json").is_file());
+    assert!(written[0].join("skills/probe/SKILL.md").is_file());
 }

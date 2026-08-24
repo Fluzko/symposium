@@ -344,6 +344,16 @@ fn copilot_recorded_plugins(home: &Path) -> BTreeSet<String> {
 
 /// Best-effort: a missing or failing `copilot` leaves the config we wrote in
 /// place, and the next sync tries again.
+///
+/// Not run under `cargo test`. Spawning the developer's own agent CLI from a
+/// unit test would make the suite depend on which binaries happen to be
+/// installed, and on their being fast and non-interactive. Everything around
+/// this call is tested; that Copilot then loads the plugin was established by
+/// asking the running agent.
+#[cfg(test)]
+fn run_copilot(_home: &Path, _args: &[&str]) {}
+
+#[cfg(not(test))]
 fn run_copilot(home: &Path, args: &[&str]) {
     let result = std::process::Command::new("copilot")
         .args(args)

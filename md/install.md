@@ -28,7 +28,8 @@ This will prompt you to select the agents you use (Claude Code, Copilot, Gemini,
 
 ```bash
 Which agents do you use? (space to select, enter to confirm):
-> [ ] Claude Code
+> [ ] Antigravity CLI
+  [ ] Claude Code
   [x] Codex CLI
   [ ] GitHub Copilot
   [ ] Gemini CLI

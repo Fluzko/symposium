@@ -16,7 +16,9 @@ The cargo-workspace resolution is **CargoPm's**, so it lives in the cargo PM's m
 
 ### `agents.rs` — agent abstraction
 
-Centralizes agent-specific knowledge: hook registration file paths, skill installation directories, and hook registration logic for each supported agent (Claude Code, GitHub Copilot, Gemini CLI, Codex CLI, Kiro, OpenCode, Goose). Handles the differences between agents — e.g., Claude Code uses `.claude/skills/` and Kiro uses `.kiro/skills/`, while Copilot, Gemini, Codex, OpenCode, and Goose use the vendor-neutral `.agents/skills/`. OpenCode and Goose are skills-only agents (no hook registration).
+Centralizes agent-specific knowledge: hook registration file paths, skill installation directories, and hook registration logic for each supported agent (Antigravity CLI, Claude Code, GitHub Copilot, Gemini CLI, Codex CLI, Kiro, OpenCode, Goose). Handles the differences between agents — e.g., Claude Code uses `.claude/skills/` and Kiro uses `.kiro/skills/`, while Antigravity, Copilot, Gemini, Codex, OpenCode, and Goose use the vendor-neutral `.agents/skills/`. OpenCode and Goose are skills-only agents (no hook registration).
+
+Hook and MCP registration is scope-dispatched: the project and global locations are genuinely different files for some agents (Antigravity writes `.agents/hooks.json` but `~/.gemini/config/hooks.json`; Copilot `.github/hooks/` but `~/.copilot/settings.json`), so `sync` calls the project-scoped functions at project scope rather than rooting the global path at the workspace.
 
 ### `init.rs` — initialization command
 

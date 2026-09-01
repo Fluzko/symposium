@@ -6,6 +6,7 @@
 
 | Config name | Agent |
 |-------------|-------|
+| `antigravity` | Antigravity CLI |
 | `claude` | Claude Code |
 | `copilot` | GitHub Copilot |
 | `gemini` | Gemini CLI |
@@ -31,16 +32,17 @@ When installing skills, `cargo agents` prefers vendor-neutral paths where possib
 
 | Scope | Path | Supported by |
 |-------|------|-------------|
-| Project skills | `.agents/skills/<skill-name>/SKILL.md` | Copilot, Gemini, Codex, OpenCode, Goose |
+| Project skills | `.agents/skills/<skill-name>/SKILL.md` | Antigravity, Copilot, Gemini, Codex, OpenCode, Goose |
 | Project skills | `.claude/skills/<skill-name>/SKILL.md` | Claude Code (does not support `.agents/skills/`) |
 | Project skills | `.kiro/skills/<skill-name>/SKILL.md` | Kiro (uses its own path) |
 
-At the project level, Claude Code requires `.claude/skills/`, Kiro requires `.kiro/skills/`, while Copilot, Gemini, Codex, OpenCode, and Goose all support `.agents/skills/`. `cargo agents` uses the vendor-neutral `.agents/skills/` path whenever the agent supports it.
+At the project level, Claude Code requires `.claude/skills/`, Kiro requires `.kiro/skills/`, while Antigravity, Copilot, Gemini, Codex, OpenCode, and Goose all support `.agents/skills/`. `cargo agents` uses the vendor-neutral `.agents/skills/` path whenever the agent supports it.
 
 At the global level, each agent has its own path:
 
 | Agent | Global skills path |
 |-------|-------------------|
+| Antigravity CLI | `~/.gemini/config/skills/<skill-name>/SKILL.md` |
 | Claude Code | `~/.claude/skills/<skill-name>/SKILL.md` |
 | Copilot | *(no global skills path)* |
 | Gemini | `~/.gemini/skills/<skill-name>/SKILL.md` |
@@ -248,6 +250,72 @@ The input payload includes `tool_name`, `tool_input`, `mcp_context`, `session_id
 
 ---
 
+## Antigravity CLI
+
+[Hooks reference](./agent-details/antigravity-cli.md)
+
+### Hook registration
+
+Antigravity hooks live in a dedicated `hooks.json` under the customization root —
+`.agents/` in a workspace, `~/.gemini/config/` globally. Entries are keyed by a
+**hook name**, so symposium owns a single `symposium` key and leaves anything
+else in the file untouched.
+
+| Scope | Path |
+|-------|------|
+| Global | `~/.gemini/config/hooks.json` |
+| Project | `.agents/hooks.json` |
+
+```json
+{
+  "symposium": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo-agents hook antigravity pre-tool-use",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "cargo-agents hook antigravity session-start",
+        "timeout": 30
+      }
+    ]
+  }
+}
+```
+
+Note the two shapes: tool events (`PreToolUse`, `PostToolUse`) wrap their
+handlers in a `matcher` group, while lifecycle events (`PreInvocation`,
+`SessionStart`, `Stop`) take a flat list. Timeouts are in seconds, not
+milliseconds. An unrecognised shape or an unknown event name is accepted
+silently and simply never fires.
+
+`SessionStart` is missing from Antigravity's published documentation but present
+in its hook proto, and fires once per session. There is no prompt event, so
+`PreInvocation` stands in for `user-prompt-submit`; because it fires before every
+model call, dispatch runs the prompt event only when `invocationNum == 0`.
+
+### Hook output
+
+Exit codes are ignored entirely — only stdout matters. On `PreToolUse`, an object
+without a valid `decision` (including `{}`) is treated as a **denial**, so
+symposium always emits `{"decision": "allow"}` unless a plugin actually denied.
+Context is returned as an injected step rather than an `additionalContext` field:
+
+```json
+{ "injectSteps": [{ "ephemeralMessage": "..." }] }
+```
+
+---
+
 ## Kiro
 
 [Hooks reference](./agent-details/kiro.md)
@@ -401,12 +469,12 @@ Goose is supported as a **skills-only** agent — `cargo agents sync` will insta
 
 The following table maps symposium's internal event names to each agent's wire-format event name. `—` means the agent does not support shell-command hooks.
 
-| Symposium event | Claude | Copilot | Gemini | Codex | Kiro | OpenCode | Goose |
-|---|---|---|---|---|---|---|---|
-| `pre-tool-use` | `PreToolUse` | `preToolUse` | `BeforeTool` | `PreToolUse` | `preToolUse` | — | — |
-| `post-tool-use` | `PostToolUse` | `postToolUse` | `AfterTool` | `PostToolUse` | `postToolUse` | — | — |
-| `user-prompt-submit` | `UserPromptSubmit` | `userPromptSubmitted` | `BeforeAgent` | `UserPromptSubmit` | `userPromptSubmit` | — | — |
-| `session-start` | `SessionStart` | `sessionStart` | `SessionStart` | `SessionStart` | `agentSpawn` | — | — |
+| Symposium event | Antigravity | Claude | Copilot | Gemini | Codex | Kiro | OpenCode | Goose |
+|---|---|---|---|---|---|---|---|---|
+| `pre-tool-use` | `PreToolUse` | `PreToolUse` | `preToolUse` | `BeforeTool` | `PreToolUse` | `preToolUse` | — | — |
+| `post-tool-use` | `PostToolUse` | `PostToolUse` | `postToolUse` | `AfterTool` | `PostToolUse` | `postToolUse` | — | — |
+| `user-prompt-submit` | `PreInvocation` | `UserPromptSubmit` | `userPromptSubmitted` | `BeforeAgent` | `UserPromptSubmit` | `userPromptSubmit` | — | — |
+| `session-start` | `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `SessionStart` | `agentSpawn` | — | — |
 
 ---
 

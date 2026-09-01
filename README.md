@@ -58,7 +58,8 @@ cargo agents init
 
 ```text
 Which agents do you use? (space to select, enter to confirm):
-> [ ] Claude Code
+> [ ] Antigravity CLI
+  [ ] Claude Code
   [x] Codex CLI
   [ ] GitHub Copilot
   [ ] Gemini CLI
@@ -126,6 +127,7 @@ Every agent receives skill installation. Hook registration is available for a su
 
 | Agent | Skill directory | Hooks |
 |-------|-----------------|:-----:|
+| Antigravity CLI | `.agents/skills/` | Yes |
 | Claude Code | `.claude/skills/` | Yes |
 | GitHub Copilot | `.agents/skills/` | Yes |
 | Gemini CLI | `.agents/skills/` | Yes |

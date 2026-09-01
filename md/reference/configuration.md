@@ -74,7 +74,7 @@ Each `[[agent]]` entry identifies an agent you use. You can configure multiple a
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `name` | string | *(required)* | Agent name: `claude`, `codex`, `copilot`, `gemini`, `goose`, `kiro`, or `opencode`. |
+| `name` | string | *(required)* | Agent name: `antigravity`, `claude`, `codex`, `copilot`, `gemini`, `goose`, `kiro`, or `opencode`. |
 
 ## `[logging]`
 

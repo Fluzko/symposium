@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use std::{any::Any, fmt::Debug};
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
@@ -17,6 +18,9 @@ pub mod symposium;
 /// Agents supported by Symposium hooks.
 #[derive(Debug, Copy, Clone, clap::ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HookAgent {
+    #[value(name = "antigravity")]
+    #[serde(rename = "antigravity")]
+    Antigravity,
     #[value(name = "claude")]
     #[serde(rename = "claude")]
     Claude,
@@ -44,6 +48,7 @@ impl HookAgent {
     /// Canonical lowercase agent name (matches the config `[[agent]]` names).
     pub fn as_str(&self) -> &'static str {
         match self {
+            HookAgent::Antigravity => "antigravity",
             HookAgent::Claude => "claude",
             HookAgent::Codex => "codex",
             HookAgent::Copilot => "copilot",
@@ -56,6 +61,7 @@ impl HookAgent {
 
     pub fn event(&self, event: HookEvent) -> Option<Box<dyn ErasedAgentHookEvent>> {
         match self {
+            HookAgent::Antigravity => antigravity::Antigravity.event(event),
             HookAgent::Claude => claude::ClaudeCode.event(event),
             HookAgent::Codex => codex::Codex.event(event),
             HookAgent::Copilot => copilot::Copilot.event(event),

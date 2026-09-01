@@ -832,6 +832,7 @@ pub enum HookFormat {
     #[default]
     Symposium,
     /// A specific agent's wire format.
+    Antigravity,
     Claude,
     Codex,
     Copilot,
@@ -844,6 +845,7 @@ impl HookFormat {
     pub fn as_agent(&self) -> Option<HookAgent> {
         match self {
             HookFormat::Symposium => None,
+            HookFormat::Antigravity => Some(HookAgent::Antigravity),
             HookFormat::Claude => Some(HookAgent::Claude),
             HookFormat::Codex => Some(HookAgent::Codex),
             HookFormat::Copilot => Some(HookAgent::Copilot),

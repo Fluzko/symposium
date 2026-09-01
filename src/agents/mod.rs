@@ -18,6 +18,7 @@ use crate::output::{Output, display_path};
 /// Supported AI agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
+    Antigravity,
     Claude,
     Codex,
     Copilot,
@@ -31,6 +32,7 @@ impl Agent {
     /// Parse an agent name from a config string.
     pub fn from_config_name(name: &str) -> Result<Self> {
         match name {
+            "antigravity" => Ok(Agent::Antigravity),
             "claude" => Ok(Agent::Claude),
             "codex" => Ok(Agent::Codex),
             "copilot" => Ok(Agent::Copilot),
@@ -39,7 +41,7 @@ impl Agent {
             "kiro" => Ok(Agent::Kiro),
             "opencode" => Ok(Agent::OpenCode),
             other => bail!(
-                "unknown agent: {other} (expected claude, codex, copilot, gemini, goose, kiro, or opencode)"
+                "unknown agent: {other} (expected antigravity, claude, codex, copilot, gemini, goose, kiro, or opencode)"
             ),
         }
     }
@@ -47,6 +49,7 @@ impl Agent {
     /// Config name as stored in TOML.
     pub fn config_name(&self) -> &'static str {
         match self {
+            Agent::Antigravity => "antigravity",
             Agent::Claude => "claude",
             Agent::Codex => "codex",
             Agent::Copilot => "copilot",
@@ -60,6 +63,7 @@ impl Agent {
     /// Human-readable display name.
     pub fn display_name(&self) -> &'static str {
         match self {
+            Agent::Antigravity => "Antigravity CLI",
             Agent::Claude => "Claude Code",
             Agent::Codex => "Codex CLI",
             Agent::Copilot => "GitHub Copilot",
@@ -73,6 +77,7 @@ impl Agent {
     /// All supported agents for interactive prompts.
     pub fn all() -> &'static [Agent] {
         &[
+            Agent::Antigravity,
             Agent::Claude,
             Agent::Codex,
             Agent::Copilot,
@@ -89,12 +94,12 @@ impl Agent {
 
     /// Project-level skill directory for a given skill name.
     ///
-    /// Claude Code requires `.claude/skills/`, while Copilot and Gemini
-    /// support the vendor-neutral `.agents/skills/` path.
+    /// Claude Code requires `.claude/skills/`, while Antigravity, Copilot and
+    /// Gemini support the vendor-neutral `.agents/skills/` path.
     pub fn project_skill_dir(&self, project_root: &Path, skill_name: &str) -> PathBuf {
         match self {
             Agent::Claude => project_root.join(".claude").join("skills").join(skill_name),
-            Agent::Codex | Agent::Copilot | Agent::Gemini => {
+            Agent::Antigravity | Agent::Codex | Agent::Copilot | Agent::Gemini => {
                 project_root.join(".agents").join("skills").join(skill_name)
             }
             Agent::Goose => project_root.join(".agents").join("skills").join(skill_name),
@@ -106,6 +111,14 @@ impl Agent {
     /// Global skill directory for a given skill name, if supported.
     pub fn global_skill_dir(&self, home: &Path, skill_name: &str) -> Option<PathBuf> {
         match self {
+            // Antigravity's shared config root, the one location all three of its
+            // surfaces (CLI, IDE, web) read.
+            Agent::Antigravity => Some(
+                home.join(".gemini")
+                    .join("config")
+                    .join("skills")
+                    .join(skill_name),
+            ),
             Agent::Claude => Some(home.join(".claude").join("skills").join(skill_name)),
             Agent::Codex => Some(home.join(".agents").join("skills").join(skill_name)),
             Agent::Copilot => None, // no global skills path
@@ -128,6 +141,9 @@ impl Agent {
         out: &Output,
     ) -> Result<()> {
         match self {
+            Agent::Antigravity => {
+                register_antigravity_hooks(&project_root.join(".agents").join("hooks.json"), out)
+            }
             Agent::Claude => {
                 register_claude_hooks(&project_root.join(".claude").join("settings.json"), out)
             }
@@ -161,6 +177,10 @@ impl Agent {
         tracing::debug!(agent = %self.config_name(), "registering hooks");
         // Register hooks
         match self {
+            Agent::Antigravity => register_antigravity_hooks(
+                &home.join(".gemini").join("config").join("hooks.json"),
+                out,
+            ),
             Agent::Claude => {
                 register_claude_hooks(&home.join(".claude").join("settings.json"), out)
             }
@@ -199,6 +219,11 @@ impl Agent {
         out: &Output,
     ) -> Result<()> {
         match self {
+            Agent::Antigravity => mcp_server_registration::register_antigravity_mcp_servers(
+                &project_root.join(".agents").join("mcp_config.json"),
+                servers,
+                out,
+            ),
             Agent::Claude => mcp_server_registration::register_claude_mcp_servers(
                 &project_root.join(".claude").join("settings.json"),
                 servers,
@@ -246,6 +271,11 @@ impl Agent {
     ) -> Result<()> {
         tracing::debug!(agent = %self.config_name(), count = servers.len(), "registering MCP servers");
         match self {
+            Agent::Antigravity => mcp_server_registration::register_antigravity_mcp_servers(
+                &home.join(".gemini").join("config").join("mcp_config.json"),
+                servers,
+                out,
+            ),
             Agent::Claude => mcp_server_registration::register_claude_mcp_servers(
                 &home.join(".claude").join("settings.json"),
                 servers,
@@ -292,6 +322,11 @@ impl Agent {
         out: &Output,
     ) -> Result<()> {
         match self {
+            Agent::Antigravity => mcp_server_registration::unregister_antigravity_mcp_servers(
+                &project_root.join(".agents").join("mcp_config.json"),
+                names,
+                out,
+            ),
             Agent::Claude => mcp_server_registration::unregister_claude_mcp_servers(
                 &project_root.join(".claude").join("settings.json"),
                 names,
@@ -338,6 +373,11 @@ impl Agent {
         out: &Output,
     ) -> Result<()> {
         match self {
+            Agent::Antigravity => mcp_server_registration::unregister_antigravity_mcp_servers(
+                &home.join(".gemini").join("config").join("mcp_config.json"),
+                names,
+                out,
+            ),
             Agent::Claude => mcp_server_registration::unregister_claude_mcp_servers(
                 &home.join(".claude").join("settings.json"),
                 names,
@@ -379,6 +419,9 @@ impl Agent {
     /// Remove hooks from the project-level agent config.
     pub fn unregister_project_hooks(&self, project_root: &Path, _sym: &Symposium, out: &Output) {
         match self {
+            Agent::Antigravity => {
+                unregister_antigravity_hooks(&project_root.join(".agents").join("hooks.json"), out)
+            }
             Agent::Claude => {
                 unregister_claude_hooks(&project_root.join(".claude").join("settings.json"), out)
             }
@@ -400,6 +443,10 @@ impl Agent {
     /// Remove hooks from the global agent config.
     pub fn unregister_hooks(&self, home: &Path, _sym: &Symposium, out: &Output) {
         match self {
+            Agent::Antigravity => unregister_antigravity_hooks(
+                &home.join(".gemini").join("config").join("hooks.json"),
+                out,
+            ),
             Agent::Claude => {
                 unregister_claude_hooks(&home.join(".claude").join("settings.json"), out)
             }
@@ -694,6 +741,91 @@ fn copilot_hook_entries() -> Vec<(&'static str, serde_json::Value)> {
             }),
         ),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Antigravity CLI hook registration
+// ---------------------------------------------------------------------------
+
+/// The key symposium owns in Antigravity's `hooks.json`. Registrations there are
+/// keyed by a hook *name*, so several tools can share one file; symposium only
+/// ever writes and reaps this one entry.
+const ANTIGRAVITY_HOOK_NAME: &str = "symposium";
+
+/// Antigravity's events, paired with the symposium event each maps to.
+///
+/// `PreInvocation` stands in for `user-prompt-submit`: Antigravity has no
+/// prompt event, and `PreInvocation` fires before every model call, so dispatch
+/// gates it on the first invocation of a turn. `SessionStart` is undocumented
+/// but real, and fires once per session.
+const ANTIGRAVITY_EVENTS: &[(&str, &str)] = &[
+    ("PreToolUse", "pre-tool-use"),
+    ("PostToolUse", "post-tool-use"),
+    ("PreInvocation", "user-prompt-submit"),
+    ("SessionStart", "session-start"),
+    ("Stop", "stop"),
+];
+
+/// Tool events wrap their handlers in a `matcher` group; lifecycle events take a
+/// flat list of handlers. Getting this wrong is silent — Antigravity accepts an
+/// unrecognised shape and simply never fires it.
+fn antigravity_is_tool_event(event: &str) -> bool {
+    matches!(event, "PreToolUse" | "PostToolUse")
+}
+
+fn antigravity_handler(cli_arg: &str) -> serde_json::Value {
+    json!({
+        "type": "command",
+        "command": format!("cargo-agents hook antigravity {cli_arg}"),
+        "timeout": 30,
+    })
+}
+
+fn register_antigravity_hooks(hooks_path: &Path, out: &Output) -> Result<()> {
+    let mut config = load_json_or_empty(hooks_path)?;
+    let display = display_path(hooks_path);
+
+    let mut entry = serde_json::Map::new();
+    for (event, cli_arg) in ANTIGRAVITY_EVENTS {
+        let handler = antigravity_handler(cli_arg);
+        let value = if antigravity_is_tool_event(event) {
+            json!([{ "matcher": "*", "hooks": [handler] }])
+        } else {
+            json!([handler])
+        };
+        entry.insert((*event).to_string(), value);
+    }
+    let entry = serde_json::Value::Object(entry);
+
+    let obj = config.as_object_mut().unwrap();
+    if obj.get(ANTIGRAVITY_HOOK_NAME) == Some(&entry) {
+        out.already_ok(format!("{display}: hooks already registered"));
+        return Ok(());
+    }
+
+    obj.insert(ANTIGRAVITY_HOOK_NAME.to_string(), entry);
+    save_json(hooks_path, &config)?;
+    let events: Vec<&str> = ANTIGRAVITY_EVENTS.iter().map(|(e, _)| *e).collect();
+    out.done(format!("{display}: added hooks ({})", events.join(", ")));
+    Ok(())
+}
+
+/// Remove only symposium's own named entry, leaving hooks other tools or the
+/// user registered in the same file untouched.
+fn unregister_antigravity_hooks(hooks_path: &Path, out: &Output) {
+    let display = display_path(hooks_path);
+
+    let Ok(mut config) = load_json_or_empty(hooks_path) else {
+        return;
+    };
+    let Some(obj) = config.as_object_mut() else {
+        return;
+    };
+    if obj.remove(ANTIGRAVITY_HOOK_NAME).is_some()
+        && let Ok(()) = save_json(hooks_path, &config)
+    {
+        out.removed(format!("{display}: removed hooks"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,5 +1445,137 @@ mod tests {
         assert!(settings["hooks"]["AfterTool"].is_array());
         assert!(settings["hooks"]["BeforeAgent"].is_array());
         assert!(settings["hooks"]["SessionStart"].is_array());
+    }
+
+    // ── Antigravity ──────────────────────────────────────────────────────
+
+    #[test]
+    fn antigravity_hooks_use_the_right_shape_per_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hooks.json");
+        register_antigravity_hooks(&path, &Output::quiet()).unwrap();
+
+        let cfg: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let entry = &cfg["symposium"];
+
+        // Tool events wrap handlers in a matcher group.
+        let pre_tool = &entry["PreToolUse"][0];
+        assert_eq!(pre_tool["matcher"], "*");
+        assert_eq!(
+            pre_tool["hooks"][0]["command"],
+            "cargo-agents hook antigravity pre-tool-use"
+        );
+
+        // Lifecycle events are flat handler lists — no matcher wrapper.
+        let pre_invocation = &entry["PreInvocation"][0];
+        assert!(pre_invocation.get("matcher").is_none());
+        assert_eq!(
+            pre_invocation["command"],
+            "cargo-agents hook antigravity user-prompt-submit"
+        );
+
+        // SessionStart is undocumented but real, and fires once per session.
+        assert_eq!(
+            entry["SessionStart"][0]["command"],
+            "cargo-agents hook antigravity session-start"
+        );
+        assert_eq!(
+            entry["Stop"][0]["command"],
+            "cargo-agents hook antigravity stop"
+        );
+
+        // Timeout is in seconds for this agent, not milliseconds.
+        assert_eq!(pre_invocation["timeout"], 30);
+    }
+
+    #[test]
+    fn antigravity_hooks_registration_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hooks.json");
+        register_antigravity_hooks(&path, &Output::quiet()).unwrap();
+        let first = fs::read_to_string(&path).unwrap();
+        register_antigravity_hooks(&path, &Output::quiet()).unwrap();
+        assert_eq!(first, fs::read_to_string(&path).unwrap());
+    }
+
+    /// The file is shared with whatever else the user registered, so reaping
+    /// must take symposium's named entry and nothing else.
+    #[test]
+    fn antigravity_unregister_leaves_other_named_hooks_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hooks.json");
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "someone-elses-linter": { "PostToolUse": [{ "matcher": "*", "hooks": [] }] }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        register_antigravity_hooks(&path, &Output::quiet()).unwrap();
+        unregister_antigravity_hooks(&path, &Output::quiet());
+
+        let cfg: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(cfg.get("symposium").is_none(), "symposium entry removed");
+        assert!(
+            cfg.get("someone-elses-linter").is_some(),
+            "unrelated hook preserved"
+        );
+    }
+
+    /// Antigravity keeps MCP in its own file rather than sharing one with
+    /// hooks, and the project and global locations are different shapes — so
+    /// the scope dispatch is worth pinning down.
+    #[test]
+    fn antigravity_mcp_lands_in_its_own_file_at_both_scopes() {
+        use sacp::schema::{McpServer, McpServerStdio};
+        let servers = vec![McpServer::Stdio(McpServerStdio::new(
+            "symposium",
+            "/usr/local/bin/cargo-agents",
+        ))];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        Agent::Antigravity
+            .register_project_mcp_servers(root, &servers, &Output::quiet())
+            .unwrap();
+        let project = root.join(".agents/mcp_config.json");
+        assert!(
+            project.is_file(),
+            "project MCP goes to .agents/mcp_config.json"
+        );
+        let cfg: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&project).unwrap()).unwrap();
+        assert!(cfg["mcpServers"]["symposium"].is_object());
+
+        Agent::Antigravity
+            .register_global_mcp_servers(root, &servers, &Output::quiet())
+            .unwrap();
+        assert!(
+            root.join(".gemini/config/mcp_config.json").is_file(),
+            "global MCP goes to the shared config root"
+        );
+    }
+
+    #[test]
+    fn antigravity_skill_and_config_paths() {
+        let root = Path::new("/project");
+        let home = Path::new("/home/user");
+        assert_eq!(
+            Agent::Antigravity.project_skill_dir(root, "tokio"),
+            PathBuf::from("/project/.agents/skills/tokio")
+        );
+        assert_eq!(
+            Agent::Antigravity.global_skill_dir(home, "tokio"),
+            Some(PathBuf::from("/home/user/.gemini/config/skills/tokio"))
+        );
+        assert_eq!(
+            Agent::from_config_name("antigravity").unwrap(),
+            Agent::Antigravity
+        );
     }
 }

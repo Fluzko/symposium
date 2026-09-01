@@ -160,6 +160,61 @@ async fn sync_installs_workspace_plugin_skills() {
     .unwrap();
 }
 
+/// Antigravity reads the vendor-neutral skills path, keeps MCP in its own file,
+/// and takes hooks in a named-entry `hooks.json` — none of which share a
+/// location with its global equivalents, so project scope is worth pinning.
+#[tokio::test]
+async fn sync_installs_antigravity_at_project_scope() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugins0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&[
+                "init",
+                "--add-agent",
+                "antigravity",
+                "--hook-scope",
+                "project",
+            ])
+            .await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let root = ctx.workspace_root.as_ref().unwrap();
+
+            let skill_dir = find_installed_skill(&root.join(".agents/skills"), "serde-guidance");
+            assert!(
+                skill_dir.join(".symposium").exists(),
+                "skill installs as symposium-managed under .agents/skills"
+            );
+
+            let hooks_path = root.join(".agents/hooks.json");
+            assert!(hooks_path.exists(), "hooks go to .agents/hooks.json");
+            let hooks: Value = serde_json::from_str(&std::fs::read_to_string(&hooks_path)?)?;
+            let entry = &hooks["symposium"];
+            assert_eq!(
+                entry["PreToolUse"][0]["hooks"][0]["command"],
+                "cargo-agents hook antigravity pre-tool-use",
+                "tool events are wrapped in a matcher group"
+            );
+            assert_eq!(
+                entry["SessionStart"][0]["command"], "cargo-agents hook antigravity session-start",
+                "lifecycle events are a flat handler list"
+            );
+
+            // The global locations live under ~/.gemini/config; nothing should
+            // have been rooted at the workspace by mistake.
+            assert!(
+                !root.join(".gemini").exists(),
+                "project scope must not write the global path shape into the repo"
+            );
+
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// `sync` installs skill files into the agent's expected location.
 #[tokio::test]
 async fn sync_installs_skills() {

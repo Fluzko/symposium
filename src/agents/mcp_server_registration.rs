@@ -95,7 +95,7 @@ fn upsert_json_mcp_entry(
 }
 
 // ---------------------------------------------------------------------------
-// JSON-based registration (Claude, Copilot, Gemini, Kiro, OpenCode)
+// JSON-based registration (Antigravity, Claude, Copilot, Gemini, Kiro, OpenCode)
 // ---------------------------------------------------------------------------
 
 /// Register MCP servers into a JSON config file under a given container key.
@@ -201,6 +201,26 @@ pub(super) fn register_claude_mcp_servers(
 }
 
 pub(super) fn unregister_claude_mcp_servers(
+    path: &Path,
+    names: &[&str],
+    out: &Output,
+) -> Result<()> {
+    unregister_json_mcp_servers(path, names, Some("mcpServers"), out)
+}
+
+/// Antigravity CLI: `mcpServers.<name>` in a dedicated `mcp_config.json`.
+///
+/// Same entry shape as Claude, but its own file rather than sharing one with
+/// hooks, so a broken hooks config cannot take MCP down with it.
+pub(super) fn register_antigravity_mcp_servers(
+    path: &Path,
+    servers: &[McpServer],
+    out: &Output,
+) -> Result<()> {
+    register_json_mcp_servers(path, servers, Some("mcpServers"), out)
+}
+
+pub(super) fn unregister_antigravity_mcp_servers(
     path: &Path,
     names: &[&str],
     out: &Output,

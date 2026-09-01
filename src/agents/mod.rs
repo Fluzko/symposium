@@ -15,6 +15,13 @@ use serde_json::json;
 use crate::config::Symposium;
 use crate::output::{Output, display_path};
 
+/// Agent names symposium used to support and no longer does.
+///
+/// A user config outlives the release that drops an agent, so a retired name is
+/// reported and skipped rather than failing every command until the file is
+/// edited by hand.
+pub const RETIRED_AGENTS: &[&str] = &["gemini"];
+
 /// Supported AI agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
@@ -22,13 +29,31 @@ pub enum Agent {
     Claude,
     Codex,
     Copilot,
-    Gemini,
     Goose,
     Kiro,
     OpenCode,
 }
 
 impl Agent {
+    /// Whether `name` refers to an agent symposium has retired.
+    pub fn is_retired(name: &str) -> bool {
+        RETIRED_AGENTS.contains(&name)
+    }
+
+    /// Resolve a configured agent name, tolerating one symposium has retired.
+    ///
+    /// `Ok(None)` means the name was retired and reported; an unknown name is
+    /// still an error, since that is a typo rather than an outdated config.
+    pub fn from_configured_name(name: &str, out: &Output) -> Result<Option<Self>> {
+        if Self::is_retired(name) {
+            out.warn(format!(
+                "agent `{name}` is no longer supported; ignoring it"
+            ));
+            return Ok(None);
+        }
+        Self::from_config_name(name).map(Some)
+    }
+
     /// Parse an agent name from a config string.
     pub fn from_config_name(name: &str) -> Result<Self> {
         match name {
@@ -36,12 +61,14 @@ impl Agent {
             "claude" => Ok(Agent::Claude),
             "codex" => Ok(Agent::Codex),
             "copilot" => Ok(Agent::Copilot),
-            "gemini" => Ok(Agent::Gemini),
             "goose" => Ok(Agent::Goose),
             "kiro" => Ok(Agent::Kiro),
             "opencode" => Ok(Agent::OpenCode),
+            other if Self::is_retired(other) => {
+                bail!("agent `{other}` is no longer supported by symposium")
+            }
             other => bail!(
-                "unknown agent: {other} (expected antigravity, claude, codex, copilot, gemini, goose, kiro, or opencode)"
+                "unknown agent: {other} (expected antigravity, claude, codex, copilot, goose, kiro, or opencode)"
             ),
         }
     }
@@ -53,7 +80,6 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
             Agent::Copilot => "copilot",
-            Agent::Gemini => "gemini",
             Agent::Goose => "goose",
             Agent::Kiro => "kiro",
             Agent::OpenCode => "opencode",
@@ -67,7 +93,6 @@ impl Agent {
             Agent::Claude => "Claude Code",
             Agent::Codex => "Codex CLI",
             Agent::Copilot => "GitHub Copilot",
-            Agent::Gemini => "Gemini CLI",
             Agent::Goose => "Goose",
             Agent::Kiro => "Kiro",
             Agent::OpenCode => "OpenCode",
@@ -81,7 +106,6 @@ impl Agent {
             Agent::Claude,
             Agent::Codex,
             Agent::Copilot,
-            Agent::Gemini,
             Agent::Goose,
             Agent::Kiro,
             Agent::OpenCode,
@@ -95,11 +119,12 @@ impl Agent {
     /// Project-level skill directory for a given skill name.
     ///
     /// Claude Code requires `.claude/skills/`, while Antigravity, Copilot and
-    /// Gemini support the vendor-neutral `.agents/skills/` path.
+    /// Antigravity, Codex and Copilot support the vendor-neutral
+    /// `.agents/skills/` path.
     pub fn project_skill_dir(&self, project_root: &Path, skill_name: &str) -> PathBuf {
         match self {
             Agent::Claude => project_root.join(".claude").join("skills").join(skill_name),
-            Agent::Antigravity | Agent::Codex | Agent::Copilot | Agent::Gemini => {
+            Agent::Antigravity | Agent::Codex | Agent::Copilot => {
                 project_root.join(".agents").join("skills").join(skill_name)
             }
             Agent::Goose => project_root.join(".agents").join("skills").join(skill_name),
@@ -122,7 +147,6 @@ impl Agent {
             Agent::Claude => Some(home.join(".claude").join("skills").join(skill_name)),
             Agent::Codex => Some(home.join(".agents").join("skills").join(skill_name)),
             Agent::Copilot => None, // no global skills path
-            Agent::Gemini => Some(home.join(".gemini").join("skills").join(skill_name)),
             Agent::Goose => Some(home.join(".agents").join("skills").join(skill_name)),
             Agent::Kiro => Some(home.join(".kiro").join("skills").join(skill_name)),
             Agent::OpenCode => Some(home.join(".agents").join("skills").join(skill_name)),
@@ -152,9 +176,6 @@ impl Agent {
             }
             Agent::Copilot => {
                 register_copilot_hooks(&project_root.join(".github").join("hooks"), out)
-            }
-            Agent::Gemini => {
-                register_gemini_hooks(&project_root.join(".gemini").join("settings.json"), out)
             }
             Agent::Kiro => register_kiro_hooks(&project_root.join(".kiro").join("agents"), out),
             Agent::Goose => {
@@ -187,9 +208,6 @@ impl Agent {
             Agent::Codex => register_codex_hooks(&home.join(".codex").join("hooks.json"), out),
             Agent::Copilot => {
                 register_copilot_hooks_global(&home.join(".copilot").join("settings.json"), out)
-            }
-            Agent::Gemini => {
-                register_gemini_hooks(&home.join(".gemini").join("settings.json"), out)
             }
             Agent::Kiro => register_kiro_hooks(&home.join(".kiro").join("agents"), out),
             Agent::Goose => {
@@ -236,11 +254,6 @@ impl Agent {
             ),
             Agent::Copilot => mcp_server_registration::register_copilot_mcp_servers(
                 &project_root.join(".vscode").join("mcp.json"),
-                servers,
-                out,
-            ),
-            Agent::Gemini => mcp_server_registration::register_gemini_mcp_servers(
-                &project_root.join(".gemini").join("settings.json"),
                 servers,
                 out,
             ),
@@ -291,11 +304,6 @@ impl Agent {
                 servers,
                 out,
             ),
-            Agent::Gemini => mcp_server_registration::register_gemini_mcp_servers(
-                &home.join(".gemini").join("settings.json"),
-                servers,
-                out,
-            ),
             Agent::Kiro => mcp_server_registration::register_kiro_mcp_servers(
                 &home.join(".kiro").join("settings").join("mcp.json"),
                 servers,
@@ -339,11 +347,6 @@ impl Agent {
             ),
             Agent::Copilot => mcp_server_registration::unregister_copilot_mcp_servers(
                 &project_root.join(".vscode").join("mcp.json"),
-                names,
-                out,
-            ),
-            Agent::Gemini => mcp_server_registration::unregister_gemini_mcp_servers(
-                &project_root.join(".gemini").join("settings.json"),
                 names,
                 out,
             ),
@@ -393,11 +396,6 @@ impl Agent {
                 names,
                 out,
             ),
-            Agent::Gemini => mcp_server_registration::unregister_gemini_mcp_servers(
-                &home.join(".gemini").join("settings.json"),
-                names,
-                out,
-            ),
             Agent::Kiro => mcp_server_registration::unregister_kiro_mcp_servers(
                 &home.join(".kiro").join("settings").join("mcp.json"),
                 names,
@@ -431,9 +429,6 @@ impl Agent {
             Agent::Copilot => {
                 unregister_copilot_hooks(&project_root.join(".github").join("hooks"), out)
             }
-            Agent::Gemini => {
-                unregister_gemini_hooks(&project_root.join(".gemini").join("settings.json"), out)
-            }
             Agent::Kiro => unregister_kiro_hooks(&project_root.join(".kiro").join("agents"), out),
             Agent::Goose => {}    // no hooks to unregister
             Agent::OpenCode => {} // no hooks to unregister
@@ -453,9 +448,6 @@ impl Agent {
             Agent::Codex => unregister_codex_hooks(&home.join(".codex").join("hooks.json"), out),
             Agent::Copilot => {
                 unregister_copilot_hooks_global(&home.join(".copilot").join("settings.json"), out)
-            }
-            Agent::Gemini => {
-                unregister_gemini_hooks(&home.join(".gemini").join("settings.json"), out)
             }
             Agent::Kiro => unregister_kiro_hooks(&home.join(".kiro").join("agents"), out),
             Agent::Goose => {}    // no hooks to unregister
@@ -827,91 +819,6 @@ fn unregister_antigravity_hooks(hooks_path: &Path, out: &Output) {
         out.removed(format!("{display}: removed hooks"));
     }
 }
-
-// ---------------------------------------------------------------------------
-// Gemini CLI hook registration
-// ---------------------------------------------------------------------------
-
-fn register_gemini_hooks(settings_path: &Path, out: &Output) -> Result<()> {
-    let mut settings = load_json_or_empty(settings_path)?;
-    let display = display_path(settings_path);
-
-    let hooks = settings
-        .as_object_mut()
-        .unwrap()
-        .entry("hooks")
-        .or_insert_with(|| json!({}));
-
-    let hooks_obj = hooks.as_object_mut().unwrap();
-
-    let mut added = Vec::new();
-
-    let events = [
-        ("BeforeTool", "pre-tool-use"),
-        ("AfterTool", "post-tool-use"),
-        ("BeforeAgent", "user-prompt-submit"),
-        ("SessionStart", "session-start"),
-    ];
-
-    for (gemini_event, cli_arg) in events {
-        let command = format!("cargo-agents hook gemini {cli_arg}");
-        if ensure_gemini_hook_entry(hooks_obj, gemini_event, &command) {
-            added.push(gemini_event);
-        }
-    }
-
-    if added.is_empty() {
-        out.already_ok(format!("{display}: hooks already registered"));
-    } else {
-        save_json(settings_path, &settings)?;
-        out.done(format!("{display}: added hooks ({})", added.join(", ")));
-    }
-
-    Ok(())
-}
-
-/// Returns `true` if a new entry was added, `false` if already registered.
-fn ensure_gemini_hook_entry(
-    hooks: &mut serde_json::Map<String, serde_json::Value>,
-    event: &str,
-    command: &str,
-) -> bool {
-    let event_hooks = hooks.entry(event).or_insert_with(|| json!([]));
-
-    let arr = match event_hooks.as_array_mut() {
-        Some(a) => a,
-        None => return false,
-    };
-
-    let already_registered = arr.iter().any(|group| {
-        group
-            .get("hooks")
-            .and_then(|h| h.as_array())
-            .is_some_and(|hooks| {
-                hooks.iter().any(|h| {
-                    h.get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|c| c.starts_with("cargo-agents hook"))
-                })
-            })
-    });
-
-    if already_registered {
-        return false;
-    }
-
-    arr.push(json!({
-        "matcher": ".*",
-        "hooks": [{
-            "name": "symposium",
-            "type": "command",
-            "command": command,
-            "timeout": 10000
-        }]
-    }));
-    true
-}
-
 // ---------------------------------------------------------------------------
 // Kiro hook registration
 // ---------------------------------------------------------------------------
@@ -1059,9 +966,8 @@ fn unregister_kiro_hooks(agents_dir: &Path, out: &Output) {
 // Hook unregistration
 // ---------------------------------------------------------------------------
 
-/// Remove symposium hooks from a Claude/Gemini settings.json file.
-/// Shared by both Claude and Gemini since they use the same structure.
-fn unregister_settings_hooks(settings_path: &Path, command_prefix: &str, out: &Output) {
+/// Remove symposium hooks from a Claude-style settings.json file.
+pub(crate) fn unregister_settings_hooks(settings_path: &Path, command_prefix: &str, out: &Output) {
     let display = display_path(settings_path);
 
     let Ok(mut settings) = load_json_or_empty(settings_path) else {
@@ -1103,10 +1009,6 @@ fn unregister_claude_hooks(settings_path: &Path, out: &Output) {
     unregister_settings_hooks(settings_path, "cargo-agents hook", out);
 }
 
-fn unregister_gemini_hooks(settings_path: &Path, out: &Output) {
-    unregister_settings_hooks(settings_path, "cargo-agents hook", out);
-}
-
 /// Remove symposium hooks from a Copilot project hooks directory.
 fn unregister_copilot_hooks(hooks_dir: &Path, out: &Output) {
     let hook_file = hooks_dir.join("symposium.json");
@@ -1127,7 +1029,7 @@ fn unregister_copilot_hooks_global(config_path: &Path, out: &Output) {
 /// with the command in `command_key` (e.g., `"command"` for Kiro, `"bash"` for Copilot).
 ///
 /// Contrasts with `unregister_settings_hooks` which handles the nested
-/// `{ "hooks": [{ "command": "..." }] }` structure used by Claude/Gemini/Codex.
+/// `{ "hooks": [{ "command": "..." }] }` structure used by Claude/Codex.
 fn unregister_flat_hooks(config_path: &Path, command_key: &str, out: &Output) {
     let display = display_path(config_path);
 
@@ -1205,7 +1107,6 @@ mod tests {
         assert_eq!(Agent::from_config_name("claude").unwrap(), Agent::Claude);
         assert_eq!(Agent::from_config_name("codex").unwrap(), Agent::Codex);
         assert_eq!(Agent::from_config_name("copilot").unwrap(), Agent::Copilot);
-        assert_eq!(Agent::from_config_name("gemini").unwrap(), Agent::Gemini);
         assert!(Agent::from_config_name("unknown").is_err());
     }
 
@@ -1432,21 +1333,6 @@ mod tests {
             Some(PathBuf::from("/home/user/.agents/skills/tokio"))
         );
     }
-
-    #[test]
-    fn register_gemini_hooks_creates_settings() {
-        let tmp = tempfile::tempdir().unwrap();
-        let settings_path = tmp.path().join("settings.json");
-        register_gemini_hooks(&settings_path, &Output::quiet()).unwrap();
-
-        let settings: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
-        assert!(settings["hooks"]["BeforeTool"].is_array());
-        assert!(settings["hooks"]["AfterTool"].is_array());
-        assert!(settings["hooks"]["BeforeAgent"].is_array());
-        assert!(settings["hooks"]["SessionStart"].is_array());
-    }
-
     // ── Antigravity ──────────────────────────────────────────────────────
 
     #[test]

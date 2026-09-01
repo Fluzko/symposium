@@ -395,7 +395,9 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     let mut installed_dirs: BTreeSet<PathBuf> = BTreeSet::new();
 
     for agent_name in &agent_names {
-        let agent = Agent::from_config_name(agent_name)?;
+        let Some(agent) = Agent::from_configured_name(agent_name, out)? else {
+            continue;
+        };
 
         // Register hooks and MCP servers at the configured scope.
         //
@@ -596,7 +598,9 @@ pub async fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
     let agent_names: Vec<String> = sym.config.agents.iter().map(|a| a.name.clone()).collect();
 
     for agent_name in &agent_names {
-        let agent = Agent::from_config_name(agent_name)?;
+        let Some(agent) = Agent::from_configured_name(agent_name, out)? else {
+            continue;
+        };
         agent.register_hooks(sym.home_dir(), sym, out)?;
         agent.register_global_mcp_servers(sym.home_dir(), &mcp_servers, out)?;
     }

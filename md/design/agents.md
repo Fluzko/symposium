@@ -9,7 +9,6 @@
 | `antigravity` | Antigravity CLI |
 | `claude` | Claude Code |
 | `copilot` | GitHub Copilot |
-| `gemini` | Gemini CLI |
 | `codex` | Codex CLI |
 | `kiro` | Kiro |
 | `opencode` | OpenCode |
@@ -32,11 +31,11 @@ When installing skills, `cargo agents` prefers vendor-neutral paths where possib
 
 | Scope | Path | Supported by |
 |-------|------|-------------|
-| Project skills | `.agents/skills/<skill-name>/SKILL.md` | Antigravity, Copilot, Gemini, Codex, OpenCode, Goose |
+| Project skills | `.agents/skills/<skill-name>/SKILL.md` | Antigravity, Copilot, Codex, OpenCode, Goose |
 | Project skills | `.claude/skills/<skill-name>/SKILL.md` | Claude Code (does not support `.agents/skills/`) |
 | Project skills | `.kiro/skills/<skill-name>/SKILL.md` | Kiro (uses its own path) |
 
-At the project level, Claude Code requires `.claude/skills/`, Kiro requires `.kiro/skills/`, while Antigravity, Copilot, Gemini, Codex, OpenCode, and Goose all support `.agents/skills/`. `cargo agents` uses the vendor-neutral `.agents/skills/` path whenever the agent supports it.
+At the project level, Claude Code requires `.claude/skills/`, Kiro requires `.kiro/skills/`, while Antigravity, Copilot, Codex, OpenCode, and Goose all support `.agents/skills/`. `cargo agents` uses the vendor-neutral `.agents/skills/` path whenever the agent supports it.
 
 At the global level, each agent has its own path:
 
@@ -45,7 +44,6 @@ At the global level, each agent has its own path:
 | Antigravity CLI | `~/.gemini/config/skills/<skill-name>/SKILL.md` |
 | Claude Code | `~/.claude/skills/<skill-name>/SKILL.md` |
 | Copilot | *(no global skills path)* |
-| Gemini | `~/.gemini/skills/<skill-name>/SKILL.md` |
 | Codex | `~/.agents/skills/<skill-name>/SKILL.md` |
 | Kiro | `~/.kiro/skills/<skill-name>/SKILL.md` |
 | OpenCode | `~/.agents/skills/<skill-name>/SKILL.md` |
@@ -174,79 +172,6 @@ Copilot uses a flat output structure (no nested `hookSpecificOutput`). The input
 ```
 
 Valid `permissionDecision` values: `"allow"`, `"deny"`, `"ask"`.
-
----
-
-## Gemini CLI
-
-[Hooks reference](https://geminicli.com/docs/hooks/reference/) · [Configuration reference](https://geminicli.com/docs/reference/configuration/) · [Skills reference](https://geminicli.com/docs/cli/skills/) · [Extensions reference](https://geminicli.com/docs/extensions/reference/)
-
-### Hook registration
-
-Gemini CLI hooks live under the `"hooks"` key in `settings.json`. Hook groups use regex matchers for tool events and exact-string matchers for lifecycle events.
-
-| Scope | File |
-|-------|------|
-| Global | `~/.gemini/settings.json` |
-| Project | `.gemini/settings.json` |
-
-Example hook registration:
-
-```json
-{
-  "hooks": {
-    "BeforeTool": [
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "name": "symposium",
-            "type": "command",
-            "command": "cargo-agents hook gemini pre-tool-use",
-            "timeout": 10000
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Note: Gemini uses `BeforeTool` (not `PreToolUse`), and timeouts are in milliseconds (default: 60000).
-
-### Supported events
-
-| Event | Type | Description |
-|-------|------|-------------|
-| `BeforeTool` | Tool | Before a tool is invoked. |
-| `AfterTool` | Tool | After a tool completes. |
-| `BeforeToolSelection` | Tool | Before the LLM selects tools. |
-| `BeforeModel` | Model | Before LLM requests. |
-| `AfterModel` | Model | After LLM responses. |
-| `BeforeAgent` | Lifecycle | Before agent loop starts. |
-| `AfterAgent` | Lifecycle | After agent loop completes. |
-| `SessionStart` | Lifecycle | When a session starts. |
-| `SessionEnd` | Lifecycle | When a session ends. |
-| `PreCompress` | Lifecycle | Before history compression. |
-| `Notification` | Lifecycle | On notification events. |
-
-### Hook payload/output
-
-Gemini uses a structure similar to Claude Code, with a nested `hookSpecificOutput`:
-
-```json
-{
-  "decision": "allow",
-  "reason": "...",
-  "hookSpecificOutput": {
-    "hookEventName": "BeforeTool",
-    "additionalContext": "...",
-    "tool_input": { ... }
-  }
-}
-```
-
-The input payload includes `tool_name`, `tool_input`, `mcp_context`, `session_id`, and `transcript_path`.
 
 ---
 
@@ -469,12 +394,12 @@ Goose is supported as a **skills-only** agent — `cargo agents sync` will insta
 
 The following table maps symposium's internal event names to each agent's wire-format event name. `—` means the agent does not support shell-command hooks.
 
-| Symposium event | Antigravity | Claude | Copilot | Gemini | Codex | Kiro | OpenCode | Goose |
-|---|---|---|---|---|---|---|---|---|
-| `pre-tool-use` | `PreToolUse` | `PreToolUse` | `preToolUse` | `BeforeTool` | `PreToolUse` | `preToolUse` | — | — |
-| `post-tool-use` | `PostToolUse` | `PostToolUse` | `postToolUse` | `AfterTool` | `PostToolUse` | `postToolUse` | — | — |
-| `user-prompt-submit` | `PreInvocation` | `UserPromptSubmit` | `userPromptSubmitted` | `BeforeAgent` | `UserPromptSubmit` | `userPromptSubmit` | — | — |
-| `session-start` | `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `SessionStart` | `agentSpawn` | — | — |
+| Symposium event | Antigravity | Claude | Copilot | Codex | Kiro | OpenCode | Goose |
+|---|---|---|---|---|---|---|---|
+| `pre-tool-use` | `PreToolUse` | `PreToolUse` | `preToolUse` | `PreToolUse` | `preToolUse` | — | — |
+| `post-tool-use` | `PostToolUse` | `PostToolUse` | `postToolUse` | `PostToolUse` | `postToolUse` | — | — |
+| `user-prompt-submit` | `PreInvocation` | `UserPromptSubmit` | `userPromptSubmitted` | `UserPromptSubmit` | `userPromptSubmit` | — | — |
+| `session-start` | `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `agentSpawn` | — | — |
 
 ---
 

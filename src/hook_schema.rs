@@ -9,7 +9,6 @@ pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
-pub mod gemini;
 pub mod goose;
 pub mod kiro;
 pub mod opencode;
@@ -30,9 +29,6 @@ pub enum HookAgent {
     #[value(name = "copilot")]
     #[serde(rename = "copilot")]
     Copilot,
-    #[value(name = "gemini")]
-    #[serde(rename = "gemini")]
-    Gemini,
     #[value(name = "goose")]
     #[serde(rename = "goose")]
     Goose,
@@ -52,7 +48,6 @@ impl HookAgent {
             HookAgent::Claude => "claude",
             HookAgent::Codex => "codex",
             HookAgent::Copilot => "copilot",
-            HookAgent::Gemini => "gemini",
             HookAgent::Goose => "goose",
             HookAgent::Kiro => "kiro",
             HookAgent::OpenCode => "opencode",
@@ -65,11 +60,32 @@ impl HookAgent {
             HookAgent::Claude => claude::ClaudeCode.event(event),
             HookAgent::Codex => codex::Codex.event(event),
             HookAgent::Copilot => copilot::Copilot.event(event),
-            HookAgent::Gemini => gemini::Gemini.event(event),
             HookAgent::Goose => goose::Goose.event(event),
             HookAgent::Kiro => kiro::Kiro.event(event),
             HookAgent::OpenCode => opencode::OpenCode.event(event),
         }
+    }
+}
+
+/// Hook agent names symposium used to support and no longer does.
+pub const RETIRED_HOOK_AGENTS: &[&str] = &["gemini"];
+
+/// The `cargo agents hook <agent>` argument.
+///
+/// `None` is a retired agent: a hook registration written before that agent was
+/// dropped keeps firing until something cleans the config, and it must exit
+/// quietly rather than spraying a parse error into every session.
+#[derive(Debug, Clone, Copy)]
+pub struct HookAgentArg(pub Option<HookAgent>);
+
+impl std::str::FromStr for HookAgentArg {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        if RETIRED_HOOK_AGENTS.contains(&name) {
+            return Ok(HookAgentArg(None));
+        }
+        clap::ValueEnum::from_str(name, true).map(|a| HookAgentArg(Some(a)))
     }
 }
 
@@ -204,4 +220,30 @@ where
     E::Output: AgentHookOutput + 'static,
 {
     Box::new(ErasedAgentHookEventImpl(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn a_supported_agent_parses_to_itself() {
+        assert_eq!(
+            HookAgentArg::from_str("antigravity").unwrap().0,
+            Some(HookAgent::Antigravity)
+        );
+    }
+
+    /// A hook registration outlives the release that drops its agent, so the
+    /// retired name must parse and produce nothing to dispatch.
+    #[test]
+    fn a_retired_agent_parses_to_nothing_to_dispatch() {
+        assert_eq!(HookAgentArg::from_str("gemini").unwrap().0, None);
+    }
+
+    #[test]
+    fn an_unknown_agent_is_still_an_error() {
+        assert!(HookAgentArg::from_str("notanagent").is_err());
+    }
 }

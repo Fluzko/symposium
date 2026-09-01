@@ -224,7 +224,7 @@ fn spawn_from_spec(spec: SpawnSpec) -> std::io::Result<std::process::Child> {
 }
 
 // Re-export hook schema types for convenience.
-pub use crate::hook_schema::{HookAgent, HookEvent};
+pub use crate::hook_schema::{HookAgent, HookAgentArg, HookEvent};
 /// Core hook pipeline: sync → parse → builtin → plugins → serialize.
 ///
 /// Takes the raw agent wire-format input, returns agent wire-format output bytes.
@@ -875,6 +875,15 @@ fn dispatched_hooks_for_payload(
             if let Some(matcher) = &hook.matcher
                 && !input.matches_matcher(matcher)
             {
+                continue;
+            }
+
+            if hook.format.is_retired() {
+                tracing::warn!(
+                    plugin = %parsed_plugin.plugin.name,
+                    hook = %hook.name,
+                    "hook format names an agent symposium no longer supports; skipping"
+                );
                 continue;
             }
 

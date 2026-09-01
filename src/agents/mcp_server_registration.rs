@@ -95,7 +95,7 @@ fn upsert_json_mcp_entry(
 }
 
 // ---------------------------------------------------------------------------
-// JSON-based registration (Antigravity, Claude, Copilot, Gemini, Kiro, OpenCode)
+// JSON-based registration (Antigravity, Claude, Copilot, Kiro, OpenCode)
 // ---------------------------------------------------------------------------
 
 /// Register MCP servers into a JSON config file under a given container key.
@@ -355,23 +355,6 @@ pub(super) fn unregister_copilot_mcp_servers(
     unregister_json_mcp_servers(path, names, None, out)
 }
 
-/// Gemini CLI: same format as Claude (`mcpServers.<name>`)
-pub(super) fn register_gemini_mcp_servers(
-    path: &Path,
-    servers: &[McpServer],
-    out: &Output,
-) -> Result<()> {
-    register_claude_mcp_servers(path, servers, out)
-}
-
-pub(super) fn unregister_gemini_mcp_servers(
-    path: &Path,
-    names: &[&str],
-    out: &Output,
-) -> Result<()> {
-    unregister_claude_mcp_servers(path, names, out)
-}
-
 /// Kiro: `mcpServers.<name>` in mcp.json
 pub(super) fn register_kiro_mcp_servers(
     path: &Path,
@@ -571,7 +554,7 @@ mod tests {
         vec!["symposium"]
     }
 
-    // -- Claude MCP (also covers Gemini and Kiro via delegation) --
+    // -- Claude MCP (also covers Kiro via delegation) --
 
     #[test]
     fn register_claude_creates_config() {

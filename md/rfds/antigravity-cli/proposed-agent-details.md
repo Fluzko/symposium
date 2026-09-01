@@ -74,10 +74,16 @@ via `sh -c` (`cmd /c` on Windows).
 | `PreInvocation` | before the model is called | n/a |
 | `PostInvocation` | after tool calls finish | n/a |
 | `Stop` | when the execution loop terminates | n/a |
+| `SessionStart` | once per session | n/a |
 
-There is **no session-start event**. `PreInvocation` fires before every model
-call and its `invocationNum` restarts at 0 each turn, so it does not mark a
-session on its own; `conversationId` is stable for the session's lifetime.
+`SessionStart` is **absent from the official documentation** but present in the
+binary's hook proto, and works: it loads from `hooks.json`, fires once per
+session, and carries a populated `workspacePaths`. `PreInvocation` by contrast
+fires before every model call, and its `invocationNum` restarts at 0 each turn,
+so it marks the start of a turn rather than of a session.
+
+Unknown event keys are accepted silently and never fire, so a misspelled event
+name fails without any error.
 
 Matchers are regexes over tool names, which are the lowercased step type without
 its `CORTEX_STEP_TYPE_` prefix — `run_command`, `view_file`, `browser_.*`. A

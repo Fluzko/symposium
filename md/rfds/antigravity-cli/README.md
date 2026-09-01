@@ -8,7 +8,7 @@
 - Skills reuse the vendor-neutral `.agents/skills/` path symposium already writes; global skills go to `~/.gemini/config/skills/`.
 - MCP servers move to a dedicated `mcp_config.json`, keeping the familiar `mcpServers` shape.
 - Hooks are a new wire format on a new file, and follow the configured `hook-scope` like any other agent.
-- Antigravity has no `SessionStart` event. Symposium derives one from `PreInvocation` plus a first-seen `conversationId`.
+- `SessionStart` is undocumented but real, and fires once per session. `PreInvocation` stands in for `user-prompt-submit`, gated on the first invocation of a turn.
 - A `PreToolUse` hook that returns `{}` **denies the tool call**. Symposium must emit an explicit allow.
 
 ## Motivation
@@ -87,10 +87,13 @@ absolute. This affects automation and CI, not ordinary interactive use.
 |---|---|
 | `pre-tool-use` | `PreToolUse` |
 | `post-tool-use` | `PostToolUse` |
+| `session-start` | `SessionStart` |
+| `stop` | `Stop` |
 | `user-prompt-submit` | `PreInvocation`, first invocation of a turn |
-| `session-start` | `PreInvocation`, first invocation of an unseen conversation |
 
-`PreInvocation` fires before every model call, and its `invocationNum` restarts at 0 on each turn, so it does not by itself mark a session. `conversationId` is stable for the life of a session. Symposium registers one `PreInvocation` handler and derives both events from it: the first sighting of a `conversationId` is a session start, and any `invocationNum == 0` is a prompt submission. Tracking which conversations have been seen is symposium's own state.
+Antigravity's documentation lists five events and omits `SessionStart`, but the binary's hook proto carries six, and a `SessionStart` key in `hooks.json` loads, fires **once per session** (verified across a `--continue` turn) and carries a populated `workspacePaths`. So session start maps natively and needs no derivation.
+
+`user-prompt-submit` is the one approximation. Antigravity has no prompt event, and `PreInvocation` fires before *every* model call — several times in a turn that uses tools — so dispatch runs the prompt event only when `invocationNum == 0`. That is stateless; no session tracking is involved. An unknown event key, incidentally, is accepted silently and never fires, so a typo there fails quietly.
 
 ### The allow contract
 
@@ -141,6 +144,24 @@ Antigravity's plugin manifest is `plugin.json` at a plugin root — the same fil
 
 ## Implementation plan and status
 
+Two deviations from the plan above, recorded as implementation proceeded:
+
+- **Step 5 changed.** It proposed deriving a session start by tracking seen
+  `conversationId`s. Testing showed `SessionStart` exists natively and fires once
+  per session, so the derivation was dropped and the step became the
+  `user-prompt-submit` gate instead. The events section above reflects the native
+  event.
+- **Order changed.** Antigravity is added first and Gemini retired last, so every
+  commit leaves users with a working agent. Step 1 therefore lands after steps 2
+  to 6.
+
+One fix fell out of the work and is not listed as a step: `sync` registered hooks
+and MCP by passing the workspace root to the *global* functions, which only
+produces the right path for agents whose project and global locations share a
+shape. Antigravity's do not, so project scope wrote to a file `agy` never reads.
+The project-scoped functions existed but had no callers; `sync` now dispatches to
+them, which also moves Copilot's project hooks to `.github/hooks/`.
+
 ### Step 1: Retire the `gemini` agent
 
 Remove the agent, its hook schema and its MCP registration, keeping the retired-name shims and the one-shot cleanup migration. Verify with the existing init/sync suite plus tests that a stale `gemini` config entry is warned about rather than fatal, and that `cargo agents hook gemini <event>` exits zero.
@@ -165,9 +186,9 @@ Input and output conversion for the five events, including the explicit allow on
 
 - [ ] not started
 
-### Step 5: Derived session start
+### Step 5: Gate `user-prompt-submit`
 
-Track seen conversation ids and dispatch `session-start` on first sighting, `user-prompt-submit` otherwise. Verify that two turns of one conversation produce exactly one session start, and that a new conversation produces another.
+`PreInvocation` fires before every model call, so dispatch must run the prompt event only on `invocationNum == 0` or plugin prompt hooks fire several times per turn. Verify that a turn making a tool call (two invocations) dispatches `user-prompt-submit` exactly once, and that `session-start` fires once per session across two turns.
 
 - [ ] not started
 

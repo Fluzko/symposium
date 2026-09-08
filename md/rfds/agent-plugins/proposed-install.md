@@ -34,11 +34,11 @@ $ cargo agents use pdf-tools
 enabled pdf-tools for /home/alex/work/reporter
 installed pdf-tools
   claude    registered   .symposium/plugins/pdf-tools
-  codex     copied       .codex/plugins/pdf-tools
+  codex     skills only  .agents/skills/extract-tables
   gemini    skills only  .agents/skills/extract-tables
 ```
 
-The three lines differ because agents accept a plugin differently. Claude Code is pointed at the directory where it was written, Codex CLI gets a copy in its own folder, and Gemini CLI cannot scope a plugin to one project, so its skills are installed per project instead.
+The lines differ because agents accept a plugin differently, and because this enablement is scoped to one project. Claude Code is the only agent that can scope a plugin to a project, so it is pointed at the directory where it was written; Codex CLI and Gemini CLI can only install a plugin for you everywhere, so for this project their skills are installed the older way instead. Run `use --global` and all three get the directory.
 
 Start your agent as usual and the skill is there. To be sure, ask the agent what skills it can see.
 
@@ -86,13 +86,17 @@ For each plugin that applies, symposium compiles a directory:
 
 ```text
 pdf-tools/
-  plugin.json          who this plugin is
-  .gitignore           contains *, so the directory stays out of your commits
-  .symposium           marks the directory as ours, so we can clean it up later
+  plugin.json                  who this plugin is
+  .claude-plugin/plugin.json   the same, for Claude Code
+  gemini-extension.json        the same, for Gemini CLI
+  .gitignore                   contains *, so the directory stays out of your commits
+  .symposium                   marks the directory as ours, so we can clean it up later
   skills/
     extract-tables/
       SKILL.md
 ```
+
+One directory serves every agent. Each one reads the manifest it knows and ignores the others.
 
 Only what applies is in there. Predicates and `depends-on` are evaluated before this directory is built, so the agent never sees a gate and never loads something it should not have.
 
@@ -102,27 +106,28 @@ Skills from a `source.git` group are fetched and resolved first, so the director
 
 The directory is written once. Agents that can be pointed at a path are pointed at it; agents that only discover plugins by location get a copy.
 
-| Agent | Format it gets | How it is given |
-|-------|----------------|-----------------|
-| VS Code / GitHub Copilot | Agent Plugins | Path registered through the plugin-locations setting |
-| Claude Code | Claude Code plugin | Registered as a local marketplace, plus an enablement entry in settings |
-| Codex CLI | Agent Plugins | Copied into `.codex/plugins/` for a project, `~/.codex/plugins/` for you |
-| Kiro | Agent Plugins | Copied into `.kiro/plugins/` |
-| Gemini CLI | Gemini extension | Copied into `~/.gemini/extensions/<name>/` |
+| Agent | Manifest it reads | How it is given | Verified against |
+|-------|-------------------|-----------------|------------------|
+| Claude Code | `.claude-plugin/plugin.json` | Registered as a local marketplace, plus an enablement entry in settings | 2.1.237 |
+| Codex CLI | `plugin.json` | A marketplace entry plus an enablement entry, which copies the package into its own cache | 0.147.0 |
+| GitHub Copilot CLI | `plugin.json` | A marketplace entry plus an enablement entry | 1.0.79 |
+| Gemini CLI | `gemini-extension.json` | Copied into `~/.gemini/extensions/<name>/`, which needs no configuration write at all | 0.55.1 |
+| VS Code | `plugin.json` | Path registered through the `chat.pluginLocations` setting, which is per-machine | |
+| Kiro | `plugin.json` | Not yet confirmed | |
 
-Claude Code and Gemini CLI use their own manifest names and their own loaders, but the directory holds the same skills.
-
-Symposium writes each agent's configuration itself rather than running that agent's own plugin install command, the same way it registers hooks.
+Symposium writes each agent's configuration itself rather than running that agent's own plugin install command, the same way it registers hooks. Some of those commands also block waiting for input, which is no use on the auto-sync path.
 
 ## Project or global
 
 An installation matches the scope of whatever enabled the plugin. A workspace `use` entry, a workspace member, or one of your dependencies installs for that project only. A `use --global` entry installs for you everywhere.
 
-Some agents cannot express a project-scoped plugin: their plugin folder is per-user and they offer no way to register a path. For those, a project-scoped plugin is installed the older way instead, as individual skill directories under the project, so that a plugin enabled in one project never shows up in another.
+Most agents cannot express a project-scoped plugin: their plugin folder is per-user and they offer no way to register a workspace path. Claude Code is currently the only one that can. For all the others, a project-scoped plugin is installed the older way instead, as individual skill directories under the project, so that a plugin enabled in one project never shows up in another.
+
+A global installation carries one extra restriction. A user-level directory is visible from every project, but a gate like `depends-on` is evaluated against the project being synced, so a plugin is installed globally only when its gate cannot vary by project. Anything else is installed per project instead, and `cargo agents status` names the scope each plugin got.
 
 ## Agents without a plugin unit
 
-OpenCode and Goose have no plugin directory to install into. OpenCode extends through TypeScript modules, and Goose through MCP servers. For these two, symposium installs skills the old way, into `.agents/skills/<skill-name>/`.
+OpenCode and Goose have no plugin directory to install into. OpenCode extends through TypeScript modules, and Goose through MCP servers. For these two, symposium installs skills the old way, into `.agents/skills/<skill-name>/`. So does every other agent for a project-scoped plugin, since only Claude Code can scope one.
 
 ## When two plugins want the same name
 

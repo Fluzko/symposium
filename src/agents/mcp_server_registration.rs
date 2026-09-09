@@ -1287,7 +1287,9 @@ mod tests {
             "/path with spaces/symposium",
         );
         assert_eq!(
-            doc["extensions"]["test-server"]["args"][0].as_str().unwrap(),
+            doc["extensions"]["test-server"]["args"][0]
+                .as_str()
+                .unwrap(),
             "--flag:value",
         );
     }

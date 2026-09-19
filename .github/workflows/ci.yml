@@ -122,8 +122,11 @@ jobs:
         shell: bash
         run: echo 'test-agents = []' > test-agents.toml
 
+      # `--no-fail-fast`: without it cargo stops at the first failing test
+      # binary, so a platform-specific failure hides every later one and each
+      # fix costs another CI round-trip to learn what is still broken.
       - name: Test
-        run: cargo test ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+        run: cargo test --no-fail-fast ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
 
   xtask:
     name: Run xtask checks

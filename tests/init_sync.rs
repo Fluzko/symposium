@@ -233,6 +233,8 @@ async fn sync_skips_invalid_skill_frontmatter() {
                 events.iter().any(|e| e
                     .get("message")
                     .and_then(|m| m.as_str())
+                    // Windows renders the path with backslashes.
+                    .map(|m| m.replace('\\', "/"))
                     .is_some_and(|m| m.contains("bad-skill/SKILL.md")
                         && m.contains("failed to parse frontmatter"))),
                 "sync should warn about the skipped invalid skill: {events:?}"

@@ -54,6 +54,7 @@ where
     use symposium::report::{ReportLayer, ReportMode};
     use tracing_subscriber::layer::SubscriberExt;
 
+    symposium_testlib::install_tracing_baseline();
     let (layer, handle) = ReportLayer::new(ReportMode::Json, tracing::Level::INFO);
     let subscriber = tracing_subscriber::registry().with(layer);
     let guard = tracing::subscriber::set_default(subscriber);

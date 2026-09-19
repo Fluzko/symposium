@@ -104,7 +104,9 @@ pub(super) type ReturnCohortScope<'a> = IdentityScope<'a, ReturnCohortAnchor>;
 ///
 /// Each schema type implements this trait for the domain it belongs to. This
 /// keeps field selection and order beside the validated value while leaving
-/// framing under the identity module's control.
+/// framing under the identity module's control. A domain with no schema value,
+/// such as retention, keeps its empty dimension here so private state can use
+/// the production encoding without depending on a row module.
 pub(super) trait IdentityDimension {
     type Domain;
 
@@ -114,6 +116,20 @@ pub(super) trait IdentityDimension {
     /// [`DimensionWriter::sequence`] for counted collections. Implementations
     /// must not add their own framing.
     fn write(&self, writer: &mut DimensionWriter<'_>);
+}
+
+/// The empty dimension used to derive a return-cohort subject.
+///
+/// A retention subject is scoped only by its return-cohort anchor. Keeping the
+/// empty dimension as a type ensures callers cannot add an accidental field to
+/// that derivation.
+pub(super) struct RetentionDimension;
+
+impl IdentityDimension for RetentionDimension {
+    type Domain = RetentionDomain;
+
+    /// Write no fields, as required by the version 1 identity contract.
+    fn write(&self, _writer: &mut DimensionWriter<'_>) {}
 }
 
 /// Writes canonical identity-dimension framing to a private byte sink.
@@ -633,14 +649,6 @@ mod tests {
         }
     }
 
-    struct TestRetentionDimension;
-
-    impl IdentityDimension for TestRetentionDimension {
-        type Domain = RetentionDomain;
-
-        fn write(&self, _writer: &mut DimensionWriter<'_>) {}
-    }
-
     struct TestNestedSequenceDimension;
 
     impl IdentityDimension for TestNestedSequenceDimension {
@@ -746,7 +754,7 @@ mod tests {
         let key = IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]);
         let identity = ReturnCohortScope::new(&key, "2026-08-03".to_owned());
 
-        let identifier = identity.derive(&TestRetentionDimension);
+        let identifier = identity.derive(&RetentionDimension);
 
         // Cross-checked with .NET's HMACSHA256 over the retention header and
         // framed cohort anchor. The complete digest is

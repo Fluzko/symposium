@@ -89,7 +89,7 @@ pub(in crate::telemetry) enum HookAgent {
 impl HookAgent {
     /// Return the frozen version 1 wire label.
     #[must_use]
-    const fn as_str(self) -> &'static str {
+    pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",

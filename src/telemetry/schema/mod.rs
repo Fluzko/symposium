@@ -7,7 +7,9 @@
 mod agent;
 mod command;
 mod extension;
+mod hook;
 mod macros;
+mod metrics;
 mod name;
 mod resolution;
 
@@ -23,6 +25,7 @@ use uuid::Uuid;
 
 use agent::{AgentConfigurationV1, SessionStartV1};
 use command::CommandV1;
+use hook::HookMetricsV1;
 use resolution::{
     ResolutionSummaryV1, extension::ExtensionResolutionV1, package::PackageResolutionV1,
 };
@@ -82,6 +85,8 @@ pub(super) enum TelemetryRow {
     ResolutionSummary(ResolutionSummaryV1),
     PackageResolution(PackageResolutionV1),
     ExtensionResolution(ExtensionResolutionV1),
+    // Box the fixed-histogram row so every enum value does not inherit its size.
+    HookMetrics(Box<HookMetricsV1>),
     Command(CommandV1),
     StorageLimit(StorageLimitV1),
 }
@@ -97,6 +102,7 @@ impl Serialize for TelemetryRow {
             Self::ResolutionSummary(row) => row.serialize(serializer),
             Self::PackageResolution(row) => row.serialize(serializer),
             Self::ExtensionResolution(row) => row.serialize(serializer),
+            Self::HookMetrics(row) => row.serialize(serializer),
             Self::Command(row) => row.serialize(serializer),
             Self::StorageLimit(row) => row.serialize(serializer),
         }
@@ -411,6 +417,9 @@ pub(super) fn classify_row(line: &str) -> RowClassification {
         }
         ("extension_resolution", 1) => {
             deserialize_supported_row(line, TelemetryRow::ExtensionResolution)
+        }
+        ("hook_metrics", 1) => {
+            deserialize_supported_row(line, |row| TelemetryRow::HookMetrics(Box::new(row)))
         }
         ("command", 1) => deserialize_supported_row(line, TelemetryRow::Command),
         ("storage_limit", 1) => deserialize_supported_row(line, TelemetryRow::StorageLimit),

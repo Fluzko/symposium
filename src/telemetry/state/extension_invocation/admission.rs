@@ -220,6 +220,21 @@ impl SelectedExtensionInvocationAggregate<'_> {
         self.bucket
     }
 
+    /// Return whether this selection belongs to the supplied recording
+    /// context, including its identifier epoch.
+    #[must_use]
+    pub(in crate::telemetry) fn matches_recording(
+        &self,
+        recording: &BoundRecordingObservation<'_>,
+    ) -> bool {
+        let key = self.session_counts.key();
+        key.day == recording.day()
+            && key.agent_subject
+                == recording
+                    .identifier_window_scope()
+                    .derive(&SupportedAgent::from(key.agent))
+    }
+
     #[must_use]
     pub(in crate::telemetry) fn session_counts(
         &mut self,
@@ -237,7 +252,7 @@ pub(in crate::telemetry) struct ExtensionInvocationAggregateStore {
 
 impl ExtensionInvocationAggregateStore {
     #[must_use]
-    pub(super) const fn new(day: UtcDay) -> Self {
+    pub(in crate::telemetry) const fn new(day: UtcDay) -> Self {
         Self {
             public_rows: DailyPublicRowBudget::new(day),
             entries: BTreeMap::new(),

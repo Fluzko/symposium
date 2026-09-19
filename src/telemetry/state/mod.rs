@@ -26,6 +26,10 @@ fn set_len<T>(sessions: &BTreeSet<T>) -> u64 {
     u64::try_from(sessions.len()).expect("BUG: usize must fit in u64 on supported targets")
 }
 
+pub(in crate::telemetry) use extension_invocation::{
+    ExtensionSessionCountBaseline, ExtensionSessionCountSnapshot, ExtensionSessionCountUpdateError,
+    SelectedExtensionInvocationAggregate,
+};
 pub(in crate::telemetry) use lifecycle::{BoundRecordingObservation, BoundSessionObservation};
 pub(in crate::telemetry) use plugin_hook::SelectedPluginHookAggregate;
 pub(in crate::telemetry) use session_counts::{
@@ -33,7 +37,10 @@ pub(in crate::telemetry) use session_counts::{
 };
 
 #[cfg(test)]
-pub(in crate::telemetry) use plugin_hook::PluginHookAggregateState;
+pub(in crate::telemetry) use {
+    extension_invocation::ExtensionInvocationAggregateStore, plugin_hook::PluginHookAggregateState,
+    public_row_budget::MAX_PUBLIC_ROWS_PER_DAY,
+};
 
 #[cfg(test)]
 pub(in crate::telemetry) const IDENTIFIER_WINDOW_TEST_STATE: &str = r#"version = 1

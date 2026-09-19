@@ -2,6 +2,11 @@
 
 mod admission;
 
+pub(in crate::telemetry) use admission::SelectedExtensionInvocationAggregate;
+
+#[cfg(test)]
+pub(in crate::telemetry) use admission::ExtensionInvocationAggregateStore;
+
 use std::{collections::BTreeSet, fmt};
 
 use crate::telemetry::{

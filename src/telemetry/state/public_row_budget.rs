@@ -5,7 +5,7 @@ use std::fmt;
 use crate::telemetry::schema::UtcDay;
 
 /// Maximum public rows one aggregate family may admit in a UTC day.
-pub(super) const MAX_PUBLIC_ROWS_PER_DAY: u64 = 128;
+pub(in crate::telemetry) const MAX_PUBLIC_ROWS_PER_DAY: u64 = 128;
 
 /// Whether a new public aggregate keeps its identity or joins overflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

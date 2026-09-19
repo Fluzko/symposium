@@ -1,5 +1,7 @@
 //! Extension-invocation aggregate row and strict read-side validation.
 
+mod update;
+
 use std::fmt;
 
 use super::{ExtensionInvocationAgent, ExtensionTargetScope, UnnamedExtensionReason};

@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::super::agent::SupportedAgent;
+use super::super::agent::{HookAgent, SupportedAgent};
 use crate::agents::Agent;
 
 /// Agent with a structured skill-invocation signal in consent version 1.
@@ -25,6 +25,14 @@ impl ExtensionInvocationAgent {
 }
 
 impl From<ExtensionInvocationAgent> for SupportedAgent {
+    fn from(agent: ExtensionInvocationAgent) -> Self {
+        match agent {
+            ExtensionInvocationAgent::Claude => Self::Claude,
+        }
+    }
+}
+
+impl From<ExtensionInvocationAgent> for HookAgent {
     fn from(agent: ExtensionInvocationAgent) -> Self {
         match agent {
             ExtensionInvocationAgent::Claude => Self::Claude,
@@ -157,6 +165,17 @@ mod tests {
         let supported_name = serde_json::to_string(&supported_agent).unwrap();
 
         assert_eq!(invocation_name, supported_name);
+    }
+
+    #[test]
+    fn extension_invocation_agent_name_matches_the_hook_agent_name() {
+        let invocation_agent = ExtensionInvocationAgent::Claude;
+        let hook_agent = HookAgent::from(invocation_agent);
+
+        let invocation_name = serde_json::to_string(&invocation_agent).unwrap();
+        let hook_name = serde_json::to_string(&hook_agent).unwrap();
+
+        assert_eq!(invocation_name, hook_name);
     }
 
     #[test]

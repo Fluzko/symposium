@@ -231,6 +231,14 @@ impl PublicPackageCoordinate {
     pub(in crate::telemetry) fn version(&self) -> &ExactPackageVersion {
         &self.version
     }
+
+    /// Write package coordinate fields in version 1 identity order.
+    pub(super) fn write_identity_fields(&self, writer: &mut DimensionWriter<'_>) {
+        let version = self.version.to_string();
+        writer.field(self.ecosystem.as_str().as_bytes());
+        writer.field(self.name.as_str().as_bytes());
+        writer.field(version.as_bytes());
+    }
 }
 
 impl IdentityDimension for PublicPackageCoordinate {
@@ -238,10 +246,7 @@ impl IdentityDimension for PublicPackageCoordinate {
 
     /// Write the version 1 `package_subject` fields in contract order.
     fn write(&self, writer: &mut DimensionWriter<'_>) {
-        let version = self.version.to_string();
-        writer.field(self.ecosystem.as_str().as_bytes());
-        writer.field(self.name.as_str().as_bytes());
-        writer.field(version.as_bytes());
+        self.write_identity_fields(writer);
     }
 }
 
@@ -325,16 +330,11 @@ impl PackageResolutionV1 {
 mod tests {
     use chrono::NaiveDate;
 
-    use super::super::super::{assert_contract_names, assert_contract_names_with_labels};
+    use super::super::super::{
+        IDENTIFIER_WINDOW_TEST_STATE, assert_contract_names, assert_contract_names_with_labels,
+    };
     use super::*;
     use crate::telemetry::{identity::encode_dimension_for_test, state::TelemetryStateV1};
-
-    const TEST_STATE: &str = r#"version = 1
-
-[identity]
-key = "4242424242424242424242424242424242424242424242424242424242424242"
-identifier-window-anchor = "2026-08-03"
-"#;
 
     fn package_name(value: &str) -> PublicPackageName {
         value.parse().unwrap()
@@ -349,7 +349,7 @@ identifier-window-anchor = "2026-08-03"
     }
 
     fn package_resolution_for(package_name: &str) -> PackageResolutionV1 {
-        let state: TelemetryStateV1 = toml::from_str(TEST_STATE).unwrap();
+        let state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
         let identity = state.identifier_window_scope();
 
         PackageResolutionV1::new(

@@ -105,6 +105,60 @@ impl fmt::Display for PublicExtensionNameError {
 
 impl std::error::Error for PublicExtensionNameError {}
 
+/// Public plugin or skill coordinate safe to place in telemetry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::telemetry) struct PublicExtensionCoordinate {
+    #[serde(rename = "type")]
+    kind: ExtensionKind,
+    source: PublicExtensionSource,
+    name: PublicExtensionName,
+}
+
+impl PublicExtensionCoordinate {
+    /// Combine validated components into one public extension coordinate.
+    #[must_use]
+    pub(in crate::telemetry) const fn new(
+        kind: ExtensionKind,
+        source: PublicExtensionSource,
+        name: PublicExtensionName,
+    ) -> Self {
+        Self { kind, source, name }
+    }
+
+    /// Validate a raw public name and combine it with its typed coordinate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `name` is outside the version 1 public extension
+    /// grammar.
+    pub(in crate::telemetry) fn try_new(
+        kind: ExtensionKind,
+        source: PublicExtensionSource,
+        name: &str,
+    ) -> Result<Self, PublicExtensionNameError> {
+        Ok(Self::new(kind, source, name.parse()?))
+    }
+
+    /// Return the public plugin or skill kind.
+    #[must_use]
+    pub(in crate::telemetry) const fn kind(&self) -> ExtensionKind {
+        self.kind
+    }
+
+    /// Return the allowlisted public source.
+    #[must_use]
+    pub(in crate::telemetry) const fn source(&self) -> PublicExtensionSource {
+        self.source
+    }
+
+    /// Return the validated public extension name.
+    #[must_use]
+    pub(in crate::telemetry) const fn name(&self) -> &PublicExtensionName {
+        &self.name
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::assert_contract_names_with_labels;
@@ -205,5 +259,75 @@ mod tests {
         let invalid = serde_json::from_str::<PublicExtensionName>(r#""extension.name""#);
 
         assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn public_extension_coordinate_round_trips_in_contract_order() {
+        let coordinate = PublicExtensionCoordinate::try_new(
+            ExtensionKind::Skill,
+            PublicExtensionSource::SymposiumRecommendations,
+            "Example-debugging_2",
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&coordinate).unwrap();
+        let decoded = serde_json::from_str::<PublicExtensionCoordinate>(&json).unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"type":"skill","source":"symposium-recommendations","name":"Example-debugging_2"}"#
+        );
+        assert_eq!(decoded, coordinate);
+    }
+
+    #[test]
+    fn public_extension_coordinate_exposes_its_validated_components() {
+        let name = "example-tools".parse::<PublicExtensionName>().unwrap();
+        let coordinate = PublicExtensionCoordinate::new(
+            ExtensionKind::Plugin,
+            PublicExtensionSource::CratesIo,
+            name.clone(),
+        );
+
+        assert_eq!(coordinate.kind(), ExtensionKind::Plugin);
+        assert_eq!(coordinate.source(), PublicExtensionSource::CratesIo);
+        assert_eq!(coordinate.name(), &name);
+    }
+
+    #[test]
+    fn public_extension_coordinate_rejects_unknown_fields() {
+        let json =
+            r#"{"type":"plugin","source":"crates-io","name":"example-tools","path":"private"}"#;
+
+        let result = serde_json::from_str::<PublicExtensionCoordinate>(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn public_extension_coordinate_requires_every_field() {
+        let json = r#"{"type":"plugin","source":"crates-io"}"#;
+
+        let result = serde_json::from_str::<PublicExtensionCoordinate>(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn public_extension_coordinate_validates_its_nested_name() {
+        let raw_result = PublicExtensionCoordinate::try_new(
+            ExtensionKind::Plugin,
+            PublicExtensionSource::CratesIo,
+            "private/plugin",
+        );
+        let json_result = serde_json::from_str::<PublicExtensionCoordinate>(
+            r#"{"type":"plugin","source":"crates-io","name":"private/plugin"}"#,
+        );
+
+        assert_eq!(
+            raw_result.unwrap_err(),
+            PublicExtensionNameError::UnsupportedCharacter
+        );
+        assert!(json_result.is_err());
     }
 }

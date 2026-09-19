@@ -1,5 +1,6 @@
 //! Schema types for resolution telemetry.
 
+pub(in crate::telemetry) mod extension;
 pub(in crate::telemetry) mod package;
 
 use std::fmt;

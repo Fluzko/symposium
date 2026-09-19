@@ -28,16 +28,17 @@ $ cargo agents telemetry status
 Telemetry: enabled (consent version 1)
   data directory:    ~/.symposium/telemetry/
   stored:            3 file(s), 28.4 KiB
-  physical lines:    71
+  physical lines:    72
   supported rows:    68
   unknown schemas:   2
+  invalid rows:      1
   malformed lines:   1
   range:             2026-08-01 through 2026-08-03
 ```
 
 Possible states are `disabled`, `consent required`, and `enabled`. `Consent required` means the config contains an earlier or unversioned opt-in; Symposium records nothing until you accept the current disclosure.
 
-Stored files/bytes and physical lines cover daily event and aggregate-metric files; they exclude `.lock`, temporary files, and sibling private `telemetry-state.toml`. Supported rows are lines the current binary recognizes by kind and schema version. Unknown and malformed lines stay on disk and remain visible through `show`. `status` never prints the secret identity key or pending keyed session sets.
+Stored files/bytes and physical lines cover daily event and aggregate-metric files; they exclude `.lock`, temporary files, and sibling private `telemetry-state.toml`. Supported rows are lines the current binary recognizes by kind and schema version and that satisfy the complete schema. An unknown schema has an unrecognized kind or version. An invalid row names a recognized schema but violates it. A malformed line has no usable `{v, kind}` JSON envelope. Unknown, invalid, and malformed lines stay on disk and remain visible through `show`. `status` never prints the secret identity key or pending keyed session sets.
 
 ## `enable`
 

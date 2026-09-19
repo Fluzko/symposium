@@ -219,9 +219,7 @@ impl Agent {
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
         };
-        let xdg_config = || {
-            env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"))
-        };
+        let xdg_config = || env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
 
         match (self, scope) {
             // Project MCP is `.mcp.json`; the user-level file is `.claude.json`.
@@ -231,7 +229,9 @@ impl Agent {
                 .unwrap_or_else(|| home.to_path_buf())
                 .join(".claude.json"),
 
-            (Agent::Gemini, McpScope::Project) => project_root.join(".gemini").join("settings.json"),
+            (Agent::Gemini, McpScope::Project) => {
+                project_root.join(".gemini").join("settings.json")
+            }
             (Agent::Gemini, McpScope::User) => home.join(".gemini").join("settings.json"),
 
             (Agent::OpenCode, McpScope::Project) => project_root.join("opencode.json"),
@@ -281,7 +281,9 @@ impl Agent {
             Agent::Claude => {
                 mcp_server_registration::register_claude_mcp_servers(&path, servers, out)
             }
-            Agent::Codex => mcp_server_registration::register_codex_mcp_servers(&path, servers, out),
+            Agent::Codex => {
+                mcp_server_registration::register_codex_mcp_servers(&path, servers, out)
+            }
             Agent::Copilot => {
                 mcp_server_registration::register_copilot_mcp_servers(&path, servers, out)
             }
@@ -289,7 +291,9 @@ impl Agent {
                 mcp_server_registration::register_gemini_mcp_servers(&path, servers, out)
             }
             Agent::Kiro => mcp_server_registration::register_kiro_mcp_servers(&path, servers, out),
-            Agent::Goose => mcp_server_registration::register_goose_mcp_servers(&path, servers, out),
+            Agent::Goose => {
+                mcp_server_registration::register_goose_mcp_servers(&path, servers, out)
+            }
             Agent::OpenCode => {
                 mcp_server_registration::register_opencode_mcp_servers(&path, servers, out)
             }
@@ -310,7 +314,9 @@ impl Agent {
             Agent::Claude => {
                 mcp_server_registration::unregister_claude_mcp_servers(&path, names, out)
             }
-            Agent::Codex => mcp_server_registration::unregister_codex_mcp_servers(&path, names, out),
+            Agent::Codex => {
+                mcp_server_registration::unregister_codex_mcp_servers(&path, names, out)
+            }
             Agent::Copilot => {
                 mcp_server_registration::unregister_copilot_mcp_servers(&path, names, out)
             }
@@ -318,7 +324,9 @@ impl Agent {
                 mcp_server_registration::unregister_gemini_mcp_servers(&path, names, out)
             }
             Agent::Kiro => mcp_server_registration::unregister_kiro_mcp_servers(&path, names, out),
-            Agent::Goose => mcp_server_registration::unregister_goose_mcp_servers(&path, names, out),
+            Agent::Goose => {
+                mcp_server_registration::unregister_goose_mcp_servers(&path, names, out)
+            }
             Agent::OpenCode => {
                 mcp_server_registration::unregister_opencode_mcp_servers(&path, names, out)
             }
@@ -1049,7 +1057,11 @@ mod tests {
         let project = Path::new("/project");
         let home = Path::new("/home/user");
         let cases = [
-            (Agent::Claude, "/project/.mcp.json", "/home/user/.claude.json"),
+            (
+                Agent::Claude,
+                "/project/.mcp.json",
+                "/home/user/.claude.json",
+            ),
             (
                 Agent::Gemini,
                 "/project/.gemini/settings.json",
@@ -1149,13 +1161,13 @@ mod tests {
             if agent == Agent::Gemini {
                 continue;
             }
-            for (scope, root) in [
-                (McpScope::Project, project),
-                (McpScope::User, home),
-            ] {
+            for (scope, root) in [(McpScope::Project, project), (McpScope::User, home)] {
                 let mcp = agent.mcp_config_path(scope, project, home);
                 for hooks in hook_paths_for(agent, root) {
-                    assert_ne!(mcp, hooks, "{agent:?} {scope:?} writes MCP into its hooks file");
+                    assert_ne!(
+                        mcp, hooks,
+                        "{agent:?} {scope:?} writes MCP into its hooks file"
+                    );
                 }
             }
         }

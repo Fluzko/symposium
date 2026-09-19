@@ -3,12 +3,20 @@
     not(test),
     expect(dead_code, reason = "the new schema is built before storage uses it.")
 )]
+
+mod agent;
+
 use std::{fmt, num::NonZeroU64, sync::LazyLock};
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Timelike, Utc};
 use semver::Version;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{DeserializeOwned, Error as _},
+};
 use uuid::Uuid;
+
+use agent::{AgentConfigurationV1, SessionStartV1};
 
 /// Random identifier for one telemetry row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -60,6 +68,8 @@ pub(super) enum RowClassification {
 /// Telemetry row understood by this version of Symposium.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TelemetryRow {
+    SessionStart(SessionStartV1),
+    AgentConfiguration(AgentConfigurationV1),
     StorageLimit(StorageLimitV1),
 }
 
@@ -69,6 +79,8 @@ impl Serialize for TelemetryRow {
         S: Serializer,
     {
         match self {
+            Self::SessionStart(row) => row.serialize(serializer),
+            Self::AgentConfiguration(row) => row.serialize(serializer),
             Self::StorageLimit(row) => row.serialize(serializer),
         }
     }
@@ -360,17 +372,32 @@ pub(super) enum DroppedOperation {
 }
 
 /// Classify a physical JSONL line and return typed data only for a known schema.
+///
+/// This is the only supported entry point for reading typed rows. Individual
+/// versioned row types assume the envelope dispatch has already matched their
+/// `kind` and must not be deserialized directly.
 pub(super) fn classify_row(line: &str) -> RowClassification {
     let Ok(envelope) = serde_json::from_str::<RowEnvelope>(line) else {
         return RowClassification::Malformed;
     };
 
     match (envelope.kind.as_str(), envelope.version) {
-        ("storage_limit", 1) => match serde_json::from_str(line) {
-            Ok(row) => RowClassification::Supported(TelemetryRow::StorageLimit(row)),
-            Err(_) => RowClassification::Invalid,
-        },
+        ("session_start", 1) => deserialize_supported_row(line, TelemetryRow::SessionStart),
+        ("agent_configuration", 1) => {
+            deserialize_supported_row(line, TelemetryRow::AgentConfiguration)
+        }
+        ("storage_limit", 1) => deserialize_supported_row(line, TelemetryRow::StorageLimit),
         _ => RowClassification::UnknownSchema,
+    }
+}
+
+fn deserialize_supported_row<T>(line: &str, wrap: fn(T) -> TelemetryRow) -> RowClassification
+where
+    T: DeserializeOwned,
+{
+    match serde_json::from_str(line) {
+        Ok(row) => RowClassification::Supported(wrap(row)),
+        Err(_) => RowClassification::Invalid,
     }
 }
 
@@ -703,6 +730,70 @@ mod tests {
         // Compared as text, not as `Value`: a `Value` map sorts its keys, which
         // would stop this from pinning the contract's field order.
         assert_eq!(serde_json::to_string(&row).unwrap(), example);
+    }
+
+    #[test]
+    fn session_start_example_round_trips() {
+        let example = example_row("session_start");
+
+        let RowClassification::Supported(row) = classify_row(example) else {
+            panic!("session_start contract example was not classified as supported");
+        };
+
+        // Compared as text, not as `Value`: a `Value` map sorts its keys, which
+        // would stop this from pinning the contract's field order.
+        assert_eq!(serde_json::to_string(&row).unwrap(), example);
+    }
+
+    #[test]
+    fn unsupported_session_start_version_is_unknown_schema() {
+        let example = example_row("session_start");
+        let json = example.replacen(r#""v":1"#, r#""v":2"#, 1);
+
+        let classification = classify_row(&json);
+
+        assert_eq!(classification, RowClassification::UnknownSchema);
+    }
+
+    #[test]
+    fn session_start_with_unknown_field_is_invalid() {
+        let example = example_row("session_start");
+        let json = example.replacen(r#""agent""#, r#""future_field":true,"agent""#, 1);
+
+        let classification = classify_row(&json);
+
+        assert_eq!(classification, RowClassification::Invalid);
+    }
+
+    #[test]
+    fn agent_configuration_example_round_trips() {
+        let example = example_row("agent_configuration");
+
+        let RowClassification::Supported(row) = classify_row(example) else {
+            panic!("agent_configuration contract example was not classified as supported");
+        };
+
+        assert_eq!(serde_json::to_string(&row).unwrap(), example);
+    }
+
+    #[test]
+    fn unsupported_agent_configuration_version_is_unknown_schema() {
+        let example = example_row("agent_configuration");
+        let json = example.replacen(r#""v":1"#, r#""v":2"#, 1);
+
+        let classification = classify_row(&json);
+
+        assert_eq!(classification, RowClassification::UnknownSchema);
+    }
+
+    #[test]
+    fn agent_configuration_with_unknown_field_is_invalid() {
+        let example = example_row("agent_configuration");
+        let json = example.replacen(r#""configured""#, r#""future_field":true,"configured""#, 1);
+
+        let classification = classify_row(&json);
+
+        assert_eq!(classification, RowClassification::Invalid);
     }
 
     #[test]

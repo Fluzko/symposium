@@ -365,6 +365,7 @@ This design accepts the following costs and limits:
 
 - Opt-in measurements describe participating installations, not the complete user population. Reports must state this selection bias.
 - A completed skill activation does not prove that the skill was followed or improved the task. Version 1 also obtains structured skill-use observations only from Claude.
+- `os` and `arch` describe the Symposium binary's compilation target, not physical hardware or a host outside a compatibility layer. An `x86_64` binary running under Rosetta records `x86_64`, and a Linux binary under WSL records `linux`.
 - Scoped pseudonyms do not make a local directory anonymous. File/day/order and one buffered sync can expose co-occurrence; unusual public versions, public skill-use counts, agent/platform combinations, and exact counts can fingerprint an installation.
 - Best-effort recording undercounts activity. Busy multi-agent sessions contend more, terminated hooks lose final observations, and unsupported agents have configuration but not session or skill-invocation observations. A failure may also prevent writing a durable dropped-update counter, so the missing data cannot be measured completely.
 - Recording performs bounded in-process work and one non-waiting lock attempt. It does not promise zero latency, although failure and contention never change the user operation's result.

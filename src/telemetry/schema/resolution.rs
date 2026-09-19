@@ -1,5 +1,7 @@
 //! Schema types for resolution telemetry.
 
+pub(in crate::telemetry) mod package;
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -38,22 +40,6 @@ pub(in crate::telemetry) enum ResolutionOutcome {
     Ok,
     Partial,
     Error,
-}
-
-/// Public package ecosystem approved for version 1 telemetry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(in crate::telemetry) enum PackageEcosystem {
-    Cargo,
-}
-
-/// Kind of extension content contributed by one public package.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(in crate::telemetry) enum ExtensionMatch {
-    Public,
-    UnnamedOnly,
-    None,
 }
 
 /// One reason that a package coordinate cannot be named.
@@ -534,48 +520,14 @@ mod tests {
     }
 
     #[test]
-    fn package_ecosystems_round_trip_with_contract_names() {
-        let cases = [(PackageEcosystem::Cargo, "cargo")];
-
-        for (ecosystem, name) in cases {
-            let json = serde_json::to_string(&ecosystem).unwrap();
-            let decoded = serde_json::from_str::<PackageEcosystem>(&json).unwrap();
-
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, ecosystem);
-        }
-    }
-
-    #[test]
-    fn extension_matches_round_trip_with_contract_names() {
-        let cases = [
-            (ExtensionMatch::Public, "public"),
-            (ExtensionMatch::UnnamedOnly, "unnamed_only"),
-            (ExtensionMatch::None, "none"),
-        ];
-
-        for (extension_match, name) in cases {
-            let json = serde_json::to_string(&extension_match).unwrap();
-            let decoded = serde_json::from_str::<ExtensionMatch>(&json).unwrap();
-
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, extension_match);
-        }
-    }
-
-    #[test]
     fn resolution_vocabulary_rejects_unknown_contract_names() {
         let unknown = r#""future_value""#;
 
         let trigger = serde_json::from_str::<ResolutionTrigger>(unknown);
         let outcome = serde_json::from_str::<ResolutionOutcome>(unknown);
-        let ecosystem = serde_json::from_str::<PackageEcosystem>(unknown);
-        let extension_match = serde_json::from_str::<ExtensionMatch>(unknown);
 
         assert!(trigger.is_err());
         assert!(outcome.is_err());
-        assert!(ecosystem.is_err());
-        assert!(extension_match.is_err());
     }
 
     #[test]

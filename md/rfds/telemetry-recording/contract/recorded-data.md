@@ -188,12 +188,16 @@ This row records one eligible public package used as resolution input during a f
 | Field               | Values                  | Meaning                                                              |
 | ------------------- | ----------------------- | -------------------------------------------------------------------- |
 | `package.ecosystem` | `cargo`                  | Stable public ecosystem label.                                       |
-| `package.name`      | validated string        | Public package name.                                                 |
+| `package.name`      | validated string        | Public package name using the fixed version 1 grammar.               |
 | `package.version`   | validated exact version | Exact resolved public version, never a range or `*`.                 |
 | `extension_match`   | `public`, `unnamed_only`, `none` | What kind of resolved extension, if any, the package contributed to. |
 | `package_subject`   | scoped id               | Deduplicates this exact coordinate for 30 days.                      |
 
 A package is named only when its package manager reports provenance matching a reviewed public-registry allowlist. Registry URLs themselves are not recorded.
+
+The version 1 package-name grammar is 1 through 64 ASCII bytes. The first byte is an ASCII letter; the remaining bytes are ASCII letters, digits, `-`, or `_`. Symposium preserves the spelling without case folding or treating hyphens and underscores as equivalent. This stable telemetry grammar does not copy a registry's changing reserved-name list.
+
+An exact package version has three numeric semantic-version components and may include prerelease or build metadata. Missing versions, ranges, and wildcards are invalid coordinates.
 
 `extension_match` describes what the package contributed:
 

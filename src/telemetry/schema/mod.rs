@@ -18,7 +18,7 @@ use serde::{
 use uuid::Uuid;
 
 use agent::{AgentConfigurationV1, SessionStartV1};
-use resolution::ResolutionSummaryV1;
+use resolution::{ResolutionSummaryV1, package::PackageResolutionV1};
 
 /// Random identifier for one telemetry row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -73,6 +73,7 @@ pub(super) enum TelemetryRow {
     SessionStart(SessionStartV1),
     AgentConfiguration(AgentConfigurationV1),
     ResolutionSummary(ResolutionSummaryV1),
+    PackageResolution(PackageResolutionV1),
     StorageLimit(StorageLimitV1),
 }
 
@@ -85,6 +86,7 @@ impl Serialize for TelemetryRow {
             Self::SessionStart(row) => row.serialize(serializer),
             Self::AgentConfiguration(row) => row.serialize(serializer),
             Self::ResolutionSummary(row) => row.serialize(serializer),
+            Self::PackageResolution(row) => row.serialize(serializer),
             Self::StorageLimit(row) => row.serialize(serializer),
         }
     }
@@ -392,6 +394,9 @@ pub(super) fn classify_row(line: &str) -> RowClassification {
         }
         ("resolution_summary", 1) => {
             deserialize_supported_row(line, TelemetryRow::ResolutionSummary)
+        }
+        ("package_resolution", 1) => {
+            deserialize_supported_row(line, TelemetryRow::PackageResolution)
         }
         ("storage_limit", 1) => deserialize_supported_row(line, TelemetryRow::StorageLimit),
         _ => RowClassification::UnknownSchema,
@@ -804,6 +809,47 @@ mod tests {
         };
 
         assert_eq!(serde_json::to_string(&row).unwrap(), example);
+    }
+
+    #[test]
+    fn package_resolution_example_round_trips() {
+        let example = example_row("package_resolution");
+
+        let RowClassification::Supported(row) = classify_row(example) else {
+            panic!("package_resolution contract example was not classified as supported");
+        };
+
+        assert_eq!(serde_json::to_string(&row).unwrap(), example);
+    }
+
+    #[test]
+    fn unsupported_package_resolution_version_is_unknown_schema() {
+        let example = example_row("package_resolution");
+        let json = example.replacen(r#""v":1"#, r#""v":2"#, 1);
+
+        let classification = classify_row(&json);
+
+        assert_eq!(classification, RowClassification::UnknownSchema);
+    }
+
+    #[test]
+    fn package_resolution_with_unknown_field_is_invalid() {
+        let example = example_row("package_resolution");
+        let json = example.replacen(r#""package""#, r#""future_field":true,"package""#, 1);
+
+        let classification = classify_row(&json);
+
+        assert_eq!(classification, RowClassification::Invalid);
+    }
+
+    #[test]
+    fn package_resolution_with_invalid_coordinate_is_invalid() {
+        let example = example_row("package_resolution");
+        let json = example.replacen(r#""version":"1.2.3""#, r#""version":"*""#, 1);
+
+        let classification = classify_row(&json);
+
+        assert_eq!(classification, RowClassification::Invalid);
     }
 
     #[test]

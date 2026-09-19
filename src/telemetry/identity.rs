@@ -70,29 +70,55 @@ impl<'a> IdentityWindow<'a> {
     }
 }
 
-/// Canonically framed dimension fields belonging to domain `D`.
+/// A typed value that supplies one identifier domain's canonical fields.
 ///
-/// Domain-specific constructors will own field selection and order. Telemetry
-/// producers never concatenate dimension strings themselves.
-struct ScopedDimension<D> {
-    encoded_fields: Vec<u8>,
-    domain: PhantomData<D>,
+/// Each schema type implements this trait for the domain it belongs to. This
+/// keeps field selection and order beside the validated value while leaving
+/// framing under the identity module's control.
+pub(super) trait IdentityDimension {
+    type Domain;
+
+    fn write(&self, writer: &mut DimensionWriter<'_>);
+}
+
+/// Writes canonical identity-dimension framing to a private byte sink.
+///
+/// Only this module can create a writer. Schema types can use its structured
+/// operations from an [`IdentityDimension`] implementation, but telemetry
+/// producers cannot construct dimensions from loose byte slices.
+pub(super) struct DimensionWriter<'a> {
+    write: &'a mut dyn FnMut(&[u8]),
+}
+
+impl<'a> DimensionWriter<'a> {
+    fn new(write: &'a mut dyn FnMut(&[u8])) -> Self {
+        Self { write }
+    }
+
+    /// Write one length-prefixed field.
+    pub(super) fn field(&mut self, value: &[u8]) {
+        write_frame(value, |bytes| (self.write)(bytes));
+    }
+
+    /// Write a counted sequence whose items own their recursive encoding.
+    pub(super) fn sequence<T>(&mut self, items: &[T], mut write_item: impl FnMut(&mut Self, &T)) {
+        let count = u64::try_from(items.len())
+            .expect("BUG: a slice length must fit the telemetry sequence format");
+        (self.write)(&count.to_be_bytes());
+
+        for item in items {
+            write_item(self, item);
+        }
+    }
 }
 
 #[cfg(test)]
-impl<D> ScopedDimension<D> {
-    #[must_use]
-    fn from_fields<'a>(fields: impl IntoIterator<Item = &'a [u8]>) -> Self {
-        let mut encoded_fields = Vec::new();
-        for field in fields {
-            write_frame(field, |bytes| encoded_fields.extend_from_slice(bytes));
-        }
-
-        Self {
-            encoded_fields,
-            domain: PhantomData,
-        }
-    }
+pub(super) fn encode_dimension_for_test(dimension: &impl IdentityDimension) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    let mut append = |bytes: &[u8]| encoded.extend_from_slice(bytes);
+    let mut writer = DimensionWriter::new(&mut append);
+    dimension.write(&mut writer);
+    encoded
 }
 
 /// A 128-bit telemetry identifier belonging to domain `D`.
@@ -176,17 +202,20 @@ impl IdentityDeriver {
 
     /// Derive an identifier from a canonical window and domain-specific fields.
     #[must_use]
-    fn derive<D>(&self, window: &IdentityWindow<'_>, dimension: &ScopedDimension<D>) -> ScopedId<D>
+    fn derive<I>(&self, window: &IdentityWindow<'_>, dimension: &I) -> ScopedId<I::Domain>
     where
-        D: ScopedIdDomain,
+        I: IdentityDimension,
+        I::Domain: ScopedIdDomain,
     {
         let mut hmac = HmacSha256::new_from_slice(&self.key.0)
             .expect("BUG: HMAC-SHA-256 must accept a 32-byte key");
         hmac.update(b"telemetry:");
-        hmac.update(D::HMAC_DOMAIN.as_bytes());
+        hmac.update(I::Domain::HMAC_DOMAIN.as_bytes());
         hmac.update(b":v1\0");
         write_frame(window.0, |bytes| hmac.update(bytes));
-        hmac.update(&dimension.encoded_fields);
+        let mut update = |bytes: &[u8]| hmac.update(bytes);
+        let mut writer = DimensionWriter::new(&mut update);
+        dimension.write(&mut writer);
 
         let digest = hmac.finalize().into_bytes();
         let mut bytes = [0; IDENTIFIER_BYTES];
@@ -492,6 +521,43 @@ mod tests {
         const HMAC_DOMAIN: &'static str = "test_subject";
     }
 
+    struct TestDimension<D> {
+        fields: Vec<&'static [u8]>,
+        domain: PhantomData<D>,
+    }
+
+    impl<D> TestDimension<D> {
+        fn from_fields<const N: usize>(fields: [&'static [u8]; N]) -> Self {
+            Self {
+                fields: fields.into_iter().collect(),
+                domain: PhantomData,
+            }
+        }
+    }
+
+    impl<D> IdentityDimension for TestDimension<D> {
+        type Domain = D;
+
+        fn write(&self, writer: &mut DimensionWriter<'_>) {
+            for field in &self.fields {
+                writer.field(field);
+            }
+        }
+    }
+
+    struct TestSequenceDimension;
+
+    impl IdentityDimension for TestSequenceDimension {
+        type Domain = TestDomain;
+
+        fn write(&self, writer: &mut DimensionWriter<'_>) {
+            let items = [b"a".as_slice(), b"bc".as_slice()];
+
+            writer.field(b"root");
+            writer.sequence(&items, |writer, item| writer.field(item));
+        }
+    }
+
     /// Reads the first identifier the contract spells with `prefix`.
     fn contract_identifier(prefix: &str) -> &'static str {
         let opening_quote = RECORDED_DATA
@@ -551,7 +617,7 @@ mod tests {
         let key = IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]);
         let deriver = IdentityDeriver::new(key);
         let window = IdentityWindow::from_bytes(b"window-1");
-        let dimension = ScopedDimension::<SessionDomain>::from_fields([b"dimension-1".as_slice()]);
+        let dimension = TestDimension::<SessionDomain>::from_fields([b"dimension-1".as_slice()]);
 
         let identifier = deriver.derive(&window, &dimension);
 
@@ -569,7 +635,7 @@ mod tests {
         let key = IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]);
         let deriver = IdentityDeriver::new(key);
         let window = IdentityWindow::from_bytes(b"window-1");
-        let dimension = ScopedDimension::<SessionDomain>::from_fields([b"dimension-1".as_slice()]);
+        let dimension = TestDimension::<SessionDomain>::from_fields([b"dimension-1".as_slice()]);
 
         let first = deriver.derive(&window, &dimension);
         let second = deriver.derive(&window, &dimension);
@@ -581,9 +647,9 @@ mod tests {
     fn length_framing_separates_nul_at_different_boundaries() {
         let deriver = IdentityDeriver::new(IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]));
         let first_window = IdentityWindow::from_bytes(b"a\0b");
-        let first_dimension = ScopedDimension::<SessionDomain>::from_fields([b"c".as_slice()]);
+        let first_dimension = TestDimension::<SessionDomain>::from_fields([b"c".as_slice()]);
         let second_window = IdentityWindow::from_bytes(b"a");
-        let second_dimension = ScopedDimension::<SessionDomain>::from_fields([b"b\0c".as_slice()]);
+        let second_dimension = TestDimension::<SessionDomain>::from_fields([b"b\0c".as_slice()]);
 
         let first = deriver.derive(&first_window, &first_dimension);
         let second = deriver.derive(&second_window, &second_dimension);
@@ -595,12 +661,12 @@ mod tests {
     fn length_framing_separates_dimension_field_boundaries() {
         let deriver = IdentityDeriver::new(IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]));
         let window = IdentityWindow::from_bytes(b"window-1");
-        let first_dimension = ScopedDimension::<PackageDomain>::from_fields([
+        let first_dimension = TestDimension::<PackageDomain>::from_fields([
             b"cargo".as_slice(),
             b"foo1".as_slice(),
             b"2.3.4".as_slice(),
         ]);
-        let second_dimension = ScopedDimension::<PackageDomain>::from_fields([
+        let second_dimension = TestDimension::<PackageDomain>::from_fields([
             b"cargo".as_slice(),
             b"foo".as_slice(),
             b"12.3.4".as_slice(),
@@ -613,6 +679,28 @@ mod tests {
     }
 
     #[test]
+    fn dimension_writer_encodes_counted_sequences_recursively() {
+        let root_length = 4_u64.to_be_bytes();
+        let item_count = 2_u64.to_be_bytes();
+        let first_item_length = 1_u64.to_be_bytes();
+        let second_item_length = 2_u64.to_be_bytes();
+        let expected = [
+            root_length.as_slice(),
+            b"root".as_slice(),
+            item_count.as_slice(),
+            first_item_length.as_slice(),
+            b"a".as_slice(),
+            second_item_length.as_slice(),
+            b"bc".as_slice(),
+        ]
+        .concat();
+
+        let encoded = encode_dimension_for_test(&TestSequenceDimension);
+
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
     fn changing_any_derivation_scope_changes_the_identifier() {
         let deriver = IdentityDeriver::new(IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]));
         let other_deriver =
@@ -620,11 +708,11 @@ mod tests {
         let first_window = IdentityWindow::from_bytes(b"window-1");
         let second_window = IdentityWindow::from_bytes(b"window-2");
         let session_dimension =
-            ScopedDimension::<SessionDomain>::from_fields([b"dimension-1".as_slice()]);
+            TestDimension::<SessionDomain>::from_fields([b"dimension-1".as_slice()]);
         let other_session_dimension =
-            ScopedDimension::<SessionDomain>::from_fields([b"dimension-2".as_slice()]);
+            TestDimension::<SessionDomain>::from_fields([b"dimension-2".as_slice()]);
         let command_dimension =
-            ScopedDimension::<CommandDomain>::from_fields([b"dimension-1".as_slice()]);
+            TestDimension::<CommandDomain>::from_fields([b"dimension-1".as_slice()]);
 
         // Different domain markers produce different identifier types, so use
         // their shared byte representation for this one collection.

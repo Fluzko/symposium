@@ -2438,6 +2438,8 @@ dependencies = [
  "dirs",
  "expect-test",
  "flate2",
+ "getrandom 0.4.2",
+ "hmac",
  "home",
  "indoc",
  "regex",

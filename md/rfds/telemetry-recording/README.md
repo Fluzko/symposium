@@ -175,13 +175,9 @@ Agent and package-manager payloads provide input to existing Symposium operation
 
 When enabled recording first needs identity state, Symposium atomically creates a random 32-byte key in private `<config-dir>/telemetry-state.toml` (default `~/.symposium/telemetry-state.toml`). This file is separate from the inspectable `<config-dir>/telemetry/` data directory. Symposium creates and replaces it with owner-only permissions where the platform supports them.
 
-Identifiers use the first 128 bits of HMAC-SHA-256 over a domain, locally anchored 30-day window, and exact dimension:
+Identifiers use the first 128 bits of HMAC-SHA-256 over a frozen domain, locally anchored 30-day window, and length-framed dimension fields. The [data contract](contract/recorded-data.md#derivation-format) fixes the byte construction, domain strings, prefixes, and field order.
 
-```text
-HMAC(key, "telemetry:<domain>:v1\0" || window || "\0" || dimension)
-```
-
-The dimension limits what an identifier can link. It represents one installation for one package, agent, or command dimension, never the installation globally.
+The dimension limits what an identifier can link. Identity code constructs it from typed coordinates; producers do not concatenate strings. It represents one installation for one package, agent, or command dimension, never the installation globally.
 
 Private state keeps the identity key and the current identifier-window and return-cohort anchors. Every recorder reads that state under the telemetry lock, so the same domain, window, and dimension produce the same subject across processes and restarts.
 

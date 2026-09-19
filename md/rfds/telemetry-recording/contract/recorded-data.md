@@ -49,6 +49,42 @@ Normal 30-day rollover changes the window input without replacing the key. Renew
 
 This file is separate from the inspectable `<config-dir>/telemetry/` data directory and has owner-only permissions where the platform supports them. The key is private state, not anonymized telemetry. It is not written into events, printed by telemetry commands, or derived from your machine. Someone who has the key can recompute candidate identifiers.
 
+The implementation prevents accidental formatting or serialization of the key. It does not promise to scrub every in-memory copy: the security boundary is the private state file and keeping the key out of telemetry and diagnostics.
+
+### Derivation format
+
+Version 1 uses the first 128 bits of HMAC-SHA-256. Each variable-length window or dimension value has an eight-byte unsigned big-endian byte length followed by its bytes:
+
+```text
+frame(value) = u64_be(byte_length(value)) || value
+
+HMAC(
+    key,
+    "telemetry:<domain>:v1\0"
+    || frame(window)
+    || frame(dimension field 1)
+    || frame(dimension field 2)
+    || ...
+)
+```
+
+The window is the canonical byte form of the relevant anchor in `telemetry-state.toml`. Dimension fields use the exact UTF-8 bytes of their stable labels and validated strings, without case folding or Unicode normalization. Length framing keeps field boundaries unambiguous even when a value contains a NUL byte. Domains with no dimension fields end after the framed window.
+
+The domain strings, wire prefixes, and ordered dimension fields are frozen for consent version 1:
+
+| Identifier | HMAC domain | Wire prefix | Ordered dimension fields |
+| --- | --- | --- | --- |
+| `session_id` | `session_id` | `sess_` | Agent, vendor session id. |
+| `retention_subject` | `retention_subject` | `ret_` | None; the return-cohort anchor is the window. |
+| `agent_subject` | `agent_subject` | `agt_` | Agent. |
+| `package_subject` | `package_subject` | `pkg_` | Package ecosystem, name, exact version. |
+| `extension_subject` | `extension_subject` | `ext_` | Target type, source, name, then the complete safe resolution path. |
+| `hook_subject` | `hook_subject` | `hok_` | Agent, hook surface. |
+| `plugin_subject` | `plugin_subject` | `plg_` | Public source, plugin name. |
+| `command_subject` | `command_subject` | `cmd_` | Command type, then its typed coordinate fields in event order. |
+
+Structured values such as an extension path use the same framing recursively. A sequence starts with its eight-byte unsigned big-endian item count. Each variant starts with its framed type label, followed by its fields in the order used by the corresponding event schema. Identity code owns this encoding; telemetry producers pass typed coordinates rather than concatenating strings.
+
 ### What identifiers can link
 
 Symposium derives each identifier for one narrow purpose:

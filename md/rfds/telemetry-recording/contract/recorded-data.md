@@ -390,7 +390,7 @@ This row records one completed eligible top-level user command.
 
 Arguments are never recorded. Internal `hook`, all `telemetry` commands, and ineligible external/plugin commands do not produce command events.
 
-Built-in names are `init`, `sync`, `search`, `use`, `status`, `plugin_sync`, `plugin_list`, `plugin_show`, `plugin_validate`, `self_update`, and `crate_info`:
+Built-in command operations are `init`, `sync`, `search`, `use`, `remove`, `status`, `plugin_sync`, `plugin_list`, `plugin_show`, `plugin_validate`, `self_update`, and `crate_info`. `remove` is the telemetry name for `cargo agents use --remove`; it is not a separate CLI subcommand.
 
 ```json
 {"type":"builtin","name":"use"}
@@ -401,6 +401,8 @@ An eligible plugin command contains only its reviewed public-source label, publi
 ```json
 {"type":"plugin","source":"symposium-recommendations","plugin":"example-tools","name":"example-check"}
 ```
+
+Public plugin-command names use a fixed version 1 grammar: 1 through 64 ASCII bytes, beginning with an ASCII letter or digit, followed by ASCII letters, digits, `-`, or `_`. Symposium preserves the spelling without case folding or Unicode normalization. A plugin command outside this telemetry grammar remains usable but does not produce a command event.
 
 ### `storage_limit`
 

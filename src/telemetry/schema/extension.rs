@@ -1,12 +1,8 @@
 //! Public extension vocabulary shared by telemetry rows.
 
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 
-use super::name::{
-    InitialByteRule, PublicNameViolation, validate_public_name, validated_string_newtype,
-};
+use super::name::{InitialByteRule, validated_string_newtype};
 
 const MAX_PUBLIC_EXTENSION_NAME_BYTES: usize = 64;
 
@@ -52,58 +48,13 @@ validated_string_newtype! {
     /// Public plugin or skill name accepted by the version 1 telemetry contract.
     pub(in crate::telemetry) struct PublicExtensionName {
         error = PublicExtensionNameError;
-        validate = validate_public_extension_name;
+        maximum_bytes = MAX_PUBLIC_EXTENSION_NAME_BYTES;
+        initial_byte_rule = InitialByteRule::Alphanumeric;
+        invalid_initial = NonAlphanumericFirstCharacter;
+        noun = "public extension name";
         as_str_doc = "Return the validated extension name without changing its spelling.";
     }
 }
-
-fn validate_public_extension_name(value: &str) -> Result<(), PublicExtensionNameError> {
-    validate_public_name(
-        value,
-        MAX_PUBLIC_EXTENSION_NAME_BYTES,
-        InitialByteRule::Alphanumeric,
-    )
-    .map_err(PublicExtensionNameError::from)
-}
-
-/// Reason an extension name cannot enter public telemetry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::telemetry) enum PublicExtensionNameError {
-    Empty,
-    TooLong,
-    NonAlphanumericFirstCharacter,
-    UnsupportedCharacter,
-}
-
-impl From<PublicNameViolation> for PublicExtensionNameError {
-    fn from(violation: PublicNameViolation) -> Self {
-        match violation {
-            PublicNameViolation::Empty => Self::Empty,
-            PublicNameViolation::TooLong => Self::TooLong,
-            PublicNameViolation::InvalidInitialByte => Self::NonAlphanumericFirstCharacter,
-            PublicNameViolation::UnsupportedCharacter => Self::UnsupportedCharacter,
-        }
-    }
-}
-
-impl fmt::Display for PublicExtensionNameError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("public extension name must not be empty"),
-            Self::TooLong => write!(
-                formatter,
-                "public extension name exceeds {MAX_PUBLIC_EXTENSION_NAME_BYTES} bytes"
-            ),
-            Self::NonAlphanumericFirstCharacter => formatter
-                .write_str("public extension name must start with an ASCII letter or digit"),
-            Self::UnsupportedCharacter => formatter.write_str(
-                "public extension name may contain only ASCII letters, digits, hyphens, and underscores",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for PublicExtensionNameError {}
 
 /// Public plugin or skill coordinate safe to place in telemetry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

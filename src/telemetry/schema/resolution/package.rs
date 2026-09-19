@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::super::{
     EventId, RowKind, SchemaVersion, SymposiumVersion, UtcDay, deserialize_version_one,
-    name::{InitialByteRule, PublicNameViolation, validate_public_name, validated_string_newtype},
+    name::{InitialByteRule, validated_string_newtype},
 };
 use crate::telemetry::identity::{
     DimensionWriter, IdentifierWindowScope, IdentityDimension, PackageDomain, PackageSubject,
@@ -44,59 +44,13 @@ validated_string_newtype! {
     /// Public package name accepted by the version 1 telemetry contract.
     pub(in crate::telemetry) struct PublicPackageName {
         error = PublicPackageNameError;
-        validate = validate_public_package_name;
+        maximum_bytes = MAX_PUBLIC_PACKAGE_NAME_BYTES;
+        initial_byte_rule = InitialByteRule::Alphabetic;
+        invalid_initial = NonAlphabeticFirstCharacter;
+        noun = "public package name";
         as_str_doc = "Return the validated package name.";
     }
 }
-
-fn validate_public_package_name(value: &str) -> Result<(), PublicPackageNameError> {
-    validate_public_name(
-        value,
-        MAX_PUBLIC_PACKAGE_NAME_BYTES,
-        InitialByteRule::Alphabetic,
-    )
-    .map_err(PublicPackageNameError::from)
-}
-
-/// Reason a package name cannot enter public telemetry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::telemetry) enum PublicPackageNameError {
-    Empty,
-    TooLong,
-    NonAlphabeticFirstCharacter,
-    UnsupportedCharacter,
-}
-
-impl From<PublicNameViolation> for PublicPackageNameError {
-    fn from(violation: PublicNameViolation) -> Self {
-        match violation {
-            PublicNameViolation::Empty => Self::Empty,
-            PublicNameViolation::TooLong => Self::TooLong,
-            PublicNameViolation::InvalidInitialByte => Self::NonAlphabeticFirstCharacter,
-            PublicNameViolation::UnsupportedCharacter => Self::UnsupportedCharacter,
-        }
-    }
-}
-
-impl fmt::Display for PublicPackageNameError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("public package name must not be empty"),
-            Self::TooLong => write!(
-                formatter,
-                "public package name exceeds {MAX_PUBLIC_PACKAGE_NAME_BYTES} bytes"
-            ),
-            Self::NonAlphabeticFirstCharacter => {
-                formatter.write_str("public package name must start with an ASCII letter")
-            }
-            Self::UnsupportedCharacter => formatter.write_str(
-                "public package name may contain only ASCII letters, digits, hyphens, and underscores",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for PublicPackageNameError {}
 
 /// Exact semantic version attached to a public package coordinate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

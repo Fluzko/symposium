@@ -5,6 +5,7 @@
 )]
 
 mod agent;
+mod command;
 mod extension;
 mod name;
 mod resolution;
@@ -436,12 +437,25 @@ identifier-window-anchor = "2026-08-03"
 
 #[cfg(test)]
 fn recorded_data_example_block(section_heading: &str, opening_fence: &str) -> &'static str {
+    recorded_data_example_block_at(section_heading, opening_fence, 0)
+}
+
+#[cfg(test)]
+fn recorded_data_example_block_at(
+    section_heading: &str,
+    opening_fence: &str,
+    block_index: usize,
+) -> &'static str {
     let (_, after_heading) = RECORDED_DATA_CONTRACT
         .split_once(section_heading)
         .unwrap_or_else(|| panic!("recorded-data contract must contain {section_heading}"));
-    let (_, after_fence) = after_heading
-        .split_once(opening_fence)
-        .unwrap_or_else(|| panic!("{section_heading} must contain an {opening_fence} block"));
+    let after_fence = after_heading
+        .split(opening_fence)
+        .skip(1)
+        .nth(block_index)
+        .unwrap_or_else(|| {
+            panic!("{section_heading} must contain {opening_fence} block {block_index}")
+        });
     let (example_block, _) = after_fence
         .split_once("```")
         .unwrap_or_else(|| panic!("{section_heading} example block must have a closing fence"));

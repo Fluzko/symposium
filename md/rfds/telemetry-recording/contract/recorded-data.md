@@ -16,7 +16,7 @@ Every JSONL row has:
 | `day`       | `2026-08-03`    | UTC calendar day.                       |
 | `symposium` | `0.4.0`         | Symposium version that wrote the event. |
 
-Completed operational events (`session_start` and `command`) also have `at`, an RFC3339 UTC timestamp truncated to one second. Resolution, configuration, and aggregate metric rows have only `day`.
+Completed operational events (`session_start` and `command`) also have `at`, an RFC3339 UTC timestamp truncated to one second. Their `day` is the UTC calendar day containing `at`; a mismatch makes the row invalid. Resolution, configuration, and aggregate metric rows have only `day`.
 
 Counters and durations are non-negative JSON integers that fit an unsigned 64-bit value. Symposium checks arithmetic and drops an overflowing batch or observation instead of wrapping the value.
 

@@ -10,8 +10,9 @@ use super::super::{
     name::{InitialByteRule, validated_string_newtype},
 };
 use crate::telemetry::identity::{
-    DimensionWriter, IdentifierWindowScope, IdentityDimension, PackageDomain, PackageSubject,
+    DimensionWriter, IdentityDimension, PackageDomain, PackageSubject,
 };
+use crate::telemetry::state::BoundRecordingObservation;
 
 const MAX_PUBLIC_PACKAGE_NAME_BYTES: usize = 64;
 
@@ -260,18 +261,17 @@ impl PackageResolutionV1 {
     /// Create a record for one eligible public resolution-input package.
     #[must_use]
     pub(in crate::telemetry) fn new(
-        identity: &IdentifierWindowScope<'_>,
-        day: UtcDay,
+        observation: &BoundRecordingObservation<'_>,
         package: PublicPackageCoordinate,
         extension_match: ExtensionMatch,
     ) -> Self {
-        let package_subject = identity.derive(&package);
+        let package_subject = observation.identifier_window_scope().derive(&package);
 
         Self {
             version: SchemaVersion::V1,
             kind: RowKind::PackageResolution,
             event_id: EventId::new(),
-            day,
+            day: observation.day(),
             symposium: SymposiumVersion::current(),
             package,
             extension_match,
@@ -286,6 +286,7 @@ mod tests {
 
     use super::super::super::{
         IDENTIFIER_WINDOW_TEST_STATE, assert_contract_names, assert_contract_names_with_labels,
+        recording_observation,
     };
     use super::*;
     use crate::telemetry::{identity::encode_dimension_for_test, state::TelemetryStateV1};
@@ -303,12 +304,11 @@ mod tests {
     }
 
     fn package_resolution_for(package_name: &str) -> PackageResolutionV1 {
-        let state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let identity = state.identifier_window_scope();
+        let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
+        let observation = recording_observation(&mut state);
 
         PackageResolutionV1::new(
-            &identity,
-            UtcDay::from_date(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap()),
+            &observation,
             PublicPackageCoordinate::try_new(PackageEcosystem::Cargo, package_name, "1.2.3")
                 .unwrap(),
             ExtensionMatch::Public,

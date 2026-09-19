@@ -100,7 +100,7 @@ impl TelemetryStateV1 {
     /// operation, so every derived identifier uses the state that will be
     /// persisted before its row is appended.
     #[must_use]
-    pub(super) fn identifier_window_scope(&self) -> IdentifierWindowScope<'_> {
+    fn identifier_window_scope(&self) -> IdentifierWindowScope<'_> {
         IdentifierWindowScope::new(
             &self.identity.key,
             self.identity.identifier_window_anchor.to_string(),
@@ -113,7 +113,7 @@ impl TelemetryStateV1 {
     /// session observation. Call this after applying that observation so a D31
     /// rollover uses the newly selected anchor.
     #[must_use]
-    pub(super) fn return_cohort_scope(&self) -> Option<ReturnCohortScope<'_>> {
+    fn return_cohort_scope(&self) -> Option<ReturnCohortScope<'_>> {
         let anchor = self.identity.return_cohort_anchor?;
         Some(ReturnCohortScope::new(
             &self.identity.key,

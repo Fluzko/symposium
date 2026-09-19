@@ -7,6 +7,7 @@
 mod agent;
 mod command;
 mod extension;
+mod macros;
 mod name;
 mod resolution;
 
@@ -21,6 +22,7 @@ use serde::{
 use uuid::Uuid;
 
 use agent::{AgentConfigurationV1, SessionStartV1};
+use command::CommandV1;
 use resolution::{
     ResolutionSummaryV1, extension::ExtensionResolutionV1, package::PackageResolutionV1,
 };
@@ -80,6 +82,7 @@ pub(super) enum TelemetryRow {
     ResolutionSummary(ResolutionSummaryV1),
     PackageResolution(PackageResolutionV1),
     ExtensionResolution(ExtensionResolutionV1),
+    Command(CommandV1),
     StorageLimit(StorageLimitV1),
 }
 
@@ -94,6 +97,7 @@ impl Serialize for TelemetryRow {
             Self::ResolutionSummary(row) => row.serialize(serializer),
             Self::PackageResolution(row) => row.serialize(serializer),
             Self::ExtensionResolution(row) => row.serialize(serializer),
+            Self::Command(row) => row.serialize(serializer),
             Self::StorageLimit(row) => row.serialize(serializer),
         }
     }
@@ -408,6 +412,7 @@ pub(super) fn classify_row(line: &str) -> RowClassification {
         ("extension_resolution", 1) => {
             deserialize_supported_row(line, TelemetryRow::ExtensionResolution)
         }
+        ("command", 1) => deserialize_supported_row(line, TelemetryRow::Command),
         ("storage_limit", 1) => deserialize_supported_row(line, TelemetryRow::StorageLimit),
         _ => RowClassification::UnknownSchema,
     }
@@ -434,6 +439,20 @@ const IDENTIFIER_WINDOW_TEST_STATE: &str = r#"version = 1
 key = "4242424242424242424242424242424242424242424242424242424242424242"
 identifier-window-anchor = "2026-08-03"
 "#;
+
+/// Build a recording context that remains inside the fixture's identifier
+/// window, so schema tests do not depend on separate timestamp choices.
+#[cfg(test)]
+fn recording_observation(
+    state: &mut crate::telemetry::state::TelemetryStateV1,
+) -> crate::telemetry::state::BoundRecordingObservation<'_> {
+    use chrono::TimeZone as _;
+
+    let completed_at =
+        UtcSecond::from_datetime(Utc.with_ymd_and_hms(2026, 8, 3, 10, 2, 11).unwrap());
+    let observation = state.observe_recording(completed_at).unwrap();
+    state.bind_recording_observation(observation).unwrap()
+}
 
 #[cfg(test)]
 fn recorded_data_example_block(section_heading: &str, opening_fence: &str) -> &'static str {

@@ -840,6 +840,28 @@ mod tests {
     }
 
     #[test]
+    fn bound_session_exposes_its_recording_context() {
+        let source = state_with_anchors(KEY, "2026-09-10", "2026-09-10");
+        let mut state: TelemetryStateV1 = toml::from_str(&source).unwrap();
+        let completed_at = completion_time(2026, 9, 11);
+        let observation = state.observe_session(completed_at).unwrap();
+        let observation = state.bind_session_observation(observation).unwrap();
+
+        let recording = observation.recording();
+
+        assert_eq!(recording.completed_at(), completed_at);
+        assert_eq!(recording.day(), completed_at.day());
+        assert_eq!(
+            recording
+                .identifier_window_scope()
+                .derive(&TestWindowDimension),
+            observation
+                .identifier_window_scope()
+                .derive(&TestWindowDimension)
+        );
+    }
+
+    #[test]
     fn binding_rejects_an_observation_from_an_older_identifier_window() {
         let source = state_with_anchors(KEY, "2026-09-10", "2026-09-10");
         let mut state: TelemetryStateV1 = toml::from_str(&source).unwrap();

@@ -16,6 +16,7 @@ use super::{
 use crate::telemetry::identity::{
     DimensionWriter, ExtensionDomain, ExtensionSubject, IdentifierWindowScope, IdentityDimension,
 };
+use crate::telemetry::state::BoundRecordingObservation;
 
 /// Maximum root-to-leaf depth of a recorded resolution path.
 const MAX_RESOLUTION_PATH_DEPTH: usize = 8;
@@ -161,18 +162,17 @@ impl ExtensionResolutionV1 {
     /// Create a record for one public extension and its safe resolution path.
     #[must_use]
     pub(in crate::telemetry) fn new(
-        identity: &IdentifierWindowScope<'_>,
-        day: UtcDay,
+        observation: &BoundRecordingObservation<'_>,
         target: PublicExtensionCoordinate,
         path: ResolutionPath,
     ) -> Self {
-        let extension_subject = path.derive_subject(identity, &target);
+        let extension_subject = path.derive_subject(observation.identifier_window_scope(), &target);
 
         Self {
             version: SchemaVersion::V1,
             kind: RowKind::ExtensionResolution,
             event_id: EventId::new(),
-            day,
+            day: observation.day(),
             symposium: SymposiumVersion::current(),
             target,
             path,
@@ -351,11 +351,10 @@ impl OpaqueResolutionReason {
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
-
     use super::super::super::{
         IDENTIFIER_WINDOW_TEST_STATE, RowClassification, TelemetryRow,
         assert_contract_names_with_labels, classify_row, recorded_data_example_block,
+        recording_observation,
     };
     use super::*;
     use crate::telemetry::{identity::encode_dimension_for_test, state::TelemetryStateV1};
@@ -557,8 +556,8 @@ mod tests {
 
     #[test]
     fn extension_subject_derivation_matches_independent_vector() {
-        let state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let identity = state.identifier_window_scope();
+        let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
+        let observation = recording_observation(&mut state);
         let target = public_target();
         let path = resolution_path_with_every_node_variant();
         // Cross-checked with .NET's HMACSHA256 over the contract header,
@@ -567,21 +566,21 @@ mod tests {
         // 63872efd4737ec84179b4e8b0662c1212e9e3295e1940387c4a4e2cca0a9090e.
         let expected_subject = "ext_63872efd4737ec84179b4e8b0662c121".parse().unwrap();
 
-        let subject = path.derive_subject(&identity, &target);
+        let subject = path.derive_subject(observation.identifier_window_scope(), &target);
 
         assert_eq!(subject, expected_subject);
     }
 
     #[test]
     fn new_extension_resolution_derives_subject_from_its_target_and_path() {
-        let state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let identity = state.identifier_window_scope();
-        let day = UtcDay::from_date(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap());
+        let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
+        let observation = recording_observation(&mut state);
+        let day = observation.day();
         let target = public_target();
         let path = resolution_path_with_every_node_variant();
         let expected_subject = "ext_63872efd4737ec84179b4e8b0662c121".parse().unwrap();
 
-        let row = ExtensionResolutionV1::new(&identity, day, target, path);
+        let row = ExtensionResolutionV1::new(&observation, target, path);
 
         assert_eq!(row.version, SchemaVersion::V1);
         assert_eq!(row.kind, RowKind::ExtensionResolution);
@@ -595,12 +594,10 @@ mod tests {
 
     #[test]
     fn nested_extension_resolution_round_trips_through_the_classifier() {
-        let state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let identity = state.identifier_window_scope();
-        let day = UtcDay::from_date(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap());
+        let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
+        let observation = recording_observation(&mut state);
         let row = ExtensionResolutionV1::new(
-            &identity,
-            day,
+            &observation,
             public_target(),
             resolution_path_with_every_node_variant(),
         );

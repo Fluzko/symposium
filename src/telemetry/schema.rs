@@ -3,7 +3,7 @@
     not(test),
     expect(dead_code, reason = "the new schema is built before storage uses it.")
 )]
-use std::{num::NonZeroU64, sync::LazyLock};
+use std::{fmt, num::NonZeroU64, sync::LazyLock};
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Timelike, Utc};
 use semver::Version;
@@ -102,12 +102,32 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct UtcDay(NaiveDate);
 
+impl UtcDay {
+    /// Wrap a calendar date known to be in UTC.
+    #[must_use]
+    pub(super) const fn from_date(date: NaiveDate) -> Self {
+        Self(date)
+    }
+
+    /// Return the signed number of calendar days from `earlier` to this day.
+    #[must_use]
+    pub(super) fn days_since(self, earlier: Self) -> i64 {
+        self.0.signed_duration_since(earlier.0).num_days()
+    }
+}
+
+impl fmt::Display for UtcDay {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0.format("%Y-%m-%d"))
+    }
+}
+
 impl Serialize for UtcDay {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        serializer.collect_str(&self.0.format("%Y-%m-%d"))
+        serializer.collect_str(self)
     }
 }
 
@@ -138,6 +158,74 @@ fn has_utc_day_shape(value: &str) -> bool {
         && bytes[8..].iter().all(u8::is_ascii_digit)
 }
 
+/// Zero-based day within one D0-D30 observed-session return cohort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct CohortDay(u8);
+
+impl CohortDay {
+    /// The first observed day in a return cohort.
+    pub(super) const D0: Self = Self(0);
+
+    /// The last day in a return cohort.
+    pub(super) const D30: Self = Self(30);
+
+    /// Return the zero-based day number.
+    #[must_use]
+    pub(super) const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// A day number outside the D0-D30 return-cohort range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CohortDayOutOfRange(i64);
+
+impl fmt::Display for CohortDayOutOfRange {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "cohort day must be from 0 through {}, found {}",
+            CohortDay::D30.get(),
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for CohortDayOutOfRange {}
+
+impl TryFrom<i64> for CohortDay {
+    type Error = CohortDayOutOfRange;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        let last_cohort_day = i64::from(Self::D30.get());
+        if !(0..=last_cohort_day).contains(&value) {
+            return Err(CohortDayOutOfRange(value));
+        }
+
+        let value = u8::try_from(value).expect("BUG: a validated return-cohort day must fit in u8");
+        Ok(Self(value))
+    }
+}
+
+impl Serialize for CohortDay {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u8(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for CohortDay {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = i64::deserialize(deserializer)?;
+        Self::try_from(value).map_err(D::Error::custom)
+    }
+}
+
 /// RFC 3339 UTC timestamp with no subsecond precision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct UtcSecond(DateTime<Utc>);
@@ -154,7 +242,7 @@ impl UtcSecond {
 
     /// Return the UTC calendar day containing this timestamp.
     pub(super) fn day(&self) -> UtcDay {
-        UtcDay(self.0.date_naive())
+        UtcDay::from_date(self.0.date_naive())
     }
 }
 
@@ -414,6 +502,15 @@ mod tests {
     }
 
     #[test]
+    fn utc_day_displays_as_calendar_date() {
+        let day = UtcDay(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap());
+
+        let displayed = day.to_string();
+
+        assert_eq!(displayed, "2026-08-03");
+    }
+
+    #[test]
     fn utc_day_round_trips_through_json() {
         let day = UtcDay(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap());
 
@@ -438,6 +535,62 @@ mod tests {
             assert!(
                 serde_json::from_str::<UtcDay>(&json).is_err(),
                 "accepted noncanonical UTC day {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn utc_day_difference_is_signed() {
+        let earlier = UtcDay(NaiveDate::from_ymd_opt(2026, 8, 11).unwrap());
+        let later = UtcDay(NaiveDate::from_ymd_opt(2026, 9, 10).unwrap());
+
+        assert_eq!(later.days_since(earlier), 30);
+        assert_eq!(earlier.days_since(later), -30);
+    }
+
+    #[test]
+    fn cohort_day_accepts_d0_through_d30() {
+        for value in 0_u8..=30 {
+            let cohort_day = CohortDay::try_from(i64::from(value)).unwrap();
+
+            assert_eq!(cohort_day.get(), value);
+        }
+
+        assert_eq!(CohortDay::D0.get(), 0);
+        assert_eq!(CohortDay::D30.get(), 30);
+    }
+
+    #[test]
+    fn cohort_day_rejects_values_outside_d0_through_d30() {
+        for value in [-1_i64, 31] {
+            let error = CohortDay::try_from(value).unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!("cohort day must be from 0 through 30, found {value}")
+            );
+        }
+    }
+
+    #[test]
+    fn cohort_day_round_trips_as_a_json_number() {
+        for value in [0_i64, 1, 30] {
+            let cohort_day = CohortDay::try_from(value).unwrap();
+
+            let json = serde_json::to_string(&cohort_day).unwrap();
+            let decoded = serde_json::from_str::<CohortDay>(&json).unwrap();
+
+            assert_eq!(json, value.to_string());
+            assert_eq!(decoded, cohort_day);
+        }
+    }
+
+    #[test]
+    fn cohort_day_rejects_invalid_json_values() {
+        for invalid in ["-1", "31", "255", "256", "1.5", r#""1""#] {
+            assert!(
+                serde_json::from_str::<CohortDay>(invalid).is_err(),
+                "accepted invalid cohort day {invalid}"
             );
         }
     }
@@ -547,10 +700,9 @@ mod tests {
             panic!("storage_limit contract example was not classified as supported");
         };
 
-        let actual = serde_json::to_value(row).unwrap();
-        let expected = serde_json::from_str::<serde_json::Value>(example).unwrap();
-
-        assert_eq!(actual, expected);
+        // Compared as text, not as `Value`: a `Value` map sorts its keys, which
+        // would stop this from pinning the contract's field order.
+        assert_eq!(serde_json::to_string(&row).unwrap(), example);
     }
 
     #[test]

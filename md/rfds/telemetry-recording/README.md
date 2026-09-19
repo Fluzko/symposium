@@ -75,7 +75,7 @@ All measures describe opted-in installations, not the whole user population. Rep
 
 These questions have specific limits:
 
-- For Q1, the first observed `session_start` for a `retention_subject` establishes D0. D1, D7, or D30 is present when at least one later session is observed on that cohort day, from the same or a different agent. Multiple sessions on one day count once. This measures a later observed session, not one long session or continued value; session start runs automatically once Symposium is installed.
+- For Q1, a stored D0 `session_start` for a `retention_subject` admits that cohort to analysis. D1, D7, or D30 is present when at least one later session is observed on that cohort day, from the same or a different agent. Later rows without a stored D0 are ignored. Multiple sessions on one day count once. This measures a later observed session, not one long session or continued value; session start runs automatically once Symposium is installed.
 - Q2 proves resolution, not activation.
 - Q3 records relationship edges, not a complete dependency set.
 - Q4 counts completed observations, so host termination can be invisible.
@@ -179,9 +179,11 @@ Identifiers use the first 128 bits of HMAC-SHA-256 over a frozen domain, locally
 
 The dimension limits what an identifier can link. Identity code constructs it from typed coordinates; producers do not concatenate strings. It represents one installation for one package, agent, or command dimension, never the installation globally.
 
-Private state keeps the identity key and the current identifier-window and return-cohort anchors. Every recorder reads that state under the telemetry lock, so the same domain, window, and dimension produce the same subject across processes and restarts.
+Private state keeps the identity key and the current identifier-window anchor. It adds a return-cohort anchor when the first session is observed. Every recorder reads that state under the telemetry lock, so the same domain, window, and dimension produce the same subject across processes and restarts.
 
-Normal 30-day rollover changes the window input rather than replacing the key. `disable` and `clear` preserve the key and anchors. Renewed consent and `reset-identifiers` replace the key and start a new cohort.
+An identifier window includes its anchor day as day 0 and remains active through day 29. The first recording-capable observation on day 30 or later starts a new window anchored to that observation. This normal rollover changes the window input without replacing the key. `disable` and `clear` preserve the key and anchors. Renewed consent and `reset-identifiers` replace the key, set the identifier-window anchor to the later of the current UTC day and the latest-opened-day high-water mark, and clear the return-cohort anchor. The next observed session starts a new cohort at D0.
+
+Identifier-window age uses that same later day. An anchor later than the wall-clock day is valid after clock rollback and does not by itself make state malformed.
 
 The key is private state, not anonymized telemetry. Someone who has it can recompute candidate identifiers. Telemetry commands therefore never print it, and it remains outside the inspectable telemetry data directory.
 
@@ -197,7 +199,7 @@ The key is private state, not anonymized telemetry. Someone who has it can recom
 | `plugin_subject`    | One safe public plugin + 30-day window.                                                          |
 | `command_subject`   | One safe command coordinate + 30-day window.                                                     |
 
-The return subject is the sole cross-agent exception: it deduplicates Q1 but cannot link to other event kinds. A cohort remains stable through D30; the next observed session starts a new cohort. Accepting new consent or resetting identifiers rotates the key and starts another cohort.
+The return subject is the sole cross-agent exception: it deduplicates Q1 but cannot link to other event kinds. A cohort remains stable through D30; the next observed session starts a new cohort. Accepting new consent or resetting identifiers rotates the key, resets the identifier-window anchor without moving it behind the latest-opened-day high-water mark, and clears the return-cohort anchor. The next observed session becomes D0 of another cohort.
 
 `session_id` is absent when the agent supplies none, including Copilot. Raw vendor ids never enter events or an unkeyed hash. There is no global installation/workspace id, and future analysis or upload must not reconstruct one. Missing identity state is created only when enabled; malformed existing state stops recording until explicit identifier reset.
 
@@ -326,6 +328,8 @@ Raw inspection remains byte-preserving. A separate typed reader returns only rec
 #### Concurrent writes and failure
 
 Recorders make one non-waiting exclusive-lock attempt. Contention drops the entire buffered batch or aggregate observation. Event batches serialize before one append so concurrent lines cannot interleave. Snapshot updates use same-directory temporary replacement.
+
+While holding that lock, session recording rejects a day before the latest-opened-day high-water mark. It calculates the identifier-window and return-cohort transitions before mutating either anchor. It then applies both transitions and any high-water advancement to one in-memory state, atomically replaces private state once, and only then derives the row identifiers and appends the `session_start` row. If the append fails after a new cohort is stored, later rows for that cohort are ignored by Q1 unless a D0 row was stored. The partial failure therefore causes undercounting rather than unstable identity.
 
 Private-state replacement uses a temporary file beside `telemetry-state.toml` in the config directory. Abandoned state and snapshot temporaries are ignored and cleaned lazily under the telemetry lock. No `fsync` is promised, so a crash can still lose the latest update. Contribution counts detect state and snapshot divergence and permanently mark affected daily session counts incomplete.
 
@@ -505,7 +509,8 @@ Verify:
 
 - Concurrent complete lines, old-or-new snapshots, whole-operation drops, and cap/marker accounting.
 - D30/D31 cleanup, raw inspection, validated reads, and abandoned state/snapshot temporary cleanup.
-- Day advancement permanently closes earlier files; clock rollback cannot reopen them, and forward-correction drops are non-disruptive.
+- Day advancement, identifier-window rollover, and return-cohort transition share one locked state replacement before a session append. A failed D0 append cannot admit later rows as a return cohort.
+- Observations before the high-water mark are dropped before cohort mutation; clock rollback cannot reopen earlier files, and forward-correction drops are non-disruptive.
 - Malformed, invalid, and unknown-version lines remain inspectable, are reported separately, and cannot enter validated output.
 - Validated output contains no lock, temporary, or private-state file; an oversized or incompletely read day is rejected as a whole.
 - Private-state permissions and separation, clear/reset semantics, and test-only recorder isolation.

@@ -30,7 +30,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// This type deliberately implements no formatting traits, which prevents the
 /// key from being printed accidentally in diagnostics. It does not promise to
 /// scrub every in-memory copy when dropped.
-struct IdentityKey([u8; IDENTITY_KEY_BYTES]);
+pub(super) struct IdentityKey([u8; IDENTITY_KEY_BYTES]);
 
 impl IdentityKey {
     #[must_use]
@@ -43,11 +43,13 @@ impl IdentityKey {
     /// # Errors
     ///
     /// Returns an error when the operating system cannot provide random bytes.
-    fn generate() -> Result<Self, getrandom::Error> {
+    pub(super) fn generate() -> Result<Self, getrandom::Error> {
         Self::generate_with(getrandom::fill)
     }
 
-    fn generate_with<E>(fill: impl FnOnce(&mut [u8]) -> Result<(), E>) -> Result<Self, E> {
+    pub(super) fn generate_with<E>(
+        fill: impl FnOnce(&mut [u8]) -> Result<(), E>,
+    ) -> Result<Self, E> {
         let mut bytes = [0; IDENTITY_KEY_BYTES];
         fill(&mut bytes)?;
         Ok(Self::from_bytes(bytes))
@@ -243,10 +245,7 @@ where
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(D::PREFIX)?;
-        for byte in self.bytes {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        write_lower_hex(&self.bytes, formatter)
     }
 }
 
@@ -261,19 +260,10 @@ where
             .strip_prefix(D::PREFIX)
             .ok_or(ParseScopedIdError::IncorrectPrefix)?;
 
-        if encoded.len() != ENCODED_DIGITS {
-            return Err(ParseScopedIdError::IncorrectLength);
-        }
-
-        // The length check leaves no remainder, so every digit reaches a pair.
-        let (digit_pairs, _) = encoded.as_bytes().as_chunks::<2>();
-
-        let mut bytes = [0; IDENTIFIER_BYTES];
-        for (&[high, low], output) in digit_pairs.iter().zip(&mut bytes) {
-            let high = decode_lower_hex(high).ok_or(ParseScopedIdError::InvalidHex)?;
-            let low = decode_lower_hex(low).ok_or(ParseScopedIdError::InvalidHex)?;
-            *output = (high << 4) | low;
-        }
+        let bytes = decode_lower_hex_array(encoded).map_err(|error| match error {
+            DecodeLowerHexError::IncorrectLength => ParseScopedIdError::IncorrectLength,
+            DecodeLowerHexError::InvalidDigit => ParseScopedIdError::InvalidHex,
+        })?;
 
         Ok(Self::from_bytes(bytes))
     }
@@ -304,11 +294,103 @@ where
     }
 }
 
-fn decode_lower_hex(value: u8) -> Option<u8> {
+/// Write `bytes` as lowercase hexadecimal digits.
+///
+/// Takes any [`fmt::Write`] so a formatter and a string buffer share one encoder.
+fn write_lower_hex(bytes: &[u8], out: &mut impl fmt::Write) -> fmt::Result {
+    for byte in bytes {
+        write!(out, "{byte:02x}")?;
+    }
+
+    Ok(())
+}
+
+/// Reason lowercase hexadecimal digits do not decode to a fixed byte array.
+///
+/// Deliberately unnamed in user-facing text: each caller names the failure in
+/// terms of the value it was parsing.
+enum DecodeLowerHexError {
+    IncorrectLength,
+    InvalidDigit,
+}
+
+/// Decode `N` bytes from exactly `2 * N` lowercase hexadecimal digits.
+fn decode_lower_hex_array<const N: usize>(encoded: &str) -> Result<[u8; N], DecodeLowerHexError> {
+    if encoded.len() != N * 2 {
+        return Err(DecodeLowerHexError::IncorrectLength);
+    }
+
+    // The length check leaves no remainder, so every digit reaches a pair.
+    let (digit_pairs, _) = encoded.as_bytes().as_chunks::<2>();
+
+    let mut bytes = [0; N];
+    for (&[high, low], output) in digit_pairs.iter().zip(&mut bytes) {
+        let high = decode_lower_hex_digit(high).ok_or(DecodeLowerHexError::InvalidDigit)?;
+        let low = decode_lower_hex_digit(low).ok_or(DecodeLowerHexError::InvalidDigit)?;
+        *output = (high << 4) | low;
+    }
+
+    Ok(bytes)
+}
+
+fn decode_lower_hex_digit(value: u8) -> Option<u8> {
     match value {
         b'0'..=b'9' => Some(value - b'0'),
         b'a'..=b'f' => Some(value - b'a' + 10),
         _ => None,
+    }
+}
+
+/// Serde adapter for the identity key stored in `telemetry-state.toml`.
+///
+/// Keeping this adapter here avoids giving [`IdentityKey`] general-purpose
+/// formatting or serialization traits that could expose it elsewhere. Writing
+/// the key does materialize it as a hexadecimal string, which is not scrubbed:
+/// see the boundary documented on [`IdentityKey`].
+pub(super) mod state_key_hex {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    use super::{
+        DecodeLowerHexError, IDENTITY_KEY_BYTES, IdentityKey, decode_lower_hex_array,
+        write_lower_hex,
+    };
+
+    const ENCODED_KEY_DIGITS: usize = IDENTITY_KEY_BYTES * 2;
+
+    pub(in crate::telemetry) fn serialize<S>(
+        key: &IdentityKey,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut encoded = String::with_capacity(ENCODED_KEY_DIGITS);
+        write_lower_hex(&key.0, &mut encoded).expect("BUG: writing to a String cannot fail");
+
+        serializer.serialize_str(&encoded)
+    }
+
+    pub(in crate::telemetry) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<IdentityKey, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+
+        let bytes =
+            decode_lower_hex_array::<IDENTITY_KEY_BYTES>(&encoded).map_err(
+                |error| match error {
+                    DecodeLowerHexError::IncorrectLength => D::Error::custom(format_args!(
+                        "identity key must contain exactly {ENCODED_KEY_DIGITS} hexadecimal digits"
+                    )),
+                    DecodeLowerHexError::InvalidDigit => {
+                        D::Error::custom("identity key must use lowercase hexadecimal digits")
+                    }
+                },
+            )?;
+
+        Ok(IdentityKey::from_bytes(bytes))
     }
 }
 

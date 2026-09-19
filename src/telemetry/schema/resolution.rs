@@ -285,6 +285,7 @@ impl TryFrom<RawResolutionSummaryV1> for ResolutionSummaryV1 {
 mod tests {
     use chrono::NaiveDate;
 
+    use super::super::assert_contract_names;
     use super::*;
 
     fn example_reasons() -> UnnamedPackageReasons {
@@ -490,15 +491,13 @@ mod tests {
             (ResolutionTrigger::Remove, "remove"),
         ];
 
+        assert_contract_names(&cases);
+
         for (trigger, name) in cases {
-            let json = serde_json::to_string(&trigger).unwrap();
-            let decoded = serde_json::from_str::<ResolutionTrigger>(&json).unwrap();
             let dropped_operation =
                 serde_json::to_string(&DroppedOperation::from(trigger)).unwrap();
 
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, trigger);
-            assert_eq!(dropped_operation, json);
+            assert_eq!(dropped_operation, format!(r#""{name}""#));
         }
     }
 
@@ -510,13 +509,7 @@ mod tests {
             (ResolutionOutcome::Error, "error"),
         ];
 
-        for (outcome, name) in cases {
-            let json = serde_json::to_string(&outcome).unwrap();
-            let decoded = serde_json::from_str::<ResolutionOutcome>(&json).unwrap();
-
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, outcome);
-        }
+        assert_contract_names(&cases);
     }
 
     #[test]

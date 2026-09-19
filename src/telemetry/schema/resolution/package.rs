@@ -7,9 +7,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::super::{
     EventId, RowKind, SchemaVersion, SymposiumVersion, UtcDay, deserialize_version_one,
+    name::{InitialByteRule, PublicNameViolation, validate_public_name, validated_string_newtype},
 };
 use crate::telemetry::identity::{
-    DimensionWriter, IdentityDimension, PackageDomain, PackageSubject,
+    DimensionWriter, IdentifierWindowScope, IdentityDimension, PackageDomain, PackageSubject,
 };
 
 const MAX_PUBLIC_PACKAGE_NAME_BYTES: usize = 64;
@@ -39,83 +40,22 @@ pub(in crate::telemetry) enum ExtensionMatch {
     None,
 }
 
-/// Public package name accepted by the version 1 telemetry contract.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::telemetry) struct PublicPackageName(String);
-
-impl PublicPackageName {
-    /// Return the validated package name.
-    #[must_use]
-    pub(in crate::telemetry) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for PublicPackageName {
-    type Error = PublicPackageNameError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        validate_public_package_name(&value)?;
-        Ok(Self(value))
-    }
-}
-
-impl FromStr for PublicPackageName {
-    type Err = PublicPackageNameError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        validate_public_package_name(value)?;
-        Ok(Self(value.to_owned()))
-    }
-}
-
-impl fmt::Display for PublicPackageName {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl Serialize for PublicPackageName {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for PublicPackageName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer)?
-            .try_into()
-            .map_err(D::Error::custom)
+validated_string_newtype! {
+    /// Public package name accepted by the version 1 telemetry contract.
+    pub(in crate::telemetry) struct PublicPackageName {
+        error = PublicPackageNameError;
+        validate = validate_public_package_name;
+        as_str_doc = "Return the validated package name.";
     }
 }
 
 fn validate_public_package_name(value: &str) -> Result<(), PublicPackageNameError> {
-    let Some((first, rest)) = value.as_bytes().split_first() else {
-        return Err(PublicPackageNameError::Empty);
-    };
-
-    if value.len() > MAX_PUBLIC_PACKAGE_NAME_BYTES {
-        return Err(PublicPackageNameError::TooLong);
-    }
-
-    if !first.is_ascii_alphabetic() {
-        return Err(PublicPackageNameError::NonAlphabeticFirstCharacter);
-    }
-
-    if !rest
-        .iter()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(PublicPackageNameError::UnsupportedCharacter);
-    }
-
-    Ok(())
+    validate_public_name(
+        value,
+        MAX_PUBLIC_PACKAGE_NAME_BYTES,
+        InitialByteRule::Alphabetic,
+    )
+    .map_err(PublicPackageNameError::from)
 }
 
 /// Reason a package name cannot enter public telemetry.
@@ -125,6 +65,17 @@ pub(in crate::telemetry) enum PublicPackageNameError {
     TooLong,
     NonAlphabeticFirstCharacter,
     UnsupportedCharacter,
+}
+
+impl From<PublicNameViolation> for PublicPackageNameError {
+    fn from(violation: PublicNameViolation) -> Self {
+        match violation {
+            PublicNameViolation::Empty => Self::Empty,
+            PublicNameViolation::TooLong => Self::TooLong,
+            PublicNameViolation::InvalidInitialByte => Self::NonAlphabeticFirstCharacter,
+            PublicNameViolation::UnsupportedCharacter => Self::UnsupportedCharacter,
+        }
+    }
 }
 
 impl fmt::Display for PublicPackageNameError {
@@ -350,11 +301,13 @@ impl PackageResolutionV1 {
     /// Create a record for one eligible public resolution-input package.
     #[must_use]
     pub(in crate::telemetry) fn new(
+        identity: &IdentifierWindowScope<'_>,
         day: UtcDay,
         package: PublicPackageCoordinate,
         extension_match: ExtensionMatch,
-        package_subject: PackageSubject,
     ) -> Self {
+        let package_subject = identity.derive(&package);
+
         Self {
             version: SchemaVersion::V1,
             kind: RowKind::PackageResolution,
@@ -372,8 +325,16 @@ impl PackageResolutionV1 {
 mod tests {
     use chrono::NaiveDate;
 
+    use super::super::super::{assert_contract_names, assert_contract_names_with_labels};
     use super::*;
-    use crate::telemetry::identity::encode_dimension_for_test;
+    use crate::telemetry::{identity::encode_dimension_for_test, state::TelemetryStateV1};
+
+    const TEST_STATE: &str = r#"version = 1
+
+[identity]
+key = "4242424242424242424242424242424242424242424242424242424242424242"
+identifier-window-anchor = "2026-08-03"
+"#;
 
     fn package_name(value: &str) -> PublicPackageName {
         value.parse().unwrap()
@@ -384,12 +345,19 @@ mod tests {
     }
 
     fn package_resolution() -> PackageResolutionV1 {
+        package_resolution_for("example-runtime")
+    }
+
+    fn package_resolution_for(package_name: &str) -> PackageResolutionV1 {
+        let state: TelemetryStateV1 = toml::from_str(TEST_STATE).unwrap();
+        let identity = state.identifier_window_scope();
+
         PackageResolutionV1::new(
+            &identity,
             UtcDay::from_date(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap()),
-            PublicPackageCoordinate::try_new(PackageEcosystem::Cargo, "example-runtime", "1.2.3")
+            PublicPackageCoordinate::try_new(PackageEcosystem::Cargo, package_name, "1.2.3")
                 .unwrap(),
             ExtensionMatch::Public,
-            "pkg_f6db813c87209816ae4896f3e60dd774".parse().unwrap(),
         )
     }
 
@@ -397,14 +365,7 @@ mod tests {
     fn package_ecosystems_round_trip_with_contract_names() {
         let cases = [(PackageEcosystem::Cargo, "cargo")];
 
-        for (ecosystem, name) in cases {
-            let json = serde_json::to_string(&ecosystem).unwrap();
-            let decoded = serde_json::from_str::<PackageEcosystem>(&json).unwrap();
-
-            assert_eq!(ecosystem.as_str(), name);
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, ecosystem);
-        }
+        assert_contract_names_with_labels(&cases, PackageEcosystem::as_str);
     }
 
     #[test]
@@ -415,13 +376,7 @@ mod tests {
             (ExtensionMatch::None, "none"),
         ];
 
-        for (extension_match, name) in cases {
-            let json = serde_json::to_string(&extension_match).unwrap();
-            let decoded = serde_json::from_str::<ExtensionMatch>(&json).unwrap();
-
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, extension_match);
-        }
+        assert_contract_names(&cases);
     }
 
     #[test]
@@ -619,9 +574,12 @@ mod tests {
     }
 
     #[test]
-    fn new_package_resolution_uses_fixed_common_fields() {
+    fn new_package_resolution_derives_subject_from_its_coordinate() {
         let expected_day = UtcDay::from_date(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap());
-        let expected_subject = "pkg_f6db813c87209816ae4896f3e60dd774".parse().unwrap();
+        // Cross-checked with .NET's HMACSHA256 over the contract header,
+        // identifier window, ecosystem, published name, and exact version. The
+        // complete digest is a7907f7a5ae0de9ae55469f276ba73b2fe68e9b97c4bdd1867dd0685acd297ee.
+        let expected_subject = "pkg_a7907f7a5ae0de9ae55469f276ba73b2".parse().unwrap();
 
         let row = package_resolution();
 
@@ -635,6 +593,14 @@ mod tests {
         assert_eq!(row.package.version().to_string(), "1.2.3");
         assert_eq!(row.extension_match, ExtensionMatch::Public);
         assert_eq!(row.package_subject, expected_subject);
+    }
+
+    #[test]
+    fn package_subject_changes_with_the_source_coordinate() {
+        let first = package_resolution_for("example-runtime");
+        let second = package_resolution_for("example-tools");
+
+        assert_ne!(first.package_subject, second.package_subject);
     }
 
     #[test]

@@ -56,19 +56,49 @@ impl IdentityKey {
     }
 }
 
-/// Canonical bytes for an identifier-window or return-cohort anchor.
+/// Identity material bound to one canonical rotation window.
 ///
-/// Keeping this distinct from a dimension makes their order in the HMAC input
-/// impossible to swap accidentally.
-struct IdentityWindow<'a>(&'a [u8]);
+/// Private telemetry state creates this handle after applying lifecycle
+/// transitions. Subject-bearing row constructors can use it to derive an
+/// identifier from the corresponding source value instead of accepting the two
+/// independently.
+pub(super) struct IdentityScope<'a, A> {
+    key: &'a IdentityKey,
+    window: String,
+    anchor: PhantomData<A>,
+}
 
-#[cfg(test)]
-impl<'a> IdentityWindow<'a> {
+impl<'a, A> IdentityScope<'a, A> {
+    /// Bind a private identity key to one canonical window value.
+    ///
+    /// In production, `window` comes from a validated state anchor. Keeping the
+    /// conversion here avoids making the identity module depend on row schema
+    /// types.
     #[must_use]
-    const fn from_bytes(bytes: &'a [u8]) -> Self {
-        Self(bytes)
+    pub(super) fn new(key: &'a IdentityKey, window: String) -> Self {
+        Self {
+            key,
+            window,
+            anchor: PhantomData,
+        }
+    }
+
+    /// Derive the identifier belonging to a typed source value.
+    #[must_use]
+    pub(super) fn derive<I>(&self, dimension: &I) -> ScopedId<I::Domain>
+    where
+        I: IdentityDimension,
+        I::Domain: ScopedIdDomain<Anchor = A>,
+    {
+        derive_scoped_id(self.key, self.window.as_bytes(), dimension)
     }
 }
+
+/// Identity material bound to the active 30-day identifier window.
+pub(super) type IdentifierWindowScope<'a> = IdentityScope<'a, IdentifierWindowAnchor>;
+
+/// Identity material bound to the active D0-D30 return cohort.
+pub(super) type ReturnCohortScope<'a> = IdentityScope<'a, ReturnCohortAnchor>;
 
 /// A typed value that supplies one identifier domain's canonical fields.
 ///
@@ -78,6 +108,11 @@ impl<'a> IdentityWindow<'a> {
 pub(super) trait IdentityDimension {
     type Domain;
 
+    /// Write this dimension's fields in their frozen contract order.
+    ///
+    /// Use [`DimensionWriter::variant`] for tagged values and
+    /// [`DimensionWriter::sequence`] for counted collections. Implementations
+    /// must not add their own framing.
     fn write(&self, writer: &mut DimensionWriter<'_>);
 }
 
@@ -98,6 +133,15 @@ impl<'a> DimensionWriter<'a> {
     /// Write one length-prefixed field.
     pub(super) fn field(&mut self, value: &[u8]) {
         write_frame(value, |bytes| (self.write)(bytes));
+    }
+
+    /// Write a tagged variant followed by its canonically framed fields.
+    ///
+    /// Variant labels are frozen contract values, so callers supply a static
+    /// string rather than data obtained at runtime.
+    pub(super) fn variant(&mut self, label: &'static str, write_fields: impl FnOnce(&mut Self)) {
+        self.field(label.as_bytes());
+        write_fields(self);
     }
 
     /// Write a counted sequence whose items own their recursive encoding.
@@ -180,48 +224,65 @@ impl<D> Hash for ScopedId<D> {
     }
 }
 
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Marker for the state anchor that scopes an identifier domain.
+pub(super) trait IdentityAnchor: sealed::Sealed {
+    const CONTRACT_NAME: &'static str;
+}
+
+/// The anchor shared by identifiers that rotate on the 30-day window.
+pub(super) enum IdentifierWindowAnchor {}
+
+impl sealed::Sealed for IdentifierWindowAnchor {}
+
+impl IdentityAnchor for IdentifierWindowAnchor {
+    const CONTRACT_NAME: &'static str = "identifier-window";
+}
+
+/// The anchor dedicated to D0-D30 return measurement.
+pub(super) enum ReturnCohortAnchor {}
+
+impl sealed::Sealed for ReturnCohortAnchor {}
+
+impl IdentityAnchor for ReturnCohortAnchor {
+    const CONTRACT_NAME: &'static str = "return-cohort";
+}
+
 /// Marker supplying a [`ScopedId`] domain's frozen derivation and wire labels.
 ///
-/// Private, which seals it: both constants are published contract surfaces,
-/// not extension points. Changing either requires a new consent version.
-trait ScopedIdDomain {
+/// Visible only inside telemetry so typed derivation APIs can name the bound.
+/// The real domains remain declared centrally below: these constants are
+/// published contract surfaces, not general extension points. Changing an
+/// anchor category or either string requires a new consent version.
+pub(super) trait ScopedIdDomain: sealed::Sealed {
+    type Anchor: IdentityAnchor;
+
     const PREFIX: &'static str;
     const HMAC_DOMAIN: &'static str;
 }
 
-/// Derives purpose-scoped telemetry identifiers from one secret key.
-struct IdentityDeriver {
-    key: IdentityKey,
-}
+fn derive_scoped_id<I>(key: &IdentityKey, window: &[u8], dimension: &I) -> ScopedId<I::Domain>
+where
+    I: IdentityDimension,
+    I::Domain: ScopedIdDomain,
+{
+    let mut hmac =
+        HmacSha256::new_from_slice(&key.0).expect("BUG: HMAC-SHA-256 must accept a 32-byte key");
+    hmac.update(b"telemetry:");
+    hmac.update(I::Domain::HMAC_DOMAIN.as_bytes());
+    hmac.update(b":v1\0");
+    write_frame(window, |bytes| hmac.update(bytes));
+    let mut update = |bytes: &[u8]| hmac.update(bytes);
+    let mut writer = DimensionWriter::new(&mut update);
+    dimension.write(&mut writer);
 
-impl IdentityDeriver {
-    #[must_use]
-    const fn new(key: IdentityKey) -> Self {
-        Self { key }
-    }
-
-    /// Derive an identifier from a canonical window and domain-specific fields.
-    #[must_use]
-    fn derive<I>(&self, window: &IdentityWindow<'_>, dimension: &I) -> ScopedId<I::Domain>
-    where
-        I: IdentityDimension,
-        I::Domain: ScopedIdDomain,
-    {
-        let mut hmac = HmacSha256::new_from_slice(&self.key.0)
-            .expect("BUG: HMAC-SHA-256 must accept a 32-byte key");
-        hmac.update(b"telemetry:");
-        hmac.update(I::Domain::HMAC_DOMAIN.as_bytes());
-        hmac.update(b":v1\0");
-        write_frame(window.0, |bytes| hmac.update(bytes));
-        let mut update = |bytes: &[u8]| hmac.update(bytes);
-        let mut writer = DimensionWriter::new(&mut update);
-        dimension.write(&mut writer);
-
-        let digest = hmac.finalize().into_bytes();
-        let mut bytes = [0; IDENTIFIER_BYTES];
-        bytes.copy_from_slice(&digest[..IDENTIFIER_BYTES]);
-        ScopedId::from_bytes(bytes)
-    }
+    let digest = hmac.finalize().into_bytes();
+    let mut bytes = [0; IDENTIFIER_BYTES];
+    bytes.copy_from_slice(&digest[..IDENTIFIER_BYTES]);
+    ScopedId::from_bytes(bytes)
 }
 
 /// Write one unambiguous variable-length value to an HMAC input or buffer.
@@ -423,7 +484,7 @@ pub(super) mod state_key_hex {
     }
 }
 
-/// Declares each identifier domain, its contract prefix, and its alias.
+/// Declares each identifier domain, its anchor, contract strings, and alias.
 ///
 /// A macro because a function cannot introduce types, and the prefix is the
 /// hand-written part worth handing to the tests as a table.
@@ -431,6 +492,7 @@ macro_rules! scoped_id_domains {
     (
         $(
             $domain:ident => $alias:ident {
+                anchor: $anchor:ty,
                 hmac_domain: $hmac_domain:literal,
                 wire_prefix: $prefix:literal,
             }
@@ -439,7 +501,11 @@ macro_rules! scoped_id_domains {
         $(
             pub(super) enum $domain {}
 
+            impl sealed::Sealed for $domain {}
+
             impl ScopedIdDomain for $domain {
+                type Anchor = $anchor;
+
                 const PREFIX: &'static str = $prefix;
                 const HMAC_DOMAIN: &'static str = $hmac_domain;
             }
@@ -453,42 +519,50 @@ macro_rules! scoped_id_domains {
         ];
 
         #[cfg(test)]
-        const DOMAIN_CONTRACTS: &[(&str, &str)] = &[
-            $(($hmac_domain, $prefix)),+
+        const DOMAIN_CONTRACTS: &[(&str, &str, &str)] = &[
+            $(($hmac_domain, $prefix, <$anchor as IdentityAnchor>::CONTRACT_NAME)),+
         ];
     };
 }
 
 scoped_id_domains! {
     SessionDomain => SessionId {
+        anchor: IdentifierWindowAnchor,
         hmac_domain: "session_id",
         wire_prefix: "sess_",
     }
     RetentionDomain => RetentionSubject {
+        anchor: ReturnCohortAnchor,
         hmac_domain: "retention_subject",
         wire_prefix: "ret_",
     }
     AgentDomain => AgentSubject {
+        anchor: IdentifierWindowAnchor,
         hmac_domain: "agent_subject",
         wire_prefix: "agt_",
     }
     PackageDomain => PackageSubject {
+        anchor: IdentifierWindowAnchor,
         hmac_domain: "package_subject",
         wire_prefix: "pkg_",
     }
     ExtensionDomain => ExtensionSubject {
+        anchor: IdentifierWindowAnchor,
         hmac_domain: "extension_subject",
         wire_prefix: "ext_",
     }
     HookDomain => HookSubject {
+        anchor: IdentifierWindowAnchor,
         hmac_domain: "hook_subject",
         wire_prefix: "hok_",
     }
     PluginDomain => PluginSubject {
+        anchor: IdentifierWindowAnchor,
         hmac_domain: "plugin_subject",
         wire_prefix: "plg_",
     }
     CommandDomain => CommandSubject {
+        anchor: IdentifierWindowAnchor,
         hmac_domain: "command_subject",
         wire_prefix: "cmd_",
     }
@@ -516,7 +590,11 @@ mod tests {
 
     enum TestDomain {}
 
+    impl sealed::Sealed for TestDomain {}
+
     impl ScopedIdDomain for TestDomain {
+        type Anchor = IdentifierWindowAnchor;
+
         const PREFIX: &'static str = "test_";
         const HMAC_DOMAIN: &'static str = "test_subject";
     }
@@ -545,16 +623,38 @@ mod tests {
         }
     }
 
-    struct TestSequenceDimension;
+    struct TestVariantDimension;
 
-    impl IdentityDimension for TestSequenceDimension {
+    impl IdentityDimension for TestVariantDimension {
         type Domain = TestDomain;
 
         fn write(&self, writer: &mut DimensionWriter<'_>) {
-            let items = [b"a".as_slice(), b"bc".as_slice()];
+            writer.variant("package", |writer| writer.field(b"cargo"));
+        }
+    }
 
-            writer.field(b"root");
-            writer.sequence(&items, |writer, item| writer.field(item));
+    struct TestRetentionDimension;
+
+    impl IdentityDimension for TestRetentionDimension {
+        type Domain = RetentionDomain;
+
+        fn write(&self, _writer: &mut DimensionWriter<'_>) {}
+    }
+
+    struct TestNestedSequenceDimension;
+
+    impl IdentityDimension for TestNestedSequenceDimension {
+        type Domain = TestDomain;
+
+        fn write(&self, writer: &mut DimensionWriter<'_>) {
+            let groups = [
+                [b"a".as_slice(), b"bc".as_slice()],
+                [b"d".as_slice(), b"ef".as_slice()],
+            ];
+
+            writer.sequence(&groups, |writer, group| {
+                writer.sequence(group, |writer, item| writer.field(item));
+            });
         }
     }
 
@@ -615,11 +715,10 @@ mod tests {
     #[test]
     fn identity_derivation_matches_contract_vector() {
         let key = IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]);
-        let deriver = IdentityDeriver::new(key);
-        let window = IdentityWindow::from_bytes(b"window-1");
+        let identity = IdentifierWindowScope::new(&key, "window-1".to_owned());
         let dimension = TestDimension::<SessionDomain>::from_fields([b"dimension-1".as_slice()]);
 
-        let identifier = deriver.derive(&window, &dimension);
+        let identifier = identity.derive(&dimension);
 
         // Cross-checked with .NET's HMACSHA256 over the contract's header and
         // two unsigned 64-bit big-endian length-prefixed values. The complete
@@ -633,34 +732,49 @@ mod tests {
     #[test]
     fn identical_derivation_inputs_are_stable() {
         let key = IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]);
-        let deriver = IdentityDeriver::new(key);
-        let window = IdentityWindow::from_bytes(b"window-1");
+        let identity = IdentifierWindowScope::new(&key, "window-1".to_owned());
         let dimension = TestDimension::<SessionDomain>::from_fields([b"dimension-1".as_slice()]);
 
-        let first = deriver.derive(&window, &dimension);
-        let second = deriver.derive(&window, &dimension);
+        let first = identity.derive(&dimension);
+        let second = identity.derive(&dimension);
 
         assert_eq!(first, second);
     }
 
     #[test]
+    fn return_cohort_scope_derives_retention_subjects() {
+        let key = IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]);
+        let identity = ReturnCohortScope::new(&key, "2026-08-03".to_owned());
+
+        let identifier = identity.derive(&TestRetentionDimension);
+
+        // Cross-checked with .NET's HMACSHA256 over the retention header and
+        // framed cohort anchor. The complete digest is
+        // 270adecd2120c543261f04bd771df49170e407de5d3116f98a0468f832fcfcbb.
+        assert_eq!(
+            identifier.to_string(),
+            "ret_270adecd2120c543261f04bd771df491"
+        );
+    }
+
+    #[test]
     fn length_framing_separates_nul_at_different_boundaries() {
-        let deriver = IdentityDeriver::new(IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]));
-        let first_window = IdentityWindow::from_bytes(b"a\0b");
+        let key = IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]);
+        let first_identity = IdentifierWindowScope::new(&key, "a\0b".to_owned());
         let first_dimension = TestDimension::<SessionDomain>::from_fields([b"c".as_slice()]);
-        let second_window = IdentityWindow::from_bytes(b"a");
+        let second_identity = IdentifierWindowScope::new(&key, "a".to_owned());
         let second_dimension = TestDimension::<SessionDomain>::from_fields([b"b\0c".as_slice()]);
 
-        let first = deriver.derive(&first_window, &first_dimension);
-        let second = deriver.derive(&second_window, &second_dimension);
+        let first = first_identity.derive(&first_dimension);
+        let second = second_identity.derive(&second_dimension);
 
         assert_ne!(first, second);
     }
 
     #[test]
     fn length_framing_separates_dimension_field_boundaries() {
-        let deriver = IdentityDeriver::new(IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]));
-        let window = IdentityWindow::from_bytes(b"window-1");
+        let key = IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]);
+        let identity = IdentifierWindowScope::new(&key, "window-1".to_owned());
         let first_dimension = TestDimension::<PackageDomain>::from_fields([
             b"cargo".as_slice(),
             b"foo1".as_slice(),
@@ -672,41 +786,61 @@ mod tests {
             b"12.3.4".as_slice(),
         ]);
 
-        let first = deriver.derive(&window, &first_dimension);
-        let second = deriver.derive(&window, &second_dimension);
+        let first = identity.derive(&first_dimension);
+        let second = identity.derive(&second_dimension);
 
         assert_ne!(first, second);
     }
 
     #[test]
-    fn dimension_writer_encodes_counted_sequences_recursively() {
-        let root_length = 4_u64.to_be_bytes();
-        let item_count = 2_u64.to_be_bytes();
-        let first_item_length = 1_u64.to_be_bytes();
-        let second_item_length = 2_u64.to_be_bytes();
+    fn dimension_writer_prefixes_variant_fields_with_their_label() {
+        let variant_length = 7_u64.to_be_bytes();
+        let field_length = 5_u64.to_be_bytes();
         let expected = [
-            root_length.as_slice(),
-            b"root".as_slice(),
-            item_count.as_slice(),
-            first_item_length.as_slice(),
-            b"a".as_slice(),
-            second_item_length.as_slice(),
-            b"bc".as_slice(),
+            variant_length.as_slice(),
+            b"package".as_slice(),
+            field_length.as_slice(),
+            b"cargo".as_slice(),
         ]
         .concat();
 
-        let encoded = encode_dimension_for_test(&TestSequenceDimension);
+        let encoded = encode_dimension_for_test(&TestVariantDimension);
+
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn dimension_writer_encodes_counted_sequences_recursively() {
+        let item_count = 2_u64.to_be_bytes();
+        let one_byte = 1_u64.to_be_bytes();
+        let two_bytes = 2_u64.to_be_bytes();
+        let expected = [
+            item_count.as_slice(),
+            item_count.as_slice(),
+            one_byte.as_slice(),
+            b"a".as_slice(),
+            two_bytes.as_slice(),
+            b"bc".as_slice(),
+            item_count.as_slice(),
+            one_byte.as_slice(),
+            b"d".as_slice(),
+            two_bytes.as_slice(),
+            b"ef".as_slice(),
+        ]
+        .concat();
+
+        let encoded = encode_dimension_for_test(&TestNestedSequenceDimension);
 
         assert_eq!(encoded, expected);
     }
 
     #[test]
     fn changing_any_derivation_scope_changes_the_identifier() {
-        let deriver = IdentityDeriver::new(IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]));
-        let other_deriver =
-            IdentityDeriver::new(IdentityKey::from_bytes([0x24; IDENTITY_KEY_BYTES]));
-        let first_window = IdentityWindow::from_bytes(b"window-1");
-        let second_window = IdentityWindow::from_bytes(b"window-2");
+        let key = IdentityKey::from_bytes([0x42; IDENTITY_KEY_BYTES]);
+        let other_key = IdentityKey::from_bytes([0x24; IDENTITY_KEY_BYTES]);
+        let identity = IdentifierWindowScope::new(&key, "window-1".to_owned());
+        let other_key_identity = IdentifierWindowScope::new(&other_key, "window-1".to_owned());
+        let other_window_identity = IdentifierWindowScope::new(&key, "window-2".to_owned());
         let session_dimension =
             TestDimension::<SessionDomain>::from_fields([b"dimension-1".as_slice()]);
         let other_session_dimension =
@@ -717,15 +851,11 @@ mod tests {
         // Different domain markers produce different identifier types, so use
         // their shared byte representation for this one collection.
         let identifiers = [
-            deriver.derive(&first_window, &session_dimension).bytes,
-            other_deriver
-                .derive(&first_window, &session_dimension)
-                .bytes,
-            deriver.derive(&first_window, &command_dimension).bytes,
-            deriver.derive(&second_window, &session_dimension).bytes,
-            deriver
-                .derive(&first_window, &other_session_dimension)
-                .bytes,
+            identity.derive(&session_dimension).bytes,
+            other_key_identity.derive(&session_dimension).bytes,
+            identity.derive(&command_dimension).bytes,
+            other_window_identity.derive(&session_dimension).bytes,
+            identity.derive(&other_session_dimension).bytes,
         ];
 
         let unique_identifiers = identifiers.into_iter().collect::<HashSet<_>>();
@@ -775,7 +905,7 @@ mod tests {
     fn hmac_domains_are_distinct() {
         let domains = DOMAIN_CONTRACTS
             .iter()
-            .map(|(domain, _)| *domain)
+            .map(|(domain, _, _)| *domain)
             .collect::<HashSet<_>>();
 
         assert_eq!(domains.len(), DOMAIN_CONTRACTS.len());
@@ -783,8 +913,8 @@ mod tests {
 
     #[test]
     fn derivation_constants_match_the_recorded_data_contract() {
-        for (domain, prefix) in DOMAIN_CONTRACTS {
-            let contract_row = format!("| `{domain}` | `{domain}` | `{prefix}` |");
+        for (domain, prefix, anchor) in DOMAIN_CONTRACTS {
+            let contract_row = format!("| `{domain}` | `{domain}` | `{prefix}` | `{anchor}` |");
 
             assert!(
                 RECORDED_DATA.contains(&contract_row),

@@ -314,7 +314,7 @@ impl AgentConfigurationV1 {
 mod tests {
     use chrono::{NaiveDate, TimeZone, Utc};
 
-    use super::super::{RowClassification, TelemetryRow, classify_row};
+    use super::super::{RowClassification, TelemetryRow, assert_contract_names, classify_row};
     use super::*;
 
     fn session_start_fields(session_id: Option<SessionId>) -> SessionStartFields {
@@ -343,13 +343,7 @@ mod tests {
             (HookAgent::Kiro, "kiro"),
         ];
 
-        for (agent, name) in cases {
-            let json = serde_json::to_string(&agent).unwrap();
-            let decoded = serde_json::from_str::<HookAgent>(&json).unwrap();
-
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, agent);
-        }
+        assert_contract_names(&cases);
     }
 
     #[test]
@@ -382,13 +376,7 @@ mod tests {
             (SupportedAgent::Goose, "goose"),
         ];
 
-        for (agent, name) in cases {
-            let json = serde_json::to_string(&agent).unwrap();
-            let decoded = serde_json::from_str::<SupportedAgent>(&json).unwrap();
-
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, agent);
-        }
+        assert_contract_names(&cases);
     }
 
     #[test]
@@ -410,13 +398,7 @@ mod tests {
             (OperatingSystem::Other, "other"),
         ];
 
-        for (operating_system, name) in cases {
-            let json = serde_json::to_string(&operating_system).unwrap();
-            let decoded = serde_json::from_str::<OperatingSystem>(&json).unwrap();
-
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, operating_system);
-        }
+        assert_contract_names(&cases);
     }
 
     #[test]
@@ -455,13 +437,7 @@ mod tests {
             (Architecture::Other, "other"),
         ];
 
-        for (architecture, name) in cases {
-            let json = serde_json::to_string(&architecture).unwrap();
-            let decoded = serde_json::from_str::<Architecture>(&json).unwrap();
-
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, architecture);
-        }
+        assert_contract_names(&cases);
     }
 
     #[test]
@@ -497,13 +473,7 @@ mod tests {
             (SessionStartKind::Unknown, "unknown"),
         ];
 
-        for (start_kind, name) in cases {
-            let json = serde_json::to_string(&start_kind).unwrap();
-            let decoded = serde_json::from_str::<SessionStartKind>(&json).unwrap();
-
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, start_kind);
-        }
+        assert_contract_names(&cases);
     }
 
     #[test]

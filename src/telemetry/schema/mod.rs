@@ -5,6 +5,8 @@
 )]
 
 mod agent;
+mod extension;
+mod name;
 mod resolution;
 
 use std::{fmt, num::NonZeroU64, sync::LazyLock};
@@ -414,6 +416,32 @@ where
 }
 
 #[cfg(test)]
+fn assert_contract_names<T>(cases: &[(T, &str)])
+where
+    T: Copy + fmt::Debug + PartialEq + Serialize + DeserializeOwned,
+{
+    for &(value, name) in cases {
+        let encoded = serde_json::to_string(&value).unwrap();
+        let decoded: T = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(encoded, format!(r#""{name}""#));
+        assert_eq!(decoded, value);
+    }
+}
+
+#[cfg(test)]
+fn assert_contract_names_with_labels<T>(cases: &[(T, &str)], label: impl Fn(T) -> &'static str)
+where
+    T: Copy + fmt::Debug + PartialEq + Serialize + DeserializeOwned,
+{
+    assert_contract_names(cases);
+
+    for &(value, name) in cases {
+        assert_eq!(label(value), name);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -515,13 +543,7 @@ mod tests {
             (RowKind::StorageLimit, "storage_limit"),
         ];
 
-        for (kind, name) in cases {
-            let json = serde_json::to_string(&kind).unwrap();
-            let decoded = serde_json::from_str::<RowKind>(&json).unwrap();
-
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, kind);
-        }
+        assert_contract_names(&cases);
     }
 
     #[test]
@@ -928,13 +950,7 @@ mod tests {
             (DroppedOperation::Command, "command"),
         ];
 
-        for (operation, name) in cases {
-            let json = serde_json::to_string(&operation).unwrap();
-            let decoded = serde_json::from_str::<DroppedOperation>(&json).unwrap();
-
-            assert_eq!(json, format!(r#""{name}""#));
-            assert_eq!(decoded, operation);
-        }
+        assert_contract_names(&cases);
     }
 
     #[test]

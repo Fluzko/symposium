@@ -10,7 +10,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::{
-    identity::{IdentityKey, state_key_hex},
+    identity::{IdentifierWindowScope, IdentityKey, ReturnCohortScope, state_key_hex},
     schema::UtcDay,
 };
 
@@ -91,6 +91,33 @@ impl TelemetryStateV1 {
             },
         }
     }
+
+    /// Bind the stored key to the active identifier-window anchor.
+    ///
+    /// Call this only after applying any lifecycle transition for the current
+    /// operation, so every derived identifier uses the state that will be
+    /// persisted before its row is appended.
+    #[must_use]
+    pub(super) fn identifier_window_scope(&self) -> IdentifierWindowScope<'_> {
+        IdentifierWindowScope::new(
+            &self.identity.key,
+            self.identity.identifier_window_anchor.to_string(),
+        )
+    }
+
+    /// Bind the stored key to the active return-cohort anchor, when present.
+    ///
+    /// A newly enabled or reset recorder has no return cohort until its first
+    /// session observation. Call this after applying that observation so a D31
+    /// rollover uses the newly selected anchor.
+    #[must_use]
+    pub(super) fn return_cohort_scope(&self) -> Option<ReturnCohortScope<'_>> {
+        let anchor = self.identity.return_cohort_anchor?;
+        Some(ReturnCohortScope::new(
+            &self.identity.key,
+            anchor.to_string(),
+        ))
+    }
 }
 
 /// Stable identity material and the dates that define its rotation windows.
@@ -111,12 +138,23 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::{IdentityKey, TelemetryStateV1};
-    use crate::telemetry::schema::UtcDay;
+    use crate::telemetry::{
+        identity::{DimensionWriter, IdentityDimension, RetentionDomain},
+        schema::UtcDay,
+    };
 
     const KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const GENERATED_KEY_BYTE: u8 = 0x42;
     /// Lowercase hexadecimal encoding of 32 [`GENERATED_KEY_BYTE`] bytes.
     const GENERATED_KEY: &str = "4242424242424242424242424242424242424242424242424242424242424242";
+
+    struct RetentionDimension;
+
+    impl IdentityDimension for RetentionDimension {
+        type Domain = RetentionDomain;
+
+        fn write(&self, _writer: &mut DimensionWriter<'_>) {}
+    }
 
     fn day(year: i32, month: u32, day: u32) -> UtcDay {
         UtcDay::from_date(NaiveDate::from_ymd_opt(year, month, day).unwrap())
@@ -197,7 +235,27 @@ mod tests {
         let serialized = toml::to_string_pretty(&state).unwrap();
 
         assert!(state.identity.return_cohort_anchor.is_none());
+        assert!(state.return_cohort_scope().is_none());
         assert_eq!(serialized, source);
+    }
+
+    #[test]
+    fn return_cohort_scope_uses_the_return_cohort_anchor() {
+        let first: TelemetryStateV1 =
+            toml::from_str(&state_with_anchors(KEY, "2026-09-10", "2026-08-11")).unwrap();
+        let second: TelemetryStateV1 =
+            toml::from_str(&state_with_anchors(KEY, "2026-09-10", "2026-08-12")).unwrap();
+
+        let first_subject = first
+            .return_cohort_scope()
+            .expect("fixture has an observed-session cohort")
+            .derive(&RetentionDimension);
+        let second_subject = second
+            .return_cohort_scope()
+            .expect("fixture has an observed-session cohort")
+            .derive(&RetentionDimension);
+
+        assert_ne!(first_subject, second_subject);
     }
 
     #[test]

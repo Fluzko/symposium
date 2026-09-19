@@ -379,7 +379,7 @@ mod tests {
     use super::*;
 
     const RECORDED_DATA: &str =
-        include_str!("../../md/rfds/telemetry-recording/contract/recorded-data.md");
+        include_str!("../../../md/rfds/telemetry-recording/contract/recorded-data.md");
 
     fn example_row(requested_kind: &str) -> &'static str {
         let (_, after_fence) = RECORDED_DATA

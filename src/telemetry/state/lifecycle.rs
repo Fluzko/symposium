@@ -1,18 +1,10 @@
-//! In-memory representation of private telemetry state.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the state schema is built before persistence uses it."
-    )
-)]
+//! Identity-window and return-cohort transitions in private telemetry state.
 
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
-
-use super::{
-    identity::{IdentityKey, state_key_hex},
+use super::{IdentityState, TelemetryStateV1};
+use crate::telemetry::{
+    identity::IdentityKey,
     schema::{CohortDay, UtcDay},
 };
 
@@ -22,78 +14,7 @@ use super::{
 /// [`CohortDay::D30`] bound, offset 30 starts a new window.
 const IDENTIFIER_WINDOW_DAYS: i64 = 30;
 
-/// The initial schema version of `telemetry-state.toml`.
-///
-/// Exact rather than permissive, unlike a row's `SchemaVersion`: a row written by
-/// a newer binary is classified as an unknown schema and skipped, but private
-/// single-writer state must never be half-understood.
-#[derive(Clone, Copy)]
-struct StateVersion;
-
-impl Serialize for StateVersion {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_u64(1)
-    }
-}
-
-impl<'de> Deserialize<'de> for StateVersion {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let version = u64::deserialize(deserializer)?;
-        if version != 1 {
-            return Err(D::Error::custom(format_args!(
-                "expected telemetry state version 1, found {version}"
-            )));
-        }
-
-        Ok(Self)
-    }
-}
-
-/// Version 1 of the complete private telemetry state file.
-///
-/// A field may be absent only when absence represents a real lifecycle state,
-/// in which case its type records that explicitly. Once this version ships,
-/// adding a required field needs a migration or a new state version; a default
-/// must not silently turn malformed state into valid state.
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-struct TelemetryStateV1 {
-    version: StateVersion,
-    identity: IdentityState,
-}
-
 impl TelemetryStateV1 {
-    /// Create private state anchored to the day recording first needs identity.
-    ///
-    /// The return cohort remains absent until a session is observed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the operating system cannot generate a secret key.
-    fn new(identifier_window_anchor: UtcDay) -> Result<Self, getrandom::Error> {
-        let key = IdentityKey::generate()?;
-        Ok(Self::with_key(identifier_window_anchor, key))
-    }
-
-    /// Construct state from identity material that has already been generated.
-    #[must_use]
-    fn with_key(identifier_window_anchor: UtcDay, key: IdentityKey) -> Self {
-        Self {
-            version: StateVersion,
-            identity: IdentityState {
-                key,
-                identifier_window_anchor,
-                return_cohort_anchor: None,
-            },
-        }
-    }
-
     /// Rotate future identifiers and begin a new identifier window.
     ///
     /// `identifier_window_anchor` must be the later of the current UTC day and
@@ -117,7 +38,7 @@ impl TelemetryStateV1 {
     /// # Errors
     ///
     /// Returns an error when the operating system cannot generate a secret key.
-    fn reset_identifiers(
+    pub(super) fn reset_identifiers(
         &mut self,
         identifier_window_anchor: UtcDay,
     ) -> Result<(), getrandom::Error> {
@@ -163,7 +84,7 @@ impl TelemetryStateV1 {
     /// conforming storage caller filters this case through its durable day
     /// policy; these checks protect against an incorrect caller or inconsistent
     /// state. Neither anchor changes when validation fails.
-    fn observe_session(
+    pub(super) fn observe_session(
         &mut self,
         effective_day: UtcDay,
     ) -> Result<SessionObservation, SessionObservationError> {
@@ -237,15 +158,15 @@ impl TelemetryStateV1 {
 /// Identity and return-cohort selections for one observed session.
 #[must_use = "session identity state must be persisted before identifiers are emitted"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SessionObservation {
-    identifier_window: IdentifierWindowUpdate,
-    return_cohort: ReturnCohortUpdate,
+pub(super) struct SessionObservation {
+    pub(super) identifier_window: IdentifierWindowUpdate,
+    pub(super) return_cohort: ReturnCohortUpdate,
 }
 
 /// Whether selecting an identifier window changed private state.
 #[must_use = "an advanced identifier window must be persisted before use"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IdentifierWindowUpdate {
+pub(super) enum IdentifierWindowUpdate {
     /// The existing window remains active.
     Current { anchor: UtcDay },
     /// A new observation-anchored window was started.
@@ -255,7 +176,7 @@ enum IdentifierWindowUpdate {
 impl IdentifierWindowUpdate {
     /// Return the anchor selected for identifier derivation.
     #[must_use]
-    fn anchor(self) -> UtcDay {
+    pub(super) fn anchor(self) -> UtcDay {
         match self {
             Self::Current { anchor } | Self::Advanced { anchor } => anchor,
         }
@@ -265,7 +186,7 @@ impl IdentifierWindowUpdate {
 /// Whether selecting a return cohort changed private state.
 #[must_use = "a started return cohort must be persisted before use"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReturnCohortUpdate {
+pub(super) enum ReturnCohortUpdate {
     /// The existing cohort remains active at `day`.
     Current { anchor: UtcDay, day: CohortDay },
     /// A new cohort was started at D0.
@@ -275,7 +196,7 @@ enum ReturnCohortUpdate {
 impl ReturnCohortUpdate {
     /// Return the anchor selected for retention-subject derivation.
     #[must_use]
-    fn anchor(self) -> UtcDay {
+    pub(super) fn anchor(self) -> UtcDay {
         match self {
             Self::Current { anchor, .. } | Self::Started { anchor } => anchor,
         }
@@ -283,7 +204,7 @@ impl ReturnCohortUpdate {
 
     /// Return the observed day within the selected cohort.
     #[must_use]
-    fn day(self) -> CohortDay {
+    pub(super) fn day(self) -> CohortDay {
         match self {
             Self::Current { day, .. } => day,
             Self::Started { .. } => CohortDay::D0,
@@ -293,7 +214,7 @@ impl ReturnCohortUpdate {
 
 /// An observed session earlier than one of its stored identity anchors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionObservationError {
+pub(super) enum SessionObservationError {
     BeforeIdentifierWindow {
         observed_day: UtcDay,
         window_anchor: UtcDay,
@@ -327,27 +248,13 @@ impl fmt::Display for SessionObservationError {
 
 impl std::error::Error for SessionObservationError {}
 
-/// Stable identity material and the dates that define its rotation windows.
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-struct IdentityState {
-    #[serde(with = "state_key_hex")]
-    key: IdentityKey,
-    identifier_window_anchor: UtcDay,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    return_cohort_anchor: Option<UtcDay>,
-}
-
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
 
     use chrono::NaiveDate;
 
-    use super::{
-        CohortDay, IdentifierWindowUpdate, IdentityKey, ReturnCohortUpdate, TelemetryStateV1,
-        UtcDay,
-    };
+    use super::*;
 
     const KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const GENERATED_KEY_BYTE: u8 = 0x42;
@@ -383,53 +290,6 @@ mod tests {
         format!(
             "version = 1\n\n[identity]\nkey = \"{key}\"\nidentifier-window-anchor = \"{identifier_window_anchor}\"\n"
         )
-    }
-
-    /// Rejection text for `source`, so each test can pin the reason it failed.
-    ///
-    /// Destructures rather than calling `unwrap_err`, which would need `Debug` on
-    /// the state: the identity key deliberately has no formatting traits.
-    fn rejection_message(source: &str) -> String {
-        let Err(error) = toml::from_str::<TelemetryStateV1>(source) else {
-            panic!("accepted invalid telemetry state:\n{source}");
-        };
-
-        error.to_string()
-    }
-
-    #[test]
-    fn version_one_state_round_trips_in_canonical_form() {
-        let source = state_with_return_cohort(KEY);
-
-        let state: TelemetryStateV1 = toml::from_str(&source).unwrap();
-        let serialized = toml::to_string_pretty(&state).unwrap();
-
-        assert_eq!(serialized, source);
-    }
-
-    #[test]
-    fn new_state_starts_an_identity_window_without_a_return_cohort() {
-        let day = day(2026, 9, 10);
-
-        let state = TelemetryStateV1::new(day).unwrap();
-
-        assert_eq!(state.identity.identifier_window_anchor, day);
-        assert!(state.identity.return_cohort_anchor.is_none());
-    }
-
-    #[test]
-    fn generated_state_has_the_canonical_initial_file_shape() {
-        let key = IdentityKey::generate_with::<Infallible>(|bytes| {
-            bytes.fill(GENERATED_KEY_BYTE);
-            Ok(())
-        })
-        .unwrap();
-
-        let state = TelemetryStateV1::with_key(day(2026, 9, 10), key);
-        let serialized = toml::to_string_pretty(&state).unwrap();
-
-        let expected = state_without_return_cohort(GENERATED_KEY);
-        assert_eq!(serialized, expected);
     }
 
     #[test]
@@ -477,17 +337,6 @@ mod tests {
         assert!(!serialized.contains(KEY));
         assert_eq!(state.identity.identifier_window_anchor, reset_day);
         assert!(state.identity.return_cohort_anchor.is_none());
-    }
-
-    #[test]
-    fn state_without_an_observed_session_has_no_return_cohort() {
-        let source = state_without_return_cohort(KEY);
-
-        let state: TelemetryStateV1 = toml::from_str(&source).unwrap();
-        let serialized = toml::to_string_pretty(&state).unwrap();
-
-        assert!(state.identity.return_cohort_anchor.is_none());
-        assert_eq!(serialized, source);
     }
 
     #[test]
@@ -702,86 +551,5 @@ mod tests {
             "observed session day 2026-09-09 precedes the return-cohort anchor 2026-09-10"
         );
         assert_eq!(serialized, source);
-    }
-
-    #[test]
-    fn future_state_version_is_rejected() {
-        let source = state_with_return_cohort(KEY).replacen("version = 1", "version = 2", 1);
-
-        let message = rejection_message(&source);
-
-        assert!(
-            message.contains("expected telemetry state version 1, found 2"),
-            "unexpected rejection reason: {message}"
-        );
-    }
-
-    #[test]
-    fn unknown_top_level_field_is_rejected() {
-        let source = state_with_return_cohort(KEY).replacen(
-            "\n[identity]",
-            "\nunexpected = true\n\n[identity]",
-            1,
-        );
-
-        let message = rejection_message(&source);
-
-        assert!(
-            message.contains("unknown field `unexpected`"),
-            "unexpected rejection reason: {message}"
-        );
-    }
-
-    #[test]
-    fn unknown_identity_field_is_rejected() {
-        let mut source = state_with_return_cohort(KEY);
-        source.push_str("unexpected = true\n");
-
-        let message = rejection_message(&source);
-
-        assert!(
-            message.contains("unknown field `unexpected`"),
-            "unexpected rejection reason: {message}"
-        );
-    }
-
-    #[test]
-    fn identity_key_must_have_exactly_64_digits() {
-        let one_short = &KEY[..KEY.len() - 1];
-        let one_long = format!("{KEY}0");
-
-        for key in ["", one_short, &one_long] {
-            let message = rejection_message(&state_with_return_cohort(key));
-
-            assert!(
-                message.contains("exactly 64 hexadecimal digits"),
-                "accepted or misreported a {}-digit key: {message}",
-                key.len()
-            );
-        }
-    }
-
-    #[test]
-    fn identity_key_must_use_lowercase_hexadecimal() {
-        for key in [KEY.to_uppercase(), KEY.replacen('f', "g", 1)] {
-            let message = rejection_message(&state_with_return_cohort(&key));
-
-            assert!(
-                message.contains("lowercase hexadecimal digits"),
-                "accepted or misreported {key}: {message}"
-            );
-        }
-    }
-
-    #[test]
-    fn identity_anchor_must_be_a_canonical_utc_day() {
-        let source = state_with_return_cohort(KEY).replacen("2026-09-10", "2026-9-10", 1);
-
-        let message = rejection_message(&source);
-
-        assert!(
-            message.contains("UTC day"),
-            "unexpected rejection reason: {message}"
-        );
     }
 }

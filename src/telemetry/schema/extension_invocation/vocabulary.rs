@@ -8,9 +8,9 @@ use super::super::agent::SupportedAgent;
 use crate::agents::Agent;
 
 /// Agent with a structured skill-invocation signal in consent version 1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum ExtensionInvocationAgent {
+pub(in crate::telemetry) enum ExtensionInvocationAgent {
     Claude,
 }
 
@@ -50,7 +50,7 @@ impl TryFrom<Agent> for ExtensionInvocationAgent {
 
 /// Agent without a consent-version-1 structured skill-invocation signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct UnsupportedExtensionInvocationAgent {
+pub(in crate::telemetry) struct UnsupportedExtensionInvocationAgent {
     found: Agent,
 }
 
@@ -92,7 +92,7 @@ impl ExtensionInvocationPhase {
 /// Identity exposure assigned to one extension-invocation aggregate bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum ExtensionTargetScope {
+pub(in crate::telemetry) enum ExtensionTargetScope {
     Public,
     Unnamed,
     Overflow,
@@ -113,7 +113,7 @@ impl ExtensionTargetScope {
 /// Fixed reason why a skill invocation cannot name a public target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum UnnamedExtensionReason {
+pub(in crate::telemetry) enum UnnamedExtensionReason {
     Ineligible,
     NotIndexed,
     AttributionUnavailable,

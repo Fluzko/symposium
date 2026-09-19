@@ -15,7 +15,11 @@ mod name;
 mod plugin_hook;
 mod resolution;
 
-pub(in crate::telemetry) use extension_invocation::ExtensionInvocationPhase;
+pub(in crate::telemetry) use agent::SupportedAgent;
+pub(in crate::telemetry) use extension_invocation::{
+    ExtensionInvocationAgent, ExtensionInvocationAttribution, ExtensionInvocationPhase,
+    ExtensionTargetScope, UnnamedExtensionReason,
+};
 
 #[cfg(test)]
 pub(in crate::telemetry) use agent::HookAgent;
@@ -45,6 +49,7 @@ use command::CommandV1;
 use hook::HookMetricsV1;
 use macros::strict_versioned_row;
 use plugin_hook::PluginHookMetricsV1;
+pub(in crate::telemetry) use resolution::extension::PublicSkillCoordinate;
 use resolution::{
     ResolutionSummaryV1, extension::ExtensionResolutionV1, package::PackageResolutionV1,
 };

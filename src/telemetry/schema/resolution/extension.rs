@@ -233,6 +233,12 @@ impl SafeSkillAttribution {
         Self { target, path }
     }
 
+    /// Return the validated public skill selected by this attribution.
+    #[must_use]
+    pub(in crate::telemetry) const fn target(&self) -> &PublicSkillCoordinate {
+        &self.target
+    }
+
     /// Derive the subject shared by resolution and invocation telemetry.
     #[must_use]
     pub(in crate::telemetry) fn derive_subject(

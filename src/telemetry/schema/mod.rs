@@ -15,6 +15,8 @@ mod name;
 mod plugin_hook;
 mod resolution;
 
+pub(in crate::telemetry) use extension_invocation::ExtensionInvocationPhase;
+
 #[cfg(test)]
 pub(in crate::telemetry) use agent::HookAgent;
 #[cfg(test)]

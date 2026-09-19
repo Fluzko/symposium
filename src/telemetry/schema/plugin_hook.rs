@@ -237,7 +237,11 @@ impl std::error::Error for PluginHookMetricsError {}
 
 #[cfg(test)]
 mod tests {
-    use super::super::{RowClassification, TelemetryRow, classify_row, recorded_data_example_row};
+    use super::super::{
+        RowClassification, TelemetryRow, classify_row,
+        metrics::{MAX_IDENTIFIED_SESSIONS, SessionSet, SessionSetError},
+        recorded_data_example_row,
+    };
     use super::*;
     fn plugin_hook_metrics_value() -> serde_json::Value {
         serde_json::from_str(recorded_data_example_row("plugin_hook_metrics")).unwrap()
@@ -247,6 +251,14 @@ mod tests {
         serde_json::from_value::<PluginHookMetricsV1>(value)
             .unwrap_err()
             .to_string()
+    }
+
+    fn validate_plugin_hook_metrics_value(
+        value: serde_json::Value,
+    ) -> Result<(), PluginHookMetricsError> {
+        let raw = serde_json::from_value::<RawPluginHookMetricsV1>(value).unwrap();
+
+        validate_plugin_hook_metrics(&raw)
     }
 
     #[test]
@@ -456,8 +468,17 @@ mod tests {
         let mut value = plugin_hook_metrics_value();
         value["identified_sessions"] = serde_json::Value::from(501);
 
-        let error = plugin_hook_metrics_error(value);
+        let result = validate_plugin_hook_metrics_value(value);
 
-        assert!(error.contains("identified sessions 501 exceed the version 1 limit 256"));
+        assert_eq!(
+            result,
+            Err(PluginHookMetricsError::SessionCounts(
+                SessionCountError::SessionSet(SessionSetError::ExceedsLimit {
+                    set: SessionSet::Identified,
+                    identified: 501,
+                    maximum: MAX_IDENTIFIED_SESSIONS,
+                })
+            ))
+        );
     }
 }

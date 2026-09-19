@@ -7,6 +7,8 @@
     )
 )]
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use super::{
@@ -14,13 +16,14 @@ use super::{
     schema::UtcDay,
 };
 
-/// The only private-state schema version understood by this binary.
-pub(super) const STATE_VERSION: u64 = 1;
-
-mod codec;
+mod extension_invocation;
 mod lifecycle;
 mod plugin_hook;
 mod session_counts;
+
+fn set_len<T>(sessions: &BTreeSet<T>) -> u64 {
+    u64::try_from(sessions.len()).expect("BUG: usize must fit in u64 on supported targets")
+}
 
 pub(in crate::telemetry) use lifecycle::{BoundRecordingObservation, BoundSessionObservation};
 pub(in crate::telemetry) use plugin_hook::SelectedPluginHookAggregate;

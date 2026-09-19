@@ -71,7 +71,7 @@ impl std::error::Error for UnsupportedExtensionInvocationAgent {}
 /// A phase is producer vocabulary, not a standalone wire value. Each variant
 /// increments the corresponding counter field in the aggregate row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ExtensionInvocationPhase {
+pub(in crate::telemetry) enum ExtensionInvocationPhase {
     Attempted,
     Completed,
     Failed,
@@ -80,7 +80,7 @@ pub(super) enum ExtensionInvocationPhase {
 impl ExtensionInvocationPhase {
     /// Return the aggregate counter field updated by this phase.
     #[must_use]
-    pub(super) const fn counter_name(self) -> &'static str {
+    pub(in crate::telemetry) const fn counter_name(self) -> &'static str {
         match self {
             Self::Attempted => "attempted",
             Self::Completed => "completed",

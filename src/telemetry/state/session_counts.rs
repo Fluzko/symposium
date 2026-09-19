@@ -10,6 +10,8 @@ use crate::telemetry::{
     },
 };
 
+use super::set_len;
+
 /// One hook observation's contribution to the private session sets.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HookSessionContribution {
@@ -211,10 +213,6 @@ impl HookSessionCountTracker<PluginHookMetricsKey> {
             HookSessionContribution::from_plugin_outcome(session_id, outcome),
         )
     }
-}
-
-fn set_len(sessions: &BTreeSet<SessionId>) -> u64 {
-    u64::try_from(sessions.len()).expect("BUG: usize must fit in u64 on supported targets")
 }
 
 /// Session-count fields supplied to one hook aggregate snapshot.

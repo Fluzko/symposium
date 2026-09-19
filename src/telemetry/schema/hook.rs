@@ -144,7 +144,11 @@ impl std::error::Error for HookMetricsError {}
 
 #[cfg(test)]
 mod tests {
-    use super::super::{RowClassification, TelemetryRow, classify_row, recorded_data_example_row};
+    use super::super::{
+        RowClassification, TelemetryRow, classify_row,
+        metrics::{MAX_IDENTIFIED_SESSIONS, SessionSet, SessionSetError},
+        recorded_data_example_row,
+    };
     use super::*;
 
     fn hook_metrics_value() -> serde_json::Value {
@@ -155,6 +159,12 @@ mod tests {
         serde_json::from_value::<HookMetricsV1>(value)
             .unwrap_err()
             .to_string()
+    }
+
+    fn validate_hook_metrics_value(value: serde_json::Value) -> Result<(), HookMetricsError> {
+        let raw = serde_json::from_value::<RawHookMetricsV1>(value).unwrap();
+
+        validate_hook_metrics(&raw)
     }
 
     #[test]
@@ -305,9 +315,18 @@ mod tests {
         let mut value = hook_metrics_value();
         value["identified_sessions"] = serde_json::Value::from(257);
 
-        let error = hook_metrics_error(value);
+        let result = validate_hook_metrics_value(value);
 
-        assert!(error.contains("identified sessions 257 exceed the version 1 limit 256"));
+        assert_eq!(
+            result,
+            Err(HookMetricsError::SessionCounts(
+                SessionCountError::SessionSet(SessionSetError::ExceedsLimit {
+                    set: SessionSet::Identified,
+                    identified: 257,
+                    maximum: MAX_IDENTIFIED_SESSIONS,
+                })
+            ))
+        );
     }
 
     #[test]
@@ -324,9 +343,18 @@ mod tests {
         value["identified_sessions"] = serde_json::Value::from(2);
         value["identified_sessions_non_ok"] = serde_json::Value::from(1);
 
-        let error = hook_metrics_error(value);
+        let result = validate_hook_metrics_value(value);
 
-        assert!(error.contains("identified sessions 2 exceed 1 observations"));
+        assert_eq!(
+            result,
+            Err(HookMetricsError::SessionCounts(
+                SessionCountError::SessionSet(SessionSetError::ExceedsObservations {
+                    set: SessionSet::Identified,
+                    identified: 2,
+                    observations: 1,
+                })
+            ))
+        );
     }
 
     #[test]
@@ -335,9 +363,18 @@ mod tests {
         value["identified_sessions"] = serde_json::Value::from(3);
         value["identified_sessions_non_ok"] = serde_json::Value::from(3);
 
-        let error = hook_metrics_error(value);
+        let result = validate_hook_metrics_value(value);
 
-        assert!(error.contains("non-ok identified sessions 3 exceed 2 non-ok observations"));
+        assert_eq!(
+            result,
+            Err(HookMetricsError::SessionCounts(
+                SessionCountError::SessionSet(SessionSetError::ExceedsObservations {
+                    set: SessionSet::NonOk,
+                    identified: 3,
+                    observations: 2,
+                })
+            ))
+        );
     }
 
     #[test]
@@ -371,9 +408,17 @@ mod tests {
         value["identified_sessions"] = serde_json::Value::from(0);
         value["identified_sessions_non_ok"] = serde_json::Value::from(0);
 
-        let error = hook_metrics_error(value);
+        let result = validate_hook_metrics_value(value);
 
-        assert!(error.contains("complete session counts contain no identified sessions"));
+        assert_eq!(
+            result,
+            Err(HookMetricsError::SessionCounts(
+                SessionCountError::SessionSet(SessionSetError::NoSessions {
+                    set: SessionSet::Identified,
+                    observations: 500,
+                })
+            ))
+        );
     }
 
     #[test]
@@ -381,10 +426,16 @@ mod tests {
         let mut value = hook_metrics_value();
         value["identified_sessions_non_ok"] = serde_json::Value::from(0);
 
-        let error = hook_metrics_error(value);
+        let result = validate_hook_metrics_value(value);
 
-        assert!(
-            error.contains("2 non-ok observations require at least one non-ok identified session")
+        assert_eq!(
+            result,
+            Err(HookMetricsError::SessionCounts(
+                SessionCountError::SessionSet(SessionSetError::NoSessions {
+                    set: SessionSet::NonOk,
+                    observations: 2,
+                })
+            ))
         );
     }
 

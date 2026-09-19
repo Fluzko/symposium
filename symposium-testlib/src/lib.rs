@@ -265,6 +265,7 @@ impl TestContext {
         use symposium::report::{ReportLayer, ReportMode};
         use tracing_subscriber::layer::SubscriberExt;
 
+        install_tracing_baseline();
         let (layer, handle) = ReportLayer::new(ReportMode::Json, level);
         let subscriber = tracing_subscriber::registry().with(layer);
         let _guard = tracing::subscriber::set_default(subscriber);
@@ -531,7 +532,24 @@ struct FixtureScanResult {
 /// Text files (`.toml`, `.md`, `.json`, `.txt`, `.ts`, `.js`) have variables expanded:
 /// - `$TEST_DIR` — the tempdir root
 /// - `$BINARY` — path to the `cargo-agents` binary (from `CARGO_BIN_EXE_cargo-agents`)
+/// Install a permissive global default subscriber, once per test process.
+///
+/// tracing caches callsite interest and the global max level process-wide,
+/// recomputed from whichever dispatchers are alive when a callsite is first
+/// hit. Tests run in parallel, so a thread with no subscriber can reach a
+/// callsite first and pin it to `Interest::never()` for every thread, which
+/// silences a report-capturing test running concurrently. A global default
+/// that enables everything keeps the cache open; a thread-local
+/// `set_default` still takes precedence where one is installed.
+pub fn install_tracing_baseline() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    });
+}
+
 async fn setup_fixture(fixtures: &[&str]) -> TestContext {
+    install_tracing_baseline();
     let fixtures_base = Path::new(env!("SYMPOSIUM_FIXTURES_DIR"));
     let tempdir = tempfile::tempdir().expect("failed to create tempdir");
     let root = tempdir.path();

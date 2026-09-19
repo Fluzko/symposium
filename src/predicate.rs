@@ -1567,8 +1567,8 @@ mod tests {
         let script = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
         writeln!(
             script.as_file(),
-            "#!/bin/sh\necho ran >> {}\nexit 0",
-            counter_path.display()
+            "#!/bin/sh\necho ran >> \"{}\"\nexit 0",
+            sh_path(&counter_path)
         )
         .unwrap();
 
@@ -1617,8 +1617,8 @@ mod tests {
         let script = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
         writeln!(
             script.as_file(),
-            "#!/bin/sh\necho ran >> {}\nprintf '{{\"watchTime\":1}}\\n'\nexit 0",
-            counter_path.display()
+            "#!/bin/sh\necho ran >> \"{}\"\nprintf '{{\"watchTime\":1}}\\n'\nexit 0",
+            sh_path(&counter_path)
         )
         .unwrap();
 

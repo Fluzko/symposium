@@ -46,6 +46,7 @@ use crate::telemetry::state::{IDENTIFIER_WINDOW_TEST_STATE, recording_observatio
 
 use agent::{AgentConfigurationV1, SessionStartV1};
 use command::CommandV1;
+use extension_invocation::ExtensionInvocationMetricsV1;
 use hook::HookMetricsV1;
 use macros::strict_versioned_row;
 use plugin_hook::PluginHookMetricsV1;
@@ -109,9 +110,10 @@ pub(super) enum TelemetryRow {
     ResolutionSummary(ResolutionSummaryV1),
     PackageResolution(PackageResolutionV1),
     ExtensionResolution(ExtensionResolutionV1),
-    // Box fixed-histogram rows so every enum value does not inherit their size.
+    // Box large aggregate rows so every enum value does not inherit their size.
     HookMetrics(Box<HookMetricsV1>),
     PluginHookMetrics(Box<PluginHookMetricsV1>),
+    ExtensionInvocationMetrics(Box<ExtensionInvocationMetricsV1>),
     Command(CommandV1),
     StorageLimit(StorageLimitV1),
 }
@@ -129,6 +131,7 @@ impl Serialize for TelemetryRow {
             Self::ExtensionResolution(row) => row.serialize(serializer),
             Self::HookMetrics(row) => row.serialize(serializer),
             Self::PluginHookMetrics(row) => row.serialize(serializer),
+            Self::ExtensionInvocationMetrics(row) => row.serialize(serializer),
             Self::Command(row) => row.serialize(serializer),
             Self::StorageLimit(row) => row.serialize(serializer),
         }
@@ -445,6 +448,9 @@ pub(super) fn classify_row(line: &str) -> RowClassification {
         ("plugin_hook_metrics", 1) => {
             deserialize_supported_row(line, |row| TelemetryRow::PluginHookMetrics(Box::new(row)))
         }
+        ("extension_invocation_metrics", 1) => deserialize_supported_row(line, |row| {
+            TelemetryRow::ExtensionInvocationMetrics(Box::new(row))
+        }),
         ("command", 1) => deserialize_supported_row(line, TelemetryRow::Command),
         ("storage_limit", 1) => deserialize_supported_row(line, TelemetryRow::StorageLimit),
         _ => RowClassification::UnknownSchema,

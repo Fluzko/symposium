@@ -319,7 +319,7 @@ This cumulative row combines plugin-hook observations for one UTC day, agent, ho
 
 Eligible public plugins use `{source, name}` coordinates from the reviewed allowlist. Private, local, invalid, or otherwise ineligible plugins merge into one `unnamed` row per agent, hook, epoch, and day and expose no identity.
 
-At most 128 named public-plugin rows may appear across all agents, hooks, and identifier epochs in one UTC day. Attempts for later rows merge into `overflow` rows per agent, hook, and epoch and expose no identity. Identifier reset does not reset this daily limit.
+At most 128 named public-plugin rows may appear across all agents, hooks, and identifier epochs in one UTC day. Attempts for later rows merge into `overflow` rows per agent, hook, and epoch and expose no identity. This daily allowance survives identifier reset and telemetry disable. UTC-day rollover starts a new allowance; `telemetry clear` resets it because clear deletes the snapshot rows it accounts for.
 
 Named rows are first-observed, not sampled, so earlier-in-day public plugins are overrepresented when the limit is reached. Analysis must report overflow and must not treat the named subset as random.
 
@@ -354,14 +354,14 @@ This cumulative row combines skill-invocation observations for one UTC day, supp
 | `attempted`                     | integer                                                                                              | Valid Claude `PreToolUse:Skill` observations merged into the row.                                      |
 | `completed`                     | integer                                                                                              | Successful Claude `PostToolUse:Skill` observations merged into the row.                                |
 | `failed`                        | integer                                                                                              | Terminal Claude `PostToolUseFailure:Skill` observations merged into the row.                           |
-| `session_counts_complete`       | boolean                                                                                              | Whether both distinct identified-session counts are complete for all contributing observations.        |
+| `session_counts_complete`       | boolean                                                                                              | Whether both distinct identified-session counts are complete for all attempted and completed observations. |
 | `identified_sessions`           | integer, optional                                                                                    | Distinct sessions with an attempted observation; present only when session counts are complete.         |
 | `identified_sessions_completed` | integer, optional                                                                                    | Distinct sessions with a completed observation; present only when session counts are complete.          |
 | `extension_subject`             | scoped id, conditional                                                                               | Present only for a public bucket; matches the selected safe resolution path for 30 days.                 |
 
 #### Count semantics
 
-`attempted`, `completed`, and `failed` are independent lower bounds. Each hook phase updates the snapshot separately. If one update is lost, completed plus failed need not equal attempted and may exceed it. The two session counts have the same independence.
+`attempted`, `completed`, and `failed` are independent lower bounds. Each hook phase updates the snapshot separately. If one update is lost, completed plus failed need not equal attempted and may exceed it. The two session counts have the same independence. A stored row has at least one non-zero phase counter.
 
 `failed` advances only when the supported agent emits its targeted failure signal. For version 1, that is Claude's `PostToolUseFailure:Skill` event. Symposium does not infer failure from denial, termination, or a missing terminal observation. Completion means that the agent activated the skill; it does not show whether the agent followed its instructions or improved the task result.
 
@@ -379,9 +379,9 @@ No reason exposes the raw identifier.
 
 #### Row and session limits
 
-At most 128 public-skill rows may be named across identifier epochs in one UTC day. Later public skills merge into one `overflow` row per agent and epoch. Each fixed unnamed reason produces at most one row per agent and epoch. The public subset is first-observed, not sampled; analysis must report overflow and include unnamed counts when interpreting the public denominator.
+At most 128 public-skill rows may be named across identifier epochs in one UTC day. Later public skills merge into one `overflow` row per agent and epoch. Each fixed unnamed reason produces at most one row per agent and epoch. This daily allowance survives identifier reset and telemetry disable. UTC-day rollover starts a new allowance; `telemetry clear` resets it because clear deletes the snapshot rows it accounts for. The public subset is first-observed, not sampled; analysis must report overflow and include unnamed counts when interpreting the public denominator.
 
-The same 256-id all-or-nothing rule applies to the attempted and completed session sets. On the first missing id, overflow, or state/snapshot mismatch, Symposium discards both sets, writes `session_counts_complete: false`, and omits both counts for the rest of that row and day.
+The same 256-id all-or-nothing rule applies to the attempted and completed session sets. Only attempted and completed observations contribute to those sets. A failed observation does not affect session-count completeness, whether or not it supplies a session id. When counts are complete, `identified_sessions` is at most `attempted`, `identified_sessions_completed` is at most `completed`, and each count is at most 256. A positive attempted or completed counter has at least one session in its matching set. On the first missing id for an attempted or completed observation, overflow, or state/snapshot mismatch, Symposium discards both sets, writes `session_counts_complete: false`, and omits both counts for the rest of that row and day.
 
 This aggregate has no `at`, duration, raw or scoped session id, invocation id, tool name, tool input/output, prompt, transcript, or individual outcome row. Unsupported agents emit no row, which means unknown rather than zero.
 
@@ -458,7 +458,7 @@ A file is eligible for deletion only when `current_utc_day - file_utc_day > 30`.
 
 ### Private state
 
-The sibling private `<config-dir>/telemetry-state.toml` holds the identity key, current identifier-window anchor, optional return-cohort anchor, the latest opened UTC day, cleanup and marker metadata, bounded keyed session sets, snapshot contribution counts used to calculate complete distinct-session counts, and the stable row `event_id` in each plugin-hook aggregate entry. The identifier is not secret; the corresponding metric row contains the same value.
+The sibling private `<config-dir>/telemetry-state.toml` holds the identity key, current identifier-window anchor, optional return-cohort anchor, the latest opened UTC day, cleanup and marker metadata, bounded keyed session sets, snapshot contribution counts used to calculate complete distinct-session counts, the stable row `event_id` in each aggregate entry that cannot reconstruct its identity from the row, and separate per-day public-row admission counts for plugin-hook and extension-invocation metrics. The row identifier is not secret; the corresponding metric row contains the same value.
 
 Symposium creates and replaces it atomically with owner-only permissions where supported. Replacement uses a same-directory temporary file beside `config.toml`; abandoned state temporaries are ignored and cleaned lazily under the telemetry lock.
 

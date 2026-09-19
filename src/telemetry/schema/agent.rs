@@ -231,6 +231,19 @@ impl AgentSessionIdentity {
     }
 }
 
+/// Derive the optional scoped session identifier used by aggregate rows.
+///
+/// Keeping this beside [`SessionDimension`] gives session-start and aggregate
+/// rows one encoding without exposing the dimension itself.
+#[must_use]
+pub(super) fn derive_session_id(
+    identity: &IdentifierWindowScope<'_>,
+    agent: HookAgent,
+    vendor_session_id: Option<&VendorSessionId>,
+) -> Option<SessionId> {
+    AgentSessionIdentity::new(identity, agent, vendor_session_id).session_id()
+}
+
 /// Operating-system class for the running Symposium build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

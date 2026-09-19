@@ -7,6 +7,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 const LATENCY_BOUNDS_MS: [u64; 8] = [5, 10, 25, 50, 100, 250, 500, 1_000];
 const LATENCY_BUCKET_COUNT: usize = LATENCY_BOUNDS_MS.len() + 1;
 
+/// Maximum number of distinct sessions retained by one hook aggregate.
+pub(in crate::telemetry) const MAX_IDENTIFIED_SESSIONS: u64 = 256;
+
 /// Convert a duration to the contract's whole-millisecond representation.
 ///
 /// Sub-millisecond precision is truncated. Durations outside the wire type's
@@ -115,6 +118,187 @@ struct RawLatencyHistogram {
     bounds: [u64; LATENCY_BOUNDS_MS.len()],
     counts: [u64; LATENCY_BUCKET_COUNT],
 }
+
+/// Inputs to the session-count rules shared by hook aggregate rows.
+///
+/// A named input keeps the two optional counters and the two observation
+/// totals from being transposed at call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::telemetry) struct SessionCountInput {
+    pub(in crate::telemetry) counts_complete: bool,
+    pub(in crate::telemetry) identified_sessions: Option<u64>,
+    pub(in crate::telemetry) identified_sessions_non_ok: Option<u64>,
+    pub(in crate::telemetry) observations: u64,
+    pub(in crate::telemetry) ok_observations: u64,
+}
+
+/// Validate the complete-session rules shared by hook aggregate rows.
+///
+/// # Errors
+///
+/// Returns [`SessionCountError`] when the presence or value of a session
+/// counter is inconsistent with the aggregate's observation counters.
+pub(in crate::telemetry) fn validate_session_counts(
+    input: SessionCountInput,
+) -> Result<(), SessionCountError> {
+    match (
+        input.counts_complete,
+        input.identified_sessions,
+        input.identified_sessions_non_ok,
+    ) {
+        (true, Some(identified), Some(non_ok)) => {
+            if identified == 0 {
+                return Err(SessionCountError::NoIdentifiedSessions);
+            }
+            if identified > MAX_IDENTIFIED_SESSIONS {
+                return Err(SessionCountError::IdentifiedSessionsExceedLimit {
+                    identified,
+                    maximum: MAX_IDENTIFIED_SESSIONS,
+                });
+            }
+            if identified > input.observations {
+                return Err(SessionCountError::IdentifiedSessionsExceedObservations {
+                    identified,
+                    observations: input.observations,
+                });
+            }
+            if non_ok > identified {
+                return Err(SessionCountError::NonOkSessionsExceedIdentified {
+                    identified,
+                    non_ok,
+                });
+            }
+
+            let non_ok_observations = input
+                .observations
+                .checked_sub(input.ok_observations)
+                .ok_or(SessionCountError::OkObservationsExceedObservations {
+                    observations: input.observations,
+                    ok_observations: input.ok_observations,
+                })?;
+            if non_ok_observations > 0 && non_ok == 0 {
+                return Err(SessionCountError::NoNonOkSessions {
+                    observations: non_ok_observations,
+                });
+            }
+            if non_ok > non_ok_observations {
+                return Err(SessionCountError::NonOkSessionsExceedNonOkObservations {
+                    sessions: non_ok,
+                    observations: non_ok_observations,
+                });
+            }
+
+            // The subset check above proves that this subtraction cannot
+            // underflow. Every remaining session contributed an `ok` result.
+            let all_ok_sessions = identified - non_ok;
+            if all_ok_sessions > input.ok_observations {
+                return Err(SessionCountError::AllOkSessionsExceedOkObservations {
+                    sessions: all_ok_sessions,
+                    observations: input.ok_observations,
+                });
+            }
+
+            Ok(())
+        }
+        (false, None, None) => Ok(()),
+        (true, _, _) => Err(SessionCountError::CompleteCountsMissing),
+        (false, _, _) => Err(SessionCountError::IncompleteCountsPresent),
+    }
+}
+
+/// Invalid relationship between session counters in a hook aggregate row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::telemetry) enum SessionCountError {
+    CompleteCountsMissing,
+    IncompleteCountsPresent,
+    NoIdentifiedSessions,
+    NoNonOkSessions {
+        observations: u64,
+    },
+    IdentifiedSessionsExceedLimit {
+        identified: u64,
+        maximum: u64,
+    },
+    IdentifiedSessionsExceedObservations {
+        identified: u64,
+        observations: u64,
+    },
+    NonOkSessionsExceedIdentified {
+        identified: u64,
+        non_ok: u64,
+    },
+    OkObservationsExceedObservations {
+        observations: u64,
+        ok_observations: u64,
+    },
+    NonOkSessionsExceedNonOkObservations {
+        sessions: u64,
+        observations: u64,
+    },
+    AllOkSessionsExceedOkObservations {
+        sessions: u64,
+        observations: u64,
+    },
+}
+
+impl fmt::Display for SessionCountError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CompleteCountsMissing => formatter
+                .write_str("complete session counts require both identified session counters"),
+            Self::IncompleteCountsPresent => formatter
+                .write_str("incomplete session counts must omit both identified session counters"),
+            Self::NoIdentifiedSessions => {
+                formatter.write_str("complete session counts contain no identified sessions")
+            }
+            Self::NoNonOkSessions { observations } => write!(
+                formatter,
+                "{observations} non-ok observations require at least one non-ok identified session"
+            ),
+            Self::IdentifiedSessionsExceedLimit {
+                identified,
+                maximum,
+            } => write!(
+                formatter,
+                "identified sessions {identified} exceed the version 1 limit {maximum}"
+            ),
+            Self::IdentifiedSessionsExceedObservations {
+                identified,
+                observations,
+            } => write!(
+                formatter,
+                "identified sessions {identified} exceed {observations} observations"
+            ),
+            Self::NonOkSessionsExceedIdentified { identified, non_ok } => write!(
+                formatter,
+                "non-ok identified sessions {non_ok} exceed {identified} identified sessions"
+            ),
+            Self::OkObservationsExceedObservations {
+                observations,
+                ok_observations,
+            } => write!(
+                formatter,
+                "ok observations {ok_observations} exceed {observations} observations"
+            ),
+            Self::NonOkSessionsExceedNonOkObservations {
+                sessions,
+                observations,
+            } => write!(
+                formatter,
+                "non-ok identified sessions {sessions} exceed {observations} non-ok observations"
+            ),
+            Self::AllOkSessionsExceedOkObservations {
+                sessions,
+                observations,
+            } => write!(
+                formatter,
+                "all-ok identified sessions {sessions} exceed {observations} ok observations"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionCountError {}
 
 #[cfg(test)]
 mod tests {
@@ -253,5 +437,26 @@ mod tests {
 
         assert_eq!(representable.checked_total(), Some(45));
         assert_eq!(overflowing.checked_total(), None);
+    }
+
+    #[test]
+    fn session_counts_reject_more_ok_than_total_observations() {
+        let input = SessionCountInput {
+            counts_complete: true,
+            identified_sessions: Some(1),
+            identified_sessions_non_ok: Some(0),
+            observations: 1,
+            ok_observations: 2,
+        };
+
+        let result = validate_session_counts(input);
+
+        assert_eq!(
+            result,
+            Err(SessionCountError::OkObservationsExceedObservations {
+                observations: 1,
+                ok_observations: 2,
+            })
+        );
     }
 }

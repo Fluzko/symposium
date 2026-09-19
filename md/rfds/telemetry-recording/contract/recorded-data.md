@@ -284,7 +284,7 @@ This cumulative row combines completed hook observations for one UTC day, agent,
 
 The row is written only after its first completed observation, so `invocations` is greater than zero. `outcomes` and the duration histogram each sum to `invocations`. Exactly one outcome counter advances for each completed observation. Precedence is `internal_error`, then `blocked`, then `plugin_error`, then `ok`.
 
-`plugins_completed` cannot exceed `plugins_attempted`.
+Within each observation, and therefore across the cumulative row, `plugins_completed` cannot exceed `plugins_attempted`.
 
 Session counts remain complete only when every contributing observation supplies a session id and neither set exceeds 256 distinct ids for the row. When complete, `identified_sessions` is at least 1 and cannot exceed `invocations`. `identified_sessions_non_ok` is at least 1 when `outcomes.ok < invocations`, and cannot exceed either `identified_sessions` or `invocations - outcomes.ok`. The remaining all-`ok` sessions cannot exceed `outcomes.ok`. On the first missing id or overflow, Symposium discards both sets, writes `session_counts_complete: false`, and omits both counts for the rest of that day. Raw and keyed session ids are never written into the aggregate file.
 

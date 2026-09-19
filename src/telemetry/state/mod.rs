@@ -19,8 +19,12 @@ pub(super) const STATE_VERSION: u64 = 1;
 
 mod codec;
 mod lifecycle;
+mod session_counts;
 
 pub(in crate::telemetry) use lifecycle::{BoundRecordingObservation, BoundSessionObservation};
+pub(in crate::telemetry) use session_counts::{
+    HookSessionCountSnapshot, HookSessionCountTracker, HookSessionCountUpdateError,
+};
 
 /// The initial schema version of `telemetry-state.toml`.
 ///

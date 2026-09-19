@@ -301,8 +301,11 @@ The same all-or-nothing 256-id rule applies to attempted and completed distinct-
 | `ObservationRouter`       | Normalize agent-native extension-use signals and send them only to active sinks.  |
 | `MetricAggregator`        | Merge hook, plugin-hook, and extension-invocation observations into bounded rows. |
 | `JsonlSink`               | Lock, cap, retain, append/replace, inspect, and clear files.                      |
+| `ArchiveReader`           | Preserve raw inspection and return validated records from immutable closed days. |
 
 Only an enabled `Recorder` owns the telemetry sink and identity components. Call sites cannot write directly. The generated installation index is functional sync state and exists independently of telemetry consent.
+
+Keep the schema, recorder, identity, storage writer/reader, retention, limits, and controls in focused submodules beneath `telemetry`. Only narrow recording and control entry points are crate-visible. A future upload module depends on `ArchiveReader`; recording and storage never depend on upload.
 
 A sync returns a structured report with provenance and witnesses. That report drives skill installation, atomic index replacement, and, when recording is enabled, one sanitized relationship batch.
 
@@ -316,7 +319,13 @@ Commands are measured once at top-level dispatch. Raw errors never enter telemet
 
 Low-volume rows append to `events-YYYY-MM-DD.jsonl`. Current daily hook, plugin-hook, and extension-invocation aggregates live in a bounded, atomically replaced `metrics-YYYY-MM-DD.jsonl` snapshot under the inspectable telemetry data directory.
 
-The sibling private `telemetry-state.toml` holds the identity key, cohort and cleanup metadata, marker state, and temporary keyed session-count sets. These sets are never emitted and expire at day rollover. The telemetry lock remains in the data directory and guards data and private state mutations.
+The sibling private `telemetry-state.toml` holds the identity key, cohort and cleanup metadata, the latest opened UTC day, marker state, and temporary keyed session-count sets. These sets are never emitted and expire at day rollover. The telemetry lock remains in the data directory and guards data and private state mutations.
+
+#### Closed days
+
+The latest opened day is a durable high-water mark and never moves backward. Observing a later UTC day advances it and permanently closes earlier daily files. An observation dated before the high-water mark is dropped rather than reopening a closed day. A forward clock correction can therefore cause recording to remain dropped until the actual date catches up, but a clock rollback cannot modify data already considered closed.
+
+Raw inspection remains byte-preserving. A separate typed reader returns only recognized, valid rows from closed, unexpired days and reports malformed, invalid, and unknown-version lines separately. Validation includes file/day consistency and other cross-field invariants. The reader loads at most the daily allowance into owned memory under the telemetry lock, then releases the lock before a consumer does further work. An oversized or incompletely read day produces no validated result rather than a partial result presented as complete.
 
 #### Concurrent writes and failure
 
@@ -332,7 +341,7 @@ The event file, aggregate snapshot, and reserved maximum-size `storage_limit` ro
 
 Together with D31 expiry, the daily allowance bounds ordinary retained telemetry near 248 MiB, excluding temporary files and private state. Aggregate metrics receive at most 512 KiB. An oversized metric update is dropped without stopping low-volume events. An ordinary batch that cannot fit is replaced by the daily marker, and ordinary recording stops for that day. Relationship batches are never split.
 
-Files survive D30 and become eligible for lazy deletion when `current_day - file_day > 30`, first on D31. `clear` deletes event and metric files plus pending count sets, but preserves consent and identity/cohort state. `reset-identifiers` rotates future identifiers without rewriting old files.
+Files survive D30 and become eligible for lazy deletion when `current_day - file_day > 30`, first on D31. `clear` deletes event and metric files plus pending count sets, but preserves consent, identity/cohort state, and the latest-opened-day high-water mark. `reset-identifiers` rotates future identifiers without rewriting old files or moving the high-water mark backward.
 
 `disable` stops recording but keeps files by default. Uninstalling Symposium also leaves them. The [telemetry CLI reference](./reference/telemetry-command.md) defines the exact command behavior.
 
@@ -359,6 +368,7 @@ This design accepts the following costs and limits:
 - Scoped pseudonyms do not make a local directory anonymous. File/day/order and one buffered sync can expose co-occurrence; unusual public versions, public skill-use counts, agent/platform combinations, and exact counts can fingerprint an installation.
 - Best-effort recording undercounts activity. Busy multi-agent sessions contend more, terminated hooks lose final observations, and unsupported agents have configuration but not session or skill-invocation observations. A failure may also prevent writing a durable dropped-update counter, so the missing data cannot be measured completely.
 - Recording performs bounded in-process work and one non-waiting lock attempt. It does not promise zero latency, although failure and contention never change the user operation's result.
+- A large forward system-clock correction can advance the durable day high-water mark. Recording then drops observations dated before that mark rather than risk reopening data already treated as closed.
 - The daily safety cap permits ordinary retained data near 248 MiB through D30. The implementation also adds cross-cutting provenance, witness, attribution, aggregation, consent, and schema-maintenance work.
 
 ### Rationale and alternatives
@@ -423,6 +433,12 @@ Accepting this RFD is not consent to upload. A future RFD must define transport/
 
 Upload may use only accepted local fields and must preserve scoped-correlation boundaries. It cannot create a global subject from identifiers, file order, batch membership, request grouping, or transport metadata. `event_id` and per-kind versions enable retry and mixed-version handling; they pre-approve no transport.
 
+The local archive is the durable handoff for that future work. A future uploader consumes only recognized, validated rows from closed UTC days; it does not receive live observations or opaque JSONL files. Malformed, invalid, and unknown-version lines remain locally inspectable but are not uploadable by a reader that does not understand them.
+
+The uploader remains downstream of storage. It reads a bounded day under the telemetry lock, releases the lock before network work, and retries from unchanged local files. Upload failure does not extend local retention: data becomes ineligible on D31 whether it was acknowledged, failed, or never attempted. The uploader owns separate acknowledgement and retry state so transport concerns do not enter identity state or recording paths. Acknowledging all currently recognized rows is not a whole-day acknowledgement while unknown-version rows remain.
+
+This RFD supplies the closed-day and validated-reader boundary, not an uploader, upload state, network dependency, endpoint, authentication scheme, schedule, or upload setting. Using the archive avoids both a live second sink, which would couple recording to network behavior, and a duplicate upload outbox containing another copy of the data.
+
 ### Proposed documentation
 
 - [What Symposium records](./contract/recorded-data.md): normative fields, enums, examples, and exclusions.
@@ -485,14 +501,17 @@ Verify:
 
 ### Step 2: Storage and local controls
 
-Add whole-batch event appends, non-waiting process locking, atomically replaced aggregate snapshots, daily caps and reservations, `storage_limit`, and lazy D31 cleanup. Add typed `status`, byte-preserving `show`, `clear`, and `reset-identifiers` commands.
+Add whole-batch event appends, non-waiting process locking, atomically replaced aggregate snapshots, daily caps and reservations, `storage_limit`, lazy D31 cleanup, and a durable latest-opened-day high-water mark. Add typed `status`, byte-preserving `show`, a validated closed-day reader, `clear`, and `reset-identifiers` commands.
 
 Expose a test-only enabled recorder bound to a caller-supplied temporary telemetry home for integration tests and benchmarks. No production caller writes through the sink yet, and no runtime bypass is added.
 
 Verify:
 
 - Concurrent complete lines, old-or-new snapshots, whole-operation drops, and cap/marker accounting.
-- D30/D31 cleanup, malformed and unknown inspection, and abandoned state/snapshot temporary cleanup.
+- D30/D31 cleanup, raw inspection, validated reads, and abandoned state/snapshot temporary cleanup.
+- Day advancement permanently closes earlier files; clock rollback cannot reopen them, and forward-correction drops are non-disruptive.
+- Malformed, invalid, and unknown-version lines remain inspectable, are reported separately, and cannot enter validated output.
+- Validated output contains no lock, temporary, or private-state file; an oversized or incompletely read day is rejected as a whole.
 - Private-state permissions and separation, clear/reset semantics, and test-only recorder isolation.
 - Management commands never record themselves.
 

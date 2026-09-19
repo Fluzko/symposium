@@ -152,7 +152,7 @@ $ cargo agents telemetry clear
 Deleted 12 telemetry data file(s) from ~/.symposium/telemetry/.
 ```
 
-`clear` preserves the telemetry directory, lock, identity/cohort state, identity key, and consent setting. New rows in the same identifier window can therefore carry the same scoped subjects as cleared rows. Severing that future linkage also requires `reset-identifiers`.
+`clear` preserves the telemetry directory, lock, identity/cohort state, identity key, latest-opened-day high-water mark, and consent setting. New rows in the same identifier window can therefore carry the same scoped subjects as cleared rows. Severing that future linkage also requires `reset-identifiers`.
 
 ## `reset-identifiers`
 
@@ -180,9 +180,9 @@ If no identity state exists, the command reports that there is nothing to reset 
 
 Each project skills parent may also contain a generated `.symposium/index-v1.json` installation index. It maps agent-facing skill identifiers to Symposium-managed installations so a later hook can attribute a skill activation. The index is gitignored installation state, not telemetry: `show`, `clear`, retention, and identifier reset do not read or delete it, and this RFD does not upload it.
 
-`telemetry-state.toml` is private Symposium state outside the inspectable telemetry data directory. It contains the secret identity key, current identifier-window and return-cohort anchors, cleanup and marker metadata, and bounded keyed session sets plus contribution counts used for complete aggregate session counts. All recorders read this state under the telemetry lock.
+`telemetry-state.toml` is private Symposium state outside the inspectable telemetry data directory. It contains the secret identity key, current identifier-window and return-cohort anchors, the latest opened UTC day, cleanup and marker metadata, and bounded keyed session sets plus contribution counts used for complete aggregate session counts. All recorders read this state under the telemetry lock.
 
-Normal 30-day rollover changes the window anchor without replacing the key. Renewed consent or `reset-identifiers` replaces the key; `disable` and `clear` preserve it.
+Normal 30-day rollover changes the window anchor without replacing the key. Renewed consent or `reset-identifiers` replaces the key; `disable` and `clear` preserve it. None of these operations moves the latest-opened-day high-water mark backward.
 
 Symposium atomically creates and replaces the file with owner-only permissions where supported. Replacement uses a same-directory temporary file beside `config.toml`; abandoned state temporaries are ignored and cleaned lazily under the telemetry lock.
 

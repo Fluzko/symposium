@@ -368,6 +368,8 @@ Low-volume events are appended as JSON lines in `events-YYYY-MM-DD.jsonl` under 
 
 The lock in the telemetry directory also guards sibling private state. A recorder makes one non-waiting lock attempt. It may drop a complete buffered event batch or aggregate observation rather than delay your hook or command. Recording failures never change the user operation's result.
 
+Private state keeps the latest opened UTC day as a high-water mark. Observing a later day permanently closes earlier daily files. An observation dated before the high-water mark is dropped rather than modifying a closed day. Raw inspection still preserves every stored line. Typed reading of a closed day returns only recognized rows that pass their versioned schema and file/day invariants, and reports malformed, invalid, and unknown-version lines separately. It rejects an oversized or incompletely read day as a whole rather than returning a partial validated result.
+
 ### Daily limits and retention
 
 The event file, aggregate-metric snapshot, and reserved maximum-size `storage_limit` line share an 8 MiB daily allowance. This allowance is a safety ceiling, not expected volume or preallocation. It bounds damage from a producer bug or unexpectedly large resolution batch.
@@ -378,13 +380,13 @@ A file is eligible for deletion only when `current_utc_day - file_utc_day > 30`.
 
 ### Private state
 
-The sibling private `<config-dir>/telemetry-state.toml` holds the identity key, current identifier-window and return-cohort anchors, cleanup and marker metadata, bounded keyed session sets, and snapshot contribution counts used to calculate complete distinct-session counts.
+The sibling private `<config-dir>/telemetry-state.toml` holds the identity key, current identifier-window and return-cohort anchors, the latest opened UTC day, cleanup and marker metadata, bounded keyed session sets, and snapshot contribution counts used to calculate complete distinct-session counts.
 
 Symposium creates and replaces it atomically with owner-only permissions where supported. Replacement uses a same-directory temporary file beside `config.toml`; abandoned state temporaries are ignored and cleaned lazily under the telemetry lock.
 
 The session sets are not printed or copied into metric rows. Symposium discards them at UTC-day rollover and removes them when `telemetry clear` or `telemetry reset-identifiers` runs. State is replaced before the corresponding metric snapshot. If a later snapshot write fails, a contribution-count mismatch on the next update discards the sets and permanently marks the row's session counts incomplete for that day.
 
-`telemetry clear` deletes event and aggregate-metric files and rewrites private state to remove pending sets while preserving the identity key and current anchors. `telemetry reset-identifiers` rotates future identifiers and starts a new retention cohort. `telemetry disable` stops recording; existing files remain unless the user accepts its interactive clear offer or runs `telemetry clear` later.
+`telemetry clear` deletes event and aggregate-metric files and rewrites private state to remove pending sets while preserving the identity key, current anchors, and latest-opened-day high-water mark. `telemetry reset-identifiers` rotates future identifiers and starts a new retention cohort without moving the high-water mark backward. `telemetry disable` stops recording; existing files remain unless the user accepts its interactive clear offer or runs `telemetry clear` later.
 
 ### Installation index
 

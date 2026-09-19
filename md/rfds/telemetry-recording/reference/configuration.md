@@ -43,7 +43,7 @@ Accepting a newer consent version rotates the telemetry identity key and starts 
 
 ## Related private and installation state
 
-Consent configuration is separate from the random identity key and current identifier-window and cohort anchors in private `<config-dir>/telemetry-state.toml` (default `~/.symposium/telemetry-state.toml`). This state sits outside the inspectable `<config-dir>/telemetry/` data directory and uses owner-only permissions where supported.
+Consent configuration is separate from the random identity key, current identifier-window and cohort anchors, and latest opened UTC day in private `<config-dir>/telemetry-state.toml` (default `~/.symposium/telemetry-state.toml`). This state sits outside the inspectable `<config-dir>/telemetry/` data directory and uses owner-only permissions where supported.
 
 It persists across `disable` and `clear`, keeping identifiers consistent inside the active window. It is not configuration, and Symposium never reads it from project configuration.
 

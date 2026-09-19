@@ -1,5 +1,7 @@
 //! Bounded private session sets for extension-invocation aggregates.
 
+mod admission;
+
 use std::{collections::BTreeSet, fmt};
 
 use crate::telemetry::{
@@ -141,6 +143,12 @@ impl<K> ExtensionSessionCountTracker<K> {
                 completed: BTreeSet::new(),
             },
         }
+    }
+
+    /// Return the aggregate key this private state belongs to.
+    #[must_use]
+    const fn key(&self) -> &K {
+        &self.key
     }
 
     fn counter_mut(&mut self, phase: TrackedPhase) -> &mut u64 {

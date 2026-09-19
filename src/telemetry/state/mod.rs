@@ -19,6 +19,7 @@ use super::{
 mod extension_invocation;
 mod lifecycle;
 mod plugin_hook;
+mod public_row_budget;
 mod session_counts;
 
 fn set_len<T>(sessions: &BTreeSet<T>) -> u64 {

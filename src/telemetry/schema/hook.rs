@@ -279,7 +279,6 @@ strict_versioned_row! {
 
     kind: RowKind::HookMetrics,
     raw: RawHookMetricsV1,
-    error: HookMetricsError,
     validate: validate_hook_metrics,
 }
 

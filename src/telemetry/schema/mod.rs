@@ -14,13 +14,15 @@ mod name;
 mod plugin_hook;
 mod resolution;
 
-#[expect(
-    unused_imports,
-    reason = "the aggregate key is built before its storage producer uses it"
-)]
-pub(in crate::telemetry) use hook::HookMetricsKey;
-pub(in crate::telemetry) use hook::HookOutcome;
+#[cfg(test)]
+pub(in crate::telemetry) use agent::HookAgent;
+#[cfg(test)]
+pub(in crate::telemetry) use hook::HookSurface;
+pub(in crate::telemetry) use hook::{HookMetricsKey, HookOutcome};
 pub(in crate::telemetry) use metrics::MAX_IDENTIFIED_SESSIONS;
+#[cfg(test)]
+pub(in crate::telemetry) use plugin_hook::PluginBucket;
+pub(in crate::telemetry) use plugin_hook::{PluginHookMetricsKey, PluginHookOutcome};
 
 use std::{fmt, num::NonZeroU64, sync::LazyLock};
 
@@ -32,9 +34,13 @@ use serde::{
 };
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::telemetry::state::{IDENTIFIER_WINDOW_TEST_STATE, recording_observation};
+
 use agent::{AgentConfigurationV1, SessionStartV1};
 use command::CommandV1;
 use hook::HookMetricsV1;
+use macros::strict_versioned_row;
 use plugin_hook::PluginHookMetricsV1;
 use resolution::{
     ResolutionSummaryV1, extension::ExtensionResolutionV1, package::PackageResolutionV1,
@@ -362,20 +368,15 @@ impl<'de> Deserialize<'de> for SymposiumVersion {
     }
 }
 
-// Versioned rows repeat their common fields deliberately. Serde does not support
-// combining flattened structs with strict unknown-field rejection.
+strict_versioned_row! {
+    /// Version 1 marker recording that the daily storage limit rejected an operation.
+    pub(super) struct StorageLimitV1 {
+        symposium: SymposiumVersion,
+        dropped_operation: DroppedOperation,
+    }
 
-/// Version 1 marker recording that the daily storage limit rejected an operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct StorageLimitV1 {
-    #[serde(rename = "v", deserialize_with = "deserialize_version_one")]
-    version: SchemaVersion,
-    kind: RowKind,
-    event_id: EventId,
-    day: UtcDay,
-    symposium: SymposiumVersion,
-    dropped_operation: DroppedOperation,
+    kind: RowKind::StorageLimit,
+    raw: RawStorageLimitV1,
 }
 
 impl StorageLimitV1 {
@@ -384,7 +385,7 @@ impl StorageLimitV1 {
     pub(super) fn new(day: UtcDay, dropped_operation: DroppedOperation) -> Self {
         Self {
             version: SchemaVersion::V1,
-            kind: RowKind::StorageLimit,
+            kind: Self::KIND,
             event_id: EventId::new(),
             day,
             symposium: SymposiumVersion::current(),
@@ -455,28 +456,6 @@ where
 #[cfg(test)]
 const RECORDED_DATA_CONTRACT: &str =
     include_str!("../../../md/rfds/telemetry-recording/contract/recorded-data.md");
-
-#[cfg(test)]
-const IDENTIFIER_WINDOW_TEST_STATE: &str = r#"version = 1
-
-[identity]
-key = "4242424242424242424242424242424242424242424242424242424242424242"
-identifier-window-anchor = "2026-08-03"
-"#;
-
-/// Build a recording context that remains inside the fixture's identifier
-/// window, so schema tests do not depend on separate timestamp choices.
-#[cfg(test)]
-fn recording_observation(
-    state: &mut crate::telemetry::state::TelemetryStateV1,
-) -> crate::telemetry::state::BoundRecordingObservation<'_> {
-    use chrono::TimeZone as _;
-
-    let completed_at =
-        UtcSecond::from_datetime(Utc.with_ymd_and_hms(2026, 8, 3, 10, 2, 11).unwrap());
-    let observation = state.observe_recording(completed_at).unwrap();
-    state.bind_recording_observation(observation).unwrap()
-}
 
 #[cfg(test)]
 fn recorded_data_example_block(section_heading: &str, opening_fence: &str) -> &'static str {
@@ -1094,6 +1073,26 @@ mod tests {
         assert_eq!(row.day, day);
         assert_eq!(row.symposium, SymposiumVersion::current());
         assert_eq!(row.dropped_operation, DroppedOperation::ManualSync);
+    }
+
+    #[test]
+    fn structurally_strict_row_rejects_future_version_when_deserialized_directly() {
+        let example = example_row("storage_limit");
+        let json = example.replacen(r#""v":1"#, r#""v":2"#, 1);
+
+        let result = serde_json::from_str::<StorageLimitV1>(&json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn structurally_strict_row_rejects_wrong_kind_when_deserialized_directly() {
+        let example = example_row("storage_limit");
+        let json = example.replacen(r#""kind":"storage_limit""#, r#""kind":"command""#, 1);
+
+        let result = serde_json::from_str::<StorageLimitV1>(&json);
+
+        assert!(result.is_err());
     }
 
     #[test]

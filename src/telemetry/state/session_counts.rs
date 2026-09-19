@@ -4,7 +4,10 @@ use std::{collections::BTreeSet, fmt};
 
 use crate::telemetry::{
     identity::SessionId,
-    schema::{HookOutcome, MAX_IDENTIFIED_SESSIONS},
+    schema::{
+        HookMetricsKey, HookOutcome, MAX_IDENTIFIED_SESSIONS, PluginHookMetricsKey,
+        PluginHookOutcome,
+    },
 };
 
 /// One hook observation's contribution to the private session sets.
@@ -18,14 +21,21 @@ enum HookSessionContribution {
 impl HookSessionContribution {
     /// Classify one session from the same outcome written into hook metrics.
     #[must_use]
-    fn new(session_id: Option<SessionId>, outcome: HookOutcome) -> Self {
-        match (session_id, outcome) {
+    fn from_hook_outcome(session_id: Option<SessionId>, outcome: HookOutcome) -> Self {
+        Self::new(session_id, outcome == HookOutcome::Ok)
+    }
+
+    /// Classify one session from the same outcome written into plugin-hook metrics.
+    #[must_use]
+    fn from_plugin_outcome(session_id: Option<SessionId>, outcome: PluginHookOutcome) -> Self {
+        Self::new(session_id, outcome == PluginHookOutcome::Ok)
+    }
+
+    fn new(session_id: Option<SessionId>, is_ok: bool) -> Self {
+        match (session_id, is_ok) {
             (None, _) => Self::Unidentified,
-            (Some(session_id), HookOutcome::Ok) => Self::IdentifiedOk(session_id),
-            (
-                Some(session_id),
-                HookOutcome::Blocked | HookOutcome::PluginError | HookOutcome::InternalError,
-            ) => Self::IdentifiedNonOk(session_id),
+            (Some(session_id), true) => Self::IdentifiedOk(session_id),
+            (Some(session_id), false) => Self::IdentifiedNonOk(session_id),
         }
     }
 }
@@ -120,7 +130,41 @@ impl<K> HookSessionCountTracker<K> {
         &self.key
     }
 
-    /// Add one aggregate observation without partially changing the tracker.
+    fn checked_record_contribution(
+        &mut self,
+        snapshot_contributions: u64,
+        contribution: HookSessionContribution,
+    ) -> Result<(), HookSessionCountUpdateError> {
+        let next_contribution_count = snapshot_contributions
+            .checked_add(1)
+            .ok_or(HookSessionCountUpdateError::ContributionCountOverflow)?;
+
+        if self.contribution_count != snapshot_contributions {
+            self.sessions = TrackedHookSessions::Incomplete;
+        }
+
+        self.sessions.record(contribution);
+        self.contribution_count = next_contribution_count;
+        Ok(())
+    }
+
+    /// Return the aggregate fields represented by the current private sets.
+    #[must_use]
+    pub(in crate::telemetry) fn snapshot(&self) -> HookSessionCountSnapshot {
+        match &self.sessions {
+            TrackedHookSessions::Complete { identified, non_ok } => {
+                HookSessionCountSnapshot::Complete {
+                    identified_sessions: set_len(identified),
+                    identified_sessions_non_ok: set_len(non_ok),
+                }
+            }
+            TrackedHookSessions::Incomplete => HookSessionCountSnapshot::Incomplete,
+        }
+    }
+}
+
+impl HookSessionCountTracker<HookMetricsKey> {
+    /// Add one top-level hook observation without partially changing the tracker.
     ///
     /// A missing identifier or a 257th distinct identifier makes the session
     /// counts incomplete but does not reject the observation. Counter overflow
@@ -141,32 +185,31 @@ impl<K> HookSessionCountTracker<K> {
         session_id: Option<SessionId>,
         outcome: HookOutcome,
     ) -> Result<(), HookSessionCountUpdateError> {
-        let next_contribution_count = snapshot_contributions
-            .checked_add(1)
-            .ok_or(HookSessionCountUpdateError::ContributionCountOverflow)?;
-
-        if self.contribution_count != snapshot_contributions {
-            self.sessions = TrackedHookSessions::Incomplete;
-        }
-
-        self.sessions
-            .record(HookSessionContribution::new(session_id, outcome));
-        self.contribution_count = next_contribution_count;
-        Ok(())
+        self.checked_record_contribution(
+            snapshot_contributions,
+            HookSessionContribution::from_hook_outcome(session_id, outcome),
+        )
     }
+}
 
-    /// Return the aggregate fields represented by the current private sets.
-    #[must_use]
-    pub(in crate::telemetry) fn snapshot(&self) -> HookSessionCountSnapshot {
-        match &self.sessions {
-            TrackedHookSessions::Complete { identified, non_ok } => {
-                HookSessionCountSnapshot::Complete {
-                    identified_sessions: set_len(identified),
-                    identified_sessions_non_ok: set_len(non_ok),
-                }
-            }
-            TrackedHookSessions::Incomplete => HookSessionCountSnapshot::Incomplete,
-        }
+impl HookSessionCountTracker<PluginHookMetricsKey> {
+    /// Add one plugin-hook attempt without partially changing the tracker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HookSessionCountUpdateError::ContributionCountOverflow`] when
+    /// the contribution count cannot be incremented.
+    #[must_use = "counter overflow must drop the containing telemetry update"]
+    pub(in crate::telemetry) fn checked_record(
+        &mut self,
+        snapshot_contributions: u64,
+        session_id: Option<SessionId>,
+        outcome: PluginHookOutcome,
+    ) -> Result<(), HookSessionCountUpdateError> {
+        self.checked_record_contribution(
+            snapshot_contributions,
+            HookSessionContribution::from_plugin_outcome(session_id, outcome),
+        )
     }
 }
 
@@ -213,6 +256,20 @@ mod tests {
         HookSessionCountTracker::new(TestAggregateKey)
     }
 
+    impl HookSessionCountTracker<TestAggregateKey> {
+        fn checked_record(
+            &mut self,
+            snapshot_contributions: u64,
+            session_id: Option<SessionId>,
+            outcome: HookOutcome,
+        ) -> Result<(), HookSessionCountUpdateError> {
+            self.checked_record_contribution(
+                snapshot_contributions,
+                HookSessionContribution::from_hook_outcome(session_id, outcome),
+            )
+        }
+    }
+
     fn session_id(value: u128) -> SessionId {
         format!("sess_{value:032x}").parse().unwrap()
     }
@@ -221,7 +278,7 @@ mod tests {
         session_id: Option<SessionId>,
         outcome: HookOutcome,
     ) -> HookSessionContribution {
-        HookSessionContribution::new(session_id, outcome)
+        HookSessionContribution::from_hook_outcome(session_id, outcome)
     }
 
     fn tracker_at_limit() -> HookSessionCountTracker<TestAggregateKey> {

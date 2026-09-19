@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CohortDay, EventId, RowKind, SchemaVersion, SymposiumVersion, UtcDay, UtcSecond,
-    deserialize_version_one, macros::strict_versioned_row,
+    macros::strict_versioned_row,
 };
 use crate::{
     agents::Agent,
@@ -334,7 +334,6 @@ strict_versioned_row! {
 
     kind: RowKind::SessionStart,
     raw: RawSessionStartV1,
-    error: SessionStartError,
     validate: validate_session_start,
 }
 
@@ -417,21 +416,19 @@ pub(in crate::telemetry) struct AgentConfigurationFields {
     pub(in crate::telemetry) configured: bool,
 }
 
-/// Version 1 daily observation of one supported agent's configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(in crate::telemetry) struct AgentConfigurationV1 {
-    #[serde(rename = "v", deserialize_with = "deserialize_version_one")]
-    version: SchemaVersion,
-    kind: RowKind,
-    event_id: EventId,
-    day: UtcDay,
-    symposium: SymposiumVersion,
-    agent: SupportedAgent,
-    configured: bool,
-    os: OperatingSystem,
-    arch: Architecture,
-    agent_subject: AgentSubject,
+strict_versioned_row! {
+    /// Version 1 daily observation of one supported agent's configuration.
+    pub(in crate::telemetry) struct AgentConfigurationV1 {
+        symposium: SymposiumVersion,
+        agent: SupportedAgent,
+        configured: bool,
+        os: OperatingSystem,
+        arch: Architecture,
+        agent_subject: AgentSubject,
+    }
+
+    kind: RowKind::AgentConfiguration,
+    raw: RawAgentConfigurationV1,
 }
 
 impl AgentConfigurationV1 {
@@ -447,7 +444,7 @@ impl AgentConfigurationV1 {
 
         Self {
             version: SchemaVersion::V1,
-            kind: RowKind::AgentConfiguration,
+            kind: Self::KIND,
             event_id: EventId::new(),
             day: observation.day(),
             symposium: SymposiumVersion::current(),

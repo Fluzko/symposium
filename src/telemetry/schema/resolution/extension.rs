@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     super::{
-        EventId, RowKind, SchemaVersion, SymposiumVersion, UtcDay, deserialize_version_one,
+        EventId, RowKind, SchemaVersion, SymposiumVersion,
         extension::{
             ExtensionKind, PublicExtensionCoordinate, PublicExtensionName, PublicExtensionSource,
         },
+        macros::strict_versioned_row,
     },
     package::PublicPackageCoordinate,
 };
@@ -143,19 +144,17 @@ impl ResolutionPath {
     }
 }
 
-/// Version 1 record of one public extension and a safe path that selected it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(in crate::telemetry) struct ExtensionResolutionV1 {
-    #[serde(rename = "v", deserialize_with = "deserialize_version_one")]
-    version: SchemaVersion,
-    kind: RowKind,
-    event_id: EventId,
-    day: UtcDay,
-    symposium: SymposiumVersion,
-    target: PublicExtensionCoordinate,
-    path: ResolutionPath,
-    extension_subject: ExtensionSubject,
+strict_versioned_row! {
+    /// Version 1 record of one public extension and a safe path that selected it.
+    pub(in crate::telemetry) struct ExtensionResolutionV1 {
+        symposium: SymposiumVersion,
+        target: PublicExtensionCoordinate,
+        path: ResolutionPath,
+        extension_subject: ExtensionSubject,
+    }
+
+    kind: RowKind::ExtensionResolution,
+    raw: RawExtensionResolutionV1,
 }
 
 impl ExtensionResolutionV1 {
@@ -170,7 +169,7 @@ impl ExtensionResolutionV1 {
 
         Self {
             version: SchemaVersion::V1,
-            kind: RowKind::ExtensionResolution,
+            kind: Self::KIND,
             event_id: EventId::new(),
             day: observation.day(),
             symposium: SymposiumVersion::current(),

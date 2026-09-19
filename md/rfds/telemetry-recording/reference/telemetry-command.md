@@ -181,7 +181,7 @@ If no identity state exists, the command reports that there is nothing to reset 
 
 Each project skills parent may also contain a generated `.symposium/index-v1.json` installation index. It maps agent-facing skill identifiers to Symposium-managed installations so a later hook can attribute a skill activation. The index is gitignored installation state, not telemetry: `show`, `clear`, retention, and identifier reset do not read or delete it, and this RFD does not upload it.
 
-`telemetry-state.toml` is private Symposium state outside the inspectable telemetry data directory. It contains the secret identity key, current identifier-window anchor, optional return-cohort anchor, the latest opened UTC day, cleanup and marker metadata, and bounded keyed session sets plus contribution counts used for complete aggregate session counts. All recorders read this state under the telemetry lock.
+`telemetry-state.toml` is private Symposium state outside the inspectable telemetry data directory. It contains the secret identity key, current identifier-window anchor, optional return-cohort anchor, the latest opened UTC day, cleanup and marker metadata, bounded keyed session sets plus contribution counts used for complete aggregate session counts, and the stable row `event_id` in each plugin-hook aggregate entry. That identifier is also present in its metric row and is not secret. All recorders read this state under the telemetry lock.
 
 An identifier window includes its anchor day as day 0 and remains active through day 29. The first recording-capable observation on day 30 or later starts a new window anchored to that observation without replacing the key. Renewed consent or `reset-identifiers` replaces the key, resets the identifier-window anchor, and clears the return-cohort anchor; `disable` and `clear` preserve them. None of these operations moves the latest-opened-day high-water mark backward.
 
@@ -191,7 +191,7 @@ Symposium atomically creates and replaces the file with owner-only permissions w
 
 `show`, `status`, data retention, and `clear` do not expose or delete the state file. `clear` rewrites it only to remove pending sets, preserving the key and current anchors.
 
-Session sets and contribution counts are never copied into metric rows. Symposium discards them at day rollover or when `clear` or `reset-identifiers` runs. `show` and `status` do not lock writers, so a summary spanning several files is not an atomic snapshot.
+Session sets and contribution counts are never copied into metric rows. Symposium discards complete plugin-hook entries, including their row identifiers, at day rollover or when `clear` or `reset-identifiers` runs. `clear` also deletes the identified rows, while reset removes entries keyed to the previous identifier epoch. `show` and `status` do not lock writers, so a summary spanning several files is not an atomic snapshot.
 
 ## Concurrent recording
 

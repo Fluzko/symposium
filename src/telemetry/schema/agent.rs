@@ -15,7 +15,7 @@ use crate::{
             AgentDomain, AgentSubject, DimensionWriter, IdentifierWindowScope, IdentityDimension,
             RetentionDimension, RetentionSubject, SessionDomain, SessionId,
         },
-        state::BoundSessionObservation,
+        state::{BoundRecordingObservation, BoundSessionObservation},
     },
 };
 
@@ -174,7 +174,7 @@ pub(in crate::telemetry) struct AgentSessionIdentity {
 impl AgentSessionIdentity {
     /// Derive the identifier for one agent session in an identifier window.
     #[must_use]
-    pub(in crate::telemetry) fn new(
+    fn new(
         identity: &IdentifierWindowScope<'_>,
         agent: HookAgent,
         vendor_session_id: Option<&VendorSessionId>,
@@ -433,19 +433,18 @@ impl AgentConfigurationV1 {
     /// Create one agent entry in a daily configuration snapshot.
     #[must_use]
     pub(in crate::telemetry) fn new(
-        identity: &IdentifierWindowScope<'_>,
-        day: UtcDay,
+        observation: &BoundRecordingObservation<'_>,
         os: OperatingSystem,
         arch: Architecture,
         fields: AgentConfigurationFields,
     ) -> Self {
-        let agent_subject = identity.derive(&fields.agent);
+        let agent_subject = observation.identifier_window_scope().derive(&fields.agent);
 
         Self {
             version: SchemaVersion::V1,
             kind: RowKind::AgentConfiguration,
             event_id: EventId::new(),
-            day,
+            day: observation.day(),
             symposium: SymposiumVersion::current(),
             agent: fields.agent,
             configured: fields.configured,
@@ -458,7 +457,7 @@ impl AgentConfigurationV1 {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{NaiveDate, TimeZone, Utc};
+    use chrono::{TimeZone, Utc};
 
     use super::super::{
         IDENTIFIER_WINDOW_TEST_STATE, RowClassification, TelemetryRow, assert_contract_names,
@@ -467,9 +466,12 @@ mod tests {
     use super::*;
     use crate::telemetry::{identity::encode_dimension_for_test, state::TelemetryStateV1};
 
-    fn session_start_fields(vendor_session_id: Option<&VendorSessionId>) -> SessionStartFields<'_> {
+    fn session_start_fields(
+        agent: HookAgent,
+        vendor_session_id: Option<&VendorSessionId>,
+    ) -> SessionStartFields<'_> {
         SessionStartFields {
-            agent: HookAgent::Claude,
+            agent,
             os: OperatingSystem::Linux,
             arch: Architecture::X86_64,
             start: SessionStartKind::Fresh,
@@ -485,21 +487,28 @@ mod tests {
         completed_at: UtcSecond,
         vendor_session_id: Option<&VendorSessionId>,
     ) -> SessionStartV1 {
+        session_start_for_agent(completed_at, HookAgent::Claude, vendor_session_id)
+    }
+
+    fn session_start_for_agent(
+        completed_at: UtcSecond,
+        agent: HookAgent,
+        vendor_session_id: Option<&VendorSessionId>,
+    ) -> SessionStartV1 {
         let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
         let observation = state.observe_session(completed_at).unwrap();
         let observation = state.bind_session_observation(observation).unwrap();
 
-        SessionStartV1::new(session_start_fields(vendor_session_id), &observation)
+        SessionStartV1::new(session_start_fields(agent, vendor_session_id), &observation)
     }
 
     fn agent_configuration(agent: SupportedAgent) -> AgentConfigurationV1 {
-        let state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let identity = state.identifier_window_scope();
-        let day = UtcDay::from_date(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap());
+        let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
+        let observation = state.observe_session(session_start_time()).unwrap();
+        let observation = state.bind_session_observation(observation).unwrap();
 
         AgentConfigurationV1::new(
-            &identity,
-            day,
+            observation.recording(),
             OperatingSystem::Linux,
             Architecture::X86_64,
             AgentConfigurationFields {
@@ -541,49 +550,51 @@ mod tests {
 
     #[test]
     fn session_subject_derivation_matches_independent_vector() {
-        let state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let identity = state.identifier_window_scope();
         let vendor_session_id = VendorSessionId::new("vendor-session-123".to_owned());
 
-        let session =
-            AgentSessionIdentity::new(&identity, HookAgent::Claude, Some(&vendor_session_id));
+        let row = session_start(session_start_time(), Some(&vendor_session_id));
 
         // Cross-checked with .NET's HMACSHA256 over the contract header,
         // identifier window, agent, and vendor session id. The complete
         // digest is
         // 2f77ea40740f4be8e85ba05e7924e1ad054037d26629db2ef7dc7097dddf723a.
         assert_eq!(
-            session.session_id(),
+            row.session_id,
             Some("sess_2f77ea40740f4be8e85ba05e7924e1ad".parse().unwrap())
         );
     }
 
     #[test]
     fn session_subject_changes_with_the_agent_or_vendor_session_id() {
-        let state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let identity = state.identifier_window_scope();
         let first_vendor_id = VendorSessionId::new("vendor-session-123".to_owned());
         let second_vendor_id = VendorSessionId::new("vendor-session-456".to_owned());
 
-        let first = AgentSessionIdentity::new(&identity, HookAgent::Claude, Some(&first_vendor_id));
-        let other_agent =
-            AgentSessionIdentity::new(&identity, HookAgent::Codex, Some(&first_vendor_id));
-        let other_vendor_id =
-            AgentSessionIdentity::new(&identity, HookAgent::Claude, Some(&second_vendor_id));
+        let first = session_start_for_agent(
+            session_start_time(),
+            HookAgent::Claude,
+            Some(&first_vendor_id),
+        );
+        let other_agent = session_start_for_agent(
+            session_start_time(),
+            HookAgent::Codex,
+            Some(&first_vendor_id),
+        );
+        let other_vendor_id = session_start_for_agent(
+            session_start_time(),
+            HookAgent::Claude,
+            Some(&second_vendor_id),
+        );
 
-        assert_ne!(first.session_id(), other_agent.session_id());
-        assert_ne!(first.session_id(), other_vendor_id.session_id());
+        assert_ne!(first.session_id, other_agent.session_id);
+        assert_ne!(first.session_id, other_vendor_id.session_id);
     }
 
     #[test]
     fn agent_session_without_vendor_id_is_unidentified() {
-        let state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let identity = state.identifier_window_scope();
+        let row = session_start_for_agent(session_start_time(), HookAgent::Copilot, None);
 
-        let session = AgentSessionIdentity::new(&identity, HookAgent::Copilot, None);
-
-        assert_eq!(session.agent(), HookAgent::Copilot);
-        assert_eq!(session.session_id(), None);
+        assert_eq!(row.agent, HookAgent::Copilot);
+        assert_eq!(row.session_id, None);
     }
 
     #[test]
@@ -768,7 +779,7 @@ mod tests {
         let observation = state.observe_session(completed_at).unwrap();
         let observation = state.bind_session_observation(observation).unwrap();
 
-        let row = SessionStartV1::new(session_start_fields(None), &observation);
+        let row = SessionStartV1::new(session_start_fields(HookAgent::Claude, None), &observation);
         let stored_state = toml::to_string(&state).unwrap();
         let stored_state = toml::from_str::<toml::Value>(&stored_state).unwrap();
         let cohort_anchor = stored_state["identity"]["return-cohort-anchor"]
@@ -783,7 +794,7 @@ mod tests {
 
     #[test]
     fn new_agent_configuration_derives_subject_from_its_agent() {
-        let day = UtcDay::from_date(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap());
+        let day = session_start_time().day();
         // Cross-checked with .NET's HMACSHA256 over the contract header,
         // identifier window, and agent. The complete digest is
         // e346647f3c83e0f8bea71a0ff04bfb6fa601f0967a92713894dcea7f793214b0.

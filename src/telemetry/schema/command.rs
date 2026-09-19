@@ -5,12 +5,16 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{
+    EventId, RowKind, SchemaVersion, SymposiumVersion, UtcDay, UtcSecond, deserialize_version_one,
     extension::{PublicExtensionName, PublicExtensionNameError, PublicExtensionSource},
     name::{InitialByteRule, validated_string_newtype},
 };
 use crate::{
     cli::{Commands, PluginCommand},
-    telemetry::identity::{CommandDomain, DimensionWriter, IdentityDimension},
+    telemetry::{
+        identity::{CommandDomain, CommandSubject, DimensionWriter, IdentityDimension},
+        state::BoundRecordingObservation,
+    },
 };
 
 const MAX_PUBLIC_COMMAND_NAME_BYTES: usize = 64;
@@ -220,18 +224,133 @@ impl IdentityDimension for CommandCoordinate {
     }
 }
 
+/// Version 1 record of one completed eligible top-level command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawCommandV1")]
+pub(in crate::telemetry) struct CommandV1 {
+    #[serde(rename = "v")]
+    version: SchemaVersion,
+    kind: RowKind,
+    event_id: EventId,
+    day: UtcDay,
+    at: UtcSecond,
+    symposium: SymposiumVersion,
+    command: CommandCoordinate,
+    duration_ms: u64,
+    outcome: CommandOutcome,
+    command_subject: CommandSubject,
+}
+
+impl CommandV1 {
+    /// Create a record for one completed eligible top-level command.
+    #[must_use]
+    pub(in crate::telemetry) fn new(
+        observation: &BoundRecordingObservation<'_>,
+        command: CommandCoordinate,
+        duration_ms: u64,
+        outcome: CommandOutcome,
+    ) -> Self {
+        let at = observation.completed_at();
+        let day = observation.day();
+        let command_subject = observation.identifier_window_scope().derive(&command);
+
+        Self {
+            version: SchemaVersion::V1,
+            kind: RowKind::Command,
+            event_id: EventId::new(),
+            day,
+            at,
+            symposium: SymposiumVersion::current(),
+            command,
+            duration_ms,
+            outcome,
+            command_subject,
+        }
+    }
+}
+
+/// Strict wire representation validated before becoming a command row.
+///
+/// Serde's `try_from` deserializes this type rather than the outer row, so its
+/// version and unknown-field checks are deliberately declared here.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCommandV1 {
+    #[serde(rename = "v", deserialize_with = "deserialize_version_one")]
+    version: SchemaVersion,
+    kind: RowKind,
+    event_id: EventId,
+    day: UtcDay,
+    at: UtcSecond,
+    symposium: SymposiumVersion,
+    command: CommandCoordinate,
+    duration_ms: u64,
+    outcome: CommandOutcome,
+    command_subject: CommandSubject,
+}
+
+impl TryFrom<RawCommandV1> for CommandV1 {
+    type Error = CommandError;
+
+    fn try_from(raw: RawCommandV1) -> Result<Self, Self::Error> {
+        let timestamp_day = raw.at.day();
+        if raw.day != timestamp_day {
+            return Err(CommandError::DayDoesNotMatchTimestamp {
+                stored: raw.day,
+                timestamp: timestamp_day,
+            });
+        }
+
+        Ok(Self {
+            version: raw.version,
+            kind: raw.kind,
+            event_id: raw.event_id,
+            day: raw.day,
+            at: raw.at,
+            symposium: raw.symposium,
+            command: raw.command,
+            duration_ms: raw.duration_ms,
+            outcome: raw.outcome,
+            command_subject: raw.command_subject,
+        })
+    }
+}
+
+/// Invalid relationship between fields in a command row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandError {
+    DayDoesNotMatchTimestamp { stored: UtcDay, timestamp: UtcDay },
+}
+
+impl fmt::Display for CommandError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DayDoesNotMatchTimestamp { stored, timestamp } => write!(
+                formatter,
+                "stored command day {stored} does not match timestamp day {timestamp}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CommandError {}
+
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
     use clap::Parser as _;
 
     use super::super::{
         IDENTIFIER_WINDOW_TEST_STATE, assert_contract_names, assert_contract_names_with_labels,
-        recorded_data_example_block_at,
+        recorded_data_example_block_at, recorded_data_example_row,
     };
     use super::*;
     use crate::{
         cli::Cli,
-        telemetry::{identity::encode_dimension_for_test, state::TelemetryStateV1},
+        telemetry::{
+            identity::encode_dimension_for_test,
+            state::{BoundRecordingObservation, TelemetryStateV1},
+        },
     };
 
     fn parse_command(arguments: &[&str]) -> Commands {
@@ -249,6 +368,22 @@ mod tests {
         CommandCoordinate::plugin(
             PublicPluginCommandCoordinate::try_new(source, plugin, name).unwrap(),
         )
+    }
+
+    fn command_time() -> UtcSecond {
+        UtcSecond::from_datetime(Utc.with_ymd_and_hms(2026, 8, 3, 10, 2, 11).unwrap())
+    }
+
+    fn command_observation(state: &mut TelemetryStateV1) -> BoundRecordingObservation<'_> {
+        let observation = state.observe_recording(command_time()).unwrap();
+        state.bind_recording_observation(observation).unwrap()
+    }
+
+    fn command_row(command: CommandCoordinate) -> CommandV1 {
+        let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
+        let observation = command_observation(&mut state);
+
+        CommandV1::new(&observation, command, 820, CommandOutcome::Ok)
     }
 
     #[test]
@@ -447,15 +582,13 @@ mod tests {
 
     #[test]
     fn command_subject_derivation_matches_independent_vector() {
-        let state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let identity = state.identifier_window_scope();
         let command = plugin_command(
             PublicExtensionSource::SymposiumRecommendations,
             "example-tools",
             "example-check",
         );
 
-        let subject = identity.derive(&command);
+        let subject = command_row(command).command_subject;
 
         // Cross-checked with .NET's HMACSHA256 over the contract header,
         // identifier window, command type, source, plugin name, and command
@@ -469,8 +602,6 @@ mod tests {
 
     #[test]
     fn command_subject_changes_with_the_typed_coordinate() {
-        let state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let identity = state.identifier_window_scope();
         let baseline = plugin_command(
             PublicExtensionSource::SymposiumRecommendations,
             "example-tools",
@@ -495,14 +626,98 @@ mod tests {
             ),
         ];
 
-        let baseline_subject = identity.derive(&baseline);
-        let use_subject = identity.derive(&CommandCoordinate::builtin(BuiltinCommand::Use));
-        let remove_subject = identity.derive(&CommandCoordinate::builtin(BuiltinCommand::Remove));
+        let baseline_subject = command_row(baseline).command_subject;
+        let use_subject =
+            command_row(CommandCoordinate::builtin(BuiltinCommand::Use)).command_subject;
+        let remove_subject =
+            command_row(CommandCoordinate::builtin(BuiltinCommand::Remove)).command_subject;
 
-        for coordinate in &changed_coordinates {
-            assert_ne!(identity.derive(coordinate), baseline_subject);
+        for coordinate in changed_coordinates {
+            assert_ne!(command_row(coordinate).command_subject, baseline_subject);
         }
         assert_ne!(use_subject, remove_subject);
+    }
+
+    #[test]
+    fn command_example_round_trips_in_contract_shape() {
+        let source = recorded_data_example_row("command");
+
+        let row = serde_json::from_str::<CommandV1>(source).unwrap();
+        let serialized = serde_json::to_string(&row).unwrap();
+
+        assert_eq!(serialized, source);
+    }
+
+    #[test]
+    fn new_command_derives_fixed_fields_day_and_subject() {
+        let at = command_time();
+        let command = CommandCoordinate::builtin(BuiltinCommand::Use);
+        // Cross-checked in the same independent .NET calculation as the
+        // plugin-command vector. The complete digest is
+        // 0b0899a55d1cbe757b8b505091f6e1f3a4646f26a9a05de1769faaea84f249ca.
+        let expected_subject = "cmd_0b0899a55d1cbe757b8b505091f6e1f3".parse().unwrap();
+
+        let row = command_row(command.clone());
+
+        assert_eq!(row.version, SchemaVersion::V1);
+        assert_eq!(row.kind, RowKind::Command);
+        assert_eq!(row.event_id.0.get_version(), Some(uuid::Version::Random));
+        assert_eq!(row.day, at.day());
+        assert_eq!(row.at, at);
+        assert_eq!(row.symposium, SymposiumVersion::current());
+        assert_eq!(row.command, command);
+        assert_eq!(row.duration_ms, 820);
+        assert_eq!(row.outcome, CommandOutcome::Ok);
+        assert_eq!(row.command_subject, expected_subject);
+    }
+
+    #[test]
+    fn command_rejects_a_day_that_disagrees_with_its_timestamp() {
+        let row = command_row(CommandCoordinate::builtin(BuiltinCommand::Use));
+        let mut value = serde_json::to_value(row).unwrap();
+        value["day"] = serde_json::Value::String("2026-08-04".to_owned());
+
+        let result = serde_json::from_value::<CommandV1>(value);
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("stored command day 2026-08-04 does not match timestamp day 2026-08-03")
+        );
+    }
+
+    #[test]
+    fn command_rejects_future_version() {
+        let row = command_row(CommandCoordinate::builtin(BuiltinCommand::Use));
+        let mut value = serde_json::to_value(row).unwrap();
+        value["v"] = serde_json::Value::from(2);
+
+        let result = serde_json::from_value::<CommandV1>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn command_rejects_unknown_fields() {
+        let row = command_row(CommandCoordinate::builtin(BuiltinCommand::Use));
+        let mut value = serde_json::to_value(row).unwrap();
+        value["arguments"] = serde_json::Value::String("example-tools".to_owned());
+
+        let result = serde_json::from_value::<CommandV1>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn command_requires_every_field() {
+        let row = command_row(CommandCoordinate::builtin(BuiltinCommand::Use));
+        let mut value = serde_json::to_value(row).unwrap();
+        value.as_object_mut().unwrap().remove("duration_ms");
+
+        let result = serde_json::from_value::<CommandV1>(value);
+
+        assert!(result.is_err());
     }
 
     #[test]

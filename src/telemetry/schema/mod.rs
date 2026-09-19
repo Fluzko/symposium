@@ -464,6 +464,22 @@ fn recorded_data_example_block_at(
 }
 
 #[cfg(test)]
+fn recorded_data_example_row(requested_kind: &str) -> &'static str {
+    let example_block =
+        recorded_data_example_block("## Example JSONL for every row kind", "```jsonl");
+
+    example_block
+        .lines()
+        .filter_map(|line| {
+            serde_json::from_str::<RowEnvelope>(line)
+                .ok()
+                .map(|envelope| (line, envelope))
+        })
+        .find_map(|(line, envelope)| (envelope.kind == requested_kind).then_some(line))
+        .unwrap_or_else(|| panic!("missing {requested_kind} example in recorded-data contract"))
+}
+
+#[cfg(test)]
 fn assert_contract_names<T>(cases: &[(T, &str)])
 where
     T: Copy + fmt::Debug + PartialEq + Serialize + DeserializeOwned,
@@ -494,18 +510,7 @@ mod tests {
     use super::*;
 
     fn example_row(requested_kind: &str) -> &'static str {
-        let example_block =
-            recorded_data_example_block("## Example JSONL for every row kind", "```jsonl");
-
-        example_block
-            .lines()
-            .filter_map(|line| {
-                serde_json::from_str::<RowEnvelope>(line)
-                    .ok()
-                    .map(|envelope| (line, envelope))
-            })
-            .find_map(|(line, envelope)| (envelope.kind == requested_kind).then_some(line))
-            .unwrap_or_else(|| panic!("missing {requested_kind} example in recorded-data contract"))
+        recorded_data_example_row(requested_kind)
     }
 
     #[test]

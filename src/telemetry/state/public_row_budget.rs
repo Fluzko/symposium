@@ -1,8 +1,8 @@
 //! Daily admission budget shared by named aggregate families.
 
-use std::fmt;
-
 use crate::telemetry::schema::UtcDay;
+
+use super::open_day::{DayBeforeCurrent, OpenDay, OpenDayUpdate};
 
 /// Maximum public rows one aggregate family may admit in a UTC day.
 pub(in crate::telemetry) const MAX_PUBLIC_ROWS_PER_DAY: u64 = 128;
@@ -14,55 +14,39 @@ pub(super) enum PublicRowAdmission {
     Overflow,
 }
 
-/// Change observed while selecting the active budget day.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BudgetDayUpdate {
-    Current,
-    Advanced,
-}
-
 /// Independent daily allowance for one family of public aggregate rows.
 ///
 /// Callers check for an existing aggregate before consuming this budget.
 /// Identifier reset deliberately does not mutate it. Day rollover and clear
 /// are the only operations that restore the full allowance.
-/// Persistence must source this day from the latest-opened-day high-water mark
-/// rather than store a second independent monotonic clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DailyPublicRowBudget {
-    day: UtcDay,
+    day: OpenDay,
     admitted: u64,
 }
 
 impl DailyPublicRowBudget {
     #[must_use]
     pub(super) const fn new(day: UtcDay) -> Self {
-        Self { day, admitted: 0 }
+        Self {
+            day: OpenDay::new(day),
+            admitted: 0,
+        }
     }
 
     /// Select a day, restoring the allowance after forward UTC-day rollover.
     ///
     /// # Errors
     ///
-    /// Returns a budget-day error if the observed day precedes the budget's
-    /// monotonic UTC day.
-    pub(super) fn select_day(
-        &mut self,
-        day: UtcDay,
-    ) -> Result<BudgetDayUpdate, BudgetDayBeforeCurrent> {
-        if day < self.day {
-            return Err(BudgetDayBeforeCurrent {
-                current: self.day,
-                observed: day,
-            });
-        }
-        if day == self.day {
-            return Ok(BudgetDayUpdate::Current);
+    /// Returns [`DayBeforeCurrent`] if the observed day precedes the
+    /// current open UTC day.
+    pub(super) fn select_day(&mut self, day: UtcDay) -> Result<OpenDayUpdate, DayBeforeCurrent> {
+        let update = self.day.select(day)?;
+        if update == OpenDayUpdate::Advanced {
+            self.admitted = 0;
         }
 
-        self.day = day;
-        self.admitted = 0;
-        Ok(BudgetDayUpdate::Advanced)
+        Ok(update)
     }
 
     /// Consume one allowance slot for a new public aggregate.
@@ -97,25 +81,6 @@ impl DailyPublicRowBudget {
     }
 }
 
-/// An observation dated before a family's active public-row budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct BudgetDayBeforeCurrent {
-    pub(super) current: UtcDay,
-    pub(super) observed: UtcDay,
-}
-
-impl fmt::Display for BudgetDayBeforeCurrent {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "public-row budget day {} precedes active day {}",
-            self.observed, self.current
-        )
-    }
-}
-
-impl std::error::Error for BudgetDayBeforeCurrent {}
-
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
@@ -144,9 +109,9 @@ mod tests {
         let mut budget = DailyPublicRowBudget::new(day(3));
         assert_eq!(budget.admit_new(), PublicRowAdmission::Public);
 
-        assert_eq!(budget.select_day(day(3)), Ok(BudgetDayUpdate::Current));
+        assert_eq!(budget.select_day(day(3)), Ok(OpenDayUpdate::Current));
         assert_eq!(budget.admitted(), 1);
-        assert_eq!(budget.select_day(day(4)), Ok(BudgetDayUpdate::Advanced));
+        assert_eq!(budget.select_day(day(4)), Ok(OpenDayUpdate::Advanced));
 
         assert_eq!(budget.admitted(), 0);
     }
@@ -161,7 +126,7 @@ mod tests {
 
         assert_eq!(
             result,
-            Err(BudgetDayBeforeCurrent {
+            Err(DayBeforeCurrent {
                 current: day(4),
                 observed: day(3),
             })
@@ -177,6 +142,6 @@ mod tests {
         budget.clear();
 
         assert_eq!(budget.admitted(), 0);
-        assert_eq!(budget.select_day(day(3)), Ok(BudgetDayUpdate::Current));
+        assert_eq!(budget.select_day(day(3)), Ok(OpenDayUpdate::Current));
     }
 }

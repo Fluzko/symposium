@@ -18,6 +18,7 @@ use super::{
 
 mod extension_invocation;
 mod lifecycle;
+mod open_day;
 mod plugin_hook;
 mod public_row_budget;
 mod session_counts;
@@ -31,6 +32,7 @@ pub(in crate::telemetry) use extension_invocation::{
     SelectedExtensionInvocationAggregate,
 };
 pub(in crate::telemetry) use lifecycle::{BoundRecordingObservation, BoundSessionObservation};
+pub(in crate::telemetry) use open_day::DayBeforeCurrent;
 pub(in crate::telemetry) use plugin_hook::SelectedPluginHookAggregate;
 pub(in crate::telemetry) use session_counts::{
     HookSessionCountSnapshot, HookSessionCountTracker, HookSessionCountUpdateError,

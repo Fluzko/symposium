@@ -296,10 +296,12 @@ fn an_older_observation_is_rejected_without_changing_the_store() {
 
     assert_eq!(
         result.err(),
-        Some(ExtensionInvocationAdmissionError::DayBeforeCurrent {
-            current: day(4),
-            observed: day(3),
-        })
+        Some(ExtensionInvocationAdmissionError::DayBeforeCurrent(
+            DayBeforeCurrent {
+                current: day(4),
+                observed: day(3),
+            },
+        ))
     );
     assert_eq!(store, before);
 }

@@ -16,10 +16,9 @@ use crate::telemetry::{
         PublicSkillCoordinate, SupportedAgent, UnnamedExtensionReason, UtcDay,
     },
     state::{
-        BoundRecordingObservation,
-        public_row_budget::{
-            BudgetDayBeforeCurrent, BudgetDayUpdate, DailyPublicRowBudget, PublicRowAdmission,
-        },
+        BoundRecordingObservation, DayBeforeCurrent,
+        open_day::OpenDayUpdate,
+        public_row_budget::{DailyPublicRowBudget, PublicRowAdmission},
     },
 };
 
@@ -276,7 +275,7 @@ impl ExtensionInvocationAggregateStore {
         agent: ExtensionInvocationAgent,
         attribution: ExtensionInvocationAttribution,
     ) -> Result<SelectedExtensionInvocationAggregate<'_>, ExtensionInvocationAdmissionError> {
-        if self.public_rows.select_day(recording.day())? == BudgetDayUpdate::Advanced {
+        if self.public_rows.select_day(recording.day())? == OpenDayUpdate::Advanced {
             self.entries.clear();
         }
 
@@ -397,26 +396,22 @@ impl ExtensionInvocationAggregateStore {
 /// Failure while selecting private extension-invocation aggregate state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::telemetry) enum ExtensionInvocationAdmissionError {
-    DayBeforeCurrent { current: UtcDay, observed: UtcDay },
+    DayBeforeCurrent(DayBeforeCurrent),
     PrivateState(ExtensionAggregateSelectionError),
 }
 
-impl From<BudgetDayBeforeCurrent> for ExtensionInvocationAdmissionError {
-    fn from(error: BudgetDayBeforeCurrent) -> Self {
-        Self::DayBeforeCurrent {
-            current: error.current,
-            observed: error.observed,
-        }
+impl From<DayBeforeCurrent> for ExtensionInvocationAdmissionError {
+    fn from(error: DayBeforeCurrent) -> Self {
+        Self::DayBeforeCurrent(error)
     }
 }
 
 impl fmt::Display for ExtensionInvocationAdmissionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DayBeforeCurrent { current, observed } => write!(
-                formatter,
-                "extension-invocation budget day {observed} precedes active day {current}"
-            ),
+            Self::DayBeforeCurrent(error) => {
+                write!(formatter, "extension-invocation budget {error}")
+            }
             Self::PrivateState(error) => error.fmt(formatter),
         }
     }

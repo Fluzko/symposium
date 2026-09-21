@@ -397,16 +397,22 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     for agent_name in &agent_names {
         let agent = Agent::from_config_name(agent_name)?;
 
-        let hook_root = match sym.config.hook_scope {
-            crate::config::HookScope::Global => sym.home_dir().to_path_buf(),
-            crate::config::HookScope::Project => project_root.clone(),
-        };
+        // Hooks: the project and global locations are genuinely different files
+        // for some agents - Antigravity writes `.agents/hooks.json` but
+        // `~/.gemini/config/hooks.json`, and Copilot `.github/hooks/` but
+        // `~/.copilot/settings.json` - so project scope cannot be produced by
+        // rooting the global path at the workspace.
+        match sym.config.hook_scope {
+            crate::config::HookScope::Global => agent
+                .register_hooks(sym.home_dir(), sym, out)
+                .context("failed to register hooks")?,
+            crate::config::HookScope::Project => agent
+                .register_project_hooks(&project_root, sym, out)
+                .context("failed to register hooks")?,
+        }
 
-        // MCP does not follow `hook_root`: an agent's MCP file differs from its
-        // hooks file, so the target is resolved per agent instead.
-        agent
-            .register_hooks(&hook_root, sym, out)
-            .context("failed to register hooks")?;
+        // MCP does not follow the hook scope: an agent's MCP file differs from
+        // its hooks file, so the target is resolved per agent instead.
         let mcp_scope = match sym.config.hook_scope {
             crate::config::HookScope::Global => crate::agents::McpScope::User,
             crate::config::HookScope::Project => crate::agents::McpScope::Project,
@@ -551,11 +557,19 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
         }
     }
 
-    // Both scopes: entries may have been written under either, and a leftover
-    // one keeps pointing the agent at a server this workspace no longer offers.
+    // Hooks come off at whichever scope they would have been written to; MCP
+    // entries come off at both, since a leftover one keeps pointing the agent
+    // at a server this workspace no longer offers.
     for &agent in Agent::all() {
         if !agent_names.contains(&agent.config_name().to_string()) {
-            agent.unregister_hooks(sym.home_dir(), sym, out);
+            match sym.config.hook_scope {
+                crate::config::HookScope::Global => {
+                    agent.unregister_hooks(sym.home_dir(), sym, out)
+                }
+                crate::config::HookScope::Project => {
+                    agent.unregister_project_hooks(&project_root, sym, out)
+                }
+            }
             for scope in [
                 crate::agents::McpScope::Project,
                 crate::agents::McpScope::User,

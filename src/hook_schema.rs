@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use std::{any::Any, fmt::Debug};
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
-pub mod gemini;
 pub mod goose;
 pub mod kiro;
 pub mod opencode;
@@ -17,6 +17,9 @@ pub mod symposium;
 /// Agents supported by Symposium hooks.
 #[derive(Debug, Copy, Clone, clap::ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HookAgent {
+    #[value(name = "antigravity")]
+    #[serde(rename = "antigravity")]
+    Antigravity,
     #[value(name = "claude")]
     #[serde(rename = "claude")]
     Claude,
@@ -26,9 +29,6 @@ pub enum HookAgent {
     #[value(name = "copilot")]
     #[serde(rename = "copilot")]
     Copilot,
-    #[value(name = "gemini")]
-    #[serde(rename = "gemini")]
-    Gemini,
     #[value(name = "goose")]
     #[serde(rename = "goose")]
     Goose,
@@ -44,10 +44,10 @@ impl HookAgent {
     /// Canonical lowercase agent name (matches the config `[[agent]]` names).
     pub fn as_str(&self) -> &'static str {
         match self {
+            HookAgent::Antigravity => "antigravity",
             HookAgent::Claude => "claude",
             HookAgent::Codex => "codex",
             HookAgent::Copilot => "copilot",
-            HookAgent::Gemini => "gemini",
             HookAgent::Goose => "goose",
             HookAgent::Kiro => "kiro",
             HookAgent::OpenCode => "opencode",
@@ -56,10 +56,10 @@ impl HookAgent {
 
     pub fn event(&self, event: HookEvent) -> Option<Box<dyn ErasedAgentHookEvent>> {
         match self {
+            HookAgent::Antigravity => antigravity::Antigravity.event(event),
             HookAgent::Claude => claude::ClaudeCode.event(event),
             HookAgent::Codex => codex::Codex.event(event),
             HookAgent::Copilot => copilot::Copilot.event(event),
-            HookAgent::Gemini => gemini::Gemini.event(event),
             HookAgent::Goose => goose::Goose.event(event),
             HookAgent::Kiro => kiro::Kiro.event(event),
             HookAgent::OpenCode => opencode::OpenCode.event(event),
@@ -83,6 +83,16 @@ pub trait AgentHookInput: Debug {
         Self: Sized;
     /// Convert this payload into a JSON string for forwarding to plugins.
     fn to_string(&self) -> Result<String>;
+
+    /// Whether this payload is an occurrence of the symposium event it maps
+    /// to. An agent's native event can be broader than the canonical one
+    /// (Antigravity's `PreInvocation` fires before every model call but stands
+    /// in for `user-prompt-submit`), and a payload that is not such an
+    /// occurrence is answered with the agent's neutral output and dispatched
+    /// to nothing.
+    fn should_dispatch(&self) -> bool {
+        true
+    }
 
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }

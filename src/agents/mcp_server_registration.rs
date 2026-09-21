@@ -169,7 +169,7 @@ fn upsert_json_mcp_entry(
 }
 
 // ---------------------------------------------------------------------------
-// JSON-based registration (Claude, Copilot, Gemini, Kiro, OpenCode)
+// JSON-based registration (Antigravity, Claude, Copilot, Kiro, OpenCode)
 // ---------------------------------------------------------------------------
 
 /// Register MCP servers into a JSON config file under a given container key.
@@ -287,6 +287,26 @@ pub(super) fn register_claude_mcp_servers(
 }
 
 pub(super) fn unregister_claude_mcp_servers(
+    path: &Path,
+    names: &[&str],
+    out: &Output,
+) -> Result<()> {
+    unregister_json_mcp_servers(path, names, Some("mcpServers"), out)
+}
+
+/// Antigravity CLI: `mcpServers.<name>` in a dedicated `mcp_config.json`.
+///
+/// Same entry shape as Claude, but its own file rather than sharing one with
+/// hooks, so a broken hooks config cannot take MCP down with it.
+pub(super) fn register_antigravity_mcp_servers(
+    path: &Path,
+    servers: &[McpServer],
+    out: &Output,
+) -> Result<()> {
+    register_json_mcp_servers(path, servers, Some("mcpServers"), out)
+}
+
+pub(super) fn unregister_antigravity_mcp_servers(
     path: &Path,
     names: &[&str],
     out: &Output,
@@ -447,23 +467,6 @@ pub(super) fn unregister_copilot_mcp_servers(
     out: &Output,
 ) -> Result<()> {
     unregister_json_mcp_servers(path, names, Some("mcpServers"), out)
-}
-
-/// Gemini CLI: same format as Claude (`mcpServers.<name>`)
-pub(super) fn register_gemini_mcp_servers(
-    path: &Path,
-    servers: &[McpServer],
-    out: &Output,
-) -> Result<()> {
-    register_claude_mcp_servers(path, servers, out)
-}
-
-pub(super) fn unregister_gemini_mcp_servers(
-    path: &Path,
-    names: &[&str],
-    out: &Output,
-) -> Result<()> {
-    unregister_claude_mcp_servers(path, names, out)
 }
 
 /// Kiro: `mcpServers.<name>` in mcp.json
@@ -951,7 +954,7 @@ mod tests {
         assert_eq!(first, fs::read_to_string(&path).unwrap());
     }
 
-    // -- Claude MCP (also covers Gemini and Kiro via delegation) --
+    // -- Claude MCP (also covers Antigravity and Kiro via delegation) --
 
     #[test]
     fn register_claude_creates_config() {

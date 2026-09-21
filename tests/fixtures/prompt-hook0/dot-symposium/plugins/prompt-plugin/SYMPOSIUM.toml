@@ -1,0 +1,10 @@
+name = "prompt-plugin"
+depends-on = ["*"]
+
+# Fires on the prompt event and marks its output, so a test can tell whether
+# a given payload reached plugin dispatch at all.
+[[hooks]]
+name = "on-prompt"
+event = "UserPromptSubmit"
+command = { script = "$TEST_DIR/dot-symposium/plugins/prompt-plugin/scripts/on-prompt.sh" }
+format = "symposium"

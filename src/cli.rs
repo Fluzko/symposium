@@ -63,7 +63,7 @@ pub struct Cli {
 pub enum Commands {
     /// Set up user-wide configuration
     Init {
-        /// Agent to configure (e.g., claude, copilot, gemini). Repeatable.
+        /// Agent to configure (e.g., antigravity, claude, copilot). Repeatable.
         /// Skips the interactive prompt.
         #[arg(long = "add-agent")]
         agents: Vec<String>,
@@ -106,7 +106,7 @@ pub enum Commands {
     /// Hook entry point invoked by your agent (internal)
     #[command(hide = true)]
     Hook {
-        /// The agent (claude, copilot, gemini)
+        /// The agent (antigravity, claude, copilot, ...)
         agent: hook::HookAgent,
 
         /// The hook event (e.g., pre-tool-use, post-tool-use)

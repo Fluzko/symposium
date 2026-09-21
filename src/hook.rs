@@ -239,6 +239,20 @@ pub async fn execute_hook(
 
     if let Some(handler) = event_handler {
         let payload = handler.parse_input(input)?;
+
+        // The agent's native event can fire more often than the symposium
+        // event it maps to; a payload that is not an occurrence of it gets the
+        // agent's neutral output and reaches neither sync nor any hook.
+        if !payload.should_dispatch() {
+            tracing::debug!(
+                ?agent,
+                ?event,
+                "payload is not an occurrence of the event, skipping"
+            );
+            let neutral = handler.translate_output(&symposium::OutputEvent::empty_for(event));
+            return Ok(handler.serialize_output(&neutral.to_hook_output()));
+        }
+
         let sym_input = payload.to_symposium();
 
         // Create a shared WorkspaceDeps for the entire hook invocation.

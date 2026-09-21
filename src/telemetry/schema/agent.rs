@@ -76,7 +76,7 @@ impl From<Agent> for SupportedAgent {
 ///
 /// Unlike the platform enums, this has no `Other`: Symposium owns the set of
 /// registered agent hooks, so adding an agent changes the row schema.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::telemetry) enum HookAgent {
     Antigravity,

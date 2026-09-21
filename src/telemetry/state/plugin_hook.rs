@@ -2,8 +2,122 @@
 
 use std::fmt;
 
-use super::HookSessionCountTracker;
-use crate::telemetry::schema::{EventId, PluginHookMetricsKey};
+use super::{BoundRecordingObservation, HookSessionCountTracker};
+use crate::telemetry::{
+    identity::PluginSubject,
+    schema::{
+        EventId, HookAgent, HookMetricsKey, HookSurface, PluginHookAttribution,
+        PluginHookMetricsKey, PluginScope, PublicPluginCoordinate, UtcDay,
+    },
+};
+
+/// Identity fields admitted for one plugin-hook aggregate row.
+///
+/// The inner enum is private so only state admission can create an overflow
+/// bucket or pair a public coordinate with its scoped subject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::telemetry) struct AdmittedPluginBucket(AdmittedPluginBucketKind);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdmittedPluginBucketKind {
+    Public {
+        plugin: PublicPluginCoordinate,
+        subject: PluginSubject,
+    },
+    Unnamed,
+    Overflow,
+}
+
+impl AdmittedPluginBucket {
+    fn from_attribution(
+        recording: &BoundRecordingObservation<'_>,
+        attribution: PluginHookAttribution,
+    ) -> Self {
+        match attribution {
+            PluginHookAttribution::Public(plugin) => {
+                let subject = recording.identifier_window_scope().derive(&plugin);
+                Self(AdmittedPluginBucketKind::Public { plugin, subject })
+            }
+            PluginHookAttribution::Unnamed => Self(AdmittedPluginBucketKind::Unnamed),
+        }
+    }
+
+    const fn overflow() -> Self {
+        Self(AdmittedPluginBucketKind::Overflow)
+    }
+
+    #[must_use]
+    pub(in crate::telemetry) const fn scope(&self) -> PluginScope {
+        match self.0 {
+            AdmittedPluginBucketKind::Public { .. } => PluginScope::Public,
+            AdmittedPluginBucketKind::Unnamed => PluginScope::Unnamed,
+            AdmittedPluginBucketKind::Overflow => PluginScope::Overflow,
+        }
+    }
+
+    #[must_use]
+    pub(in crate::telemetry) const fn plugin(&self) -> Option<&PublicPluginCoordinate> {
+        match &self.0 {
+            AdmittedPluginBucketKind::Public { plugin, .. } => Some(plugin),
+            AdmittedPluginBucketKind::Unnamed | AdmittedPluginBucketKind::Overflow => None,
+        }
+    }
+
+    #[must_use]
+    pub(in crate::telemetry) const fn plugin_subject(&self) -> Option<PluginSubject> {
+        match self.0 {
+            AdmittedPluginBucketKind::Public { subject, .. } => Some(subject),
+            AdmittedPluginBucketKind::Unnamed | AdmittedPluginBucketKind::Overflow => None,
+        }
+    }
+
+    const fn key(&self) -> PluginBucketKey {
+        match self.0 {
+            AdmittedPluginBucketKind::Public { subject, .. } => PluginBucketKey::Public(subject),
+            AdmittedPluginBucketKind::Unnamed => PluginBucketKey::Unnamed,
+            AdmittedPluginBucketKind::Overflow => PluginBucketKey::Overflow,
+        }
+    }
+
+    const fn is_public(&self) -> bool {
+        matches!(self.0, AdmittedPluginBucketKind::Public { .. })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum PluginBucketKey {
+    Public(PluginSubject),
+    Unnamed,
+    Overflow,
+}
+
+/// Stable lookup key shared by a plugin-hook row and its private state.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct PluginHookAggregateKey {
+    day: UtcDay,
+    // The row needs these plaintext values; the hook subject separates epochs.
+    agent: HookAgent,
+    surface: HookSurface,
+    hook: HookMetricsKey,
+    bucket: PluginBucketKey,
+}
+
+impl PluginHookAggregateKey {
+    fn new(
+        recording: &BoundRecordingObservation<'_>,
+        agent: HookAgent,
+        surface: HookSurface,
+        bucket: &AdmittedPluginBucket,
+    ) -> Self {
+        Self {
+            day: recording.day(),
+            agent,
+            surface,
+            hook: HookMetricsKey::new(recording, agent, surface),
+            bucket: bucket.key(),
+        }
+    }
+}
 
 /// Private state paired with one plugin-hook aggregate row.
 ///
@@ -104,12 +218,23 @@ mod tests {
     use super::*;
     use crate::telemetry::{
         identity::SessionId,
-        schema::{HookAgent, HookSurface, PluginBucket, PluginHookOutcome, UtcDay},
+        schema::{
+            HookAgent, HookSurface, PluginBucket, PluginHookAttribution, PluginHookOutcome,
+            PublicPluginCoordinate, UtcDay,
+        },
         state::{IDENTIFIER_WINDOW_TEST_STATE, TelemetryStateV1, recording_observation},
     };
 
     fn state() -> TelemetryStateV1 {
         toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap()
+    }
+
+    fn public_plugin(name: &str) -> PublicPluginCoordinate {
+        serde_json::from_value(serde_json::json!({
+            "source": "symposium-recommendations",
+            "name": name,
+        }))
+        .unwrap()
     }
 
     fn key(state: &mut TelemetryStateV1, hook: HookSurface) -> PluginHookMetricsKey {
@@ -185,5 +310,88 @@ mod tests {
 
         assert!(!debug.contains("sess_00000000000000000000000000000001"));
         assert!(debug.contains("identified_sessions: 1"));
+    }
+
+    #[test]
+    fn public_admission_keeps_plugin_and_subject_together() {
+        let mut state = state();
+        let recording = recording_observation(&mut state);
+        let plugin = public_plugin("example-tools");
+        let expected_subject = recording.identifier_window_scope().derive(&plugin);
+
+        let bucket = AdmittedPluginBucket::from_attribution(
+            &recording,
+            PluginHookAttribution::Public(plugin.clone()),
+        );
+
+        assert_eq!(bucket.scope(), PluginScope::Public);
+        assert_eq!(bucket.plugin(), Some(&plugin));
+        assert_eq!(bucket.plugin_subject(), Some(expected_subject));
+    }
+
+    #[test]
+    fn unnamed_admission_exposes_no_public_identity() {
+        let mut state = state();
+        let recording = recording_observation(&mut state);
+
+        let bucket =
+            AdmittedPluginBucket::from_attribution(&recording, PluginHookAttribution::Unnamed);
+
+        assert_eq!(bucket.scope(), PluginScope::Unnamed);
+        assert_eq!(bucket.plugin(), None);
+        assert_eq!(bucket.plugin_subject(), None);
+    }
+
+    #[test]
+    fn admitted_keys_are_stable_and_separate_plugins_and_hooks() {
+        let mut state = state();
+        let recording = recording_observation(&mut state);
+        let bucket = AdmittedPluginBucket::from_attribution(
+            &recording,
+            PluginHookAttribution::Public(public_plugin("example-tools")),
+        );
+        let other_bucket = AdmittedPluginBucket::from_attribution(
+            &recording,
+            PluginHookAttribution::Public(public_plugin("other-tools")),
+        );
+
+        let key = PluginHookAggregateKey::new(
+            &recording,
+            HookAgent::Claude,
+            HookSurface::PreToolUse,
+            &bucket,
+        );
+        let same_key = PluginHookAggregateKey::new(
+            &recording,
+            HookAgent::Claude,
+            HookSurface::PreToolUse,
+            &bucket,
+        );
+        let other_plugin = PluginHookAggregateKey::new(
+            &recording,
+            HookAgent::Claude,
+            HookSurface::PreToolUse,
+            &other_bucket,
+        );
+        let other_hook = PluginHookAggregateKey::new(
+            &recording,
+            HookAgent::Claude,
+            HookSurface::PostToolUse,
+            &bucket,
+        );
+
+        assert_eq!(key, same_key);
+        assert_ne!(key, other_plugin);
+        assert_ne!(key, other_hook);
+    }
+
+    #[test]
+    fn overflow_bucket_exposes_no_public_identity() {
+        let bucket = AdmittedPluginBucket::overflow();
+
+        assert_eq!(bucket.scope(), PluginScope::Overflow);
+        assert_eq!(bucket.plugin(), None);
+        assert_eq!(bucket.plugin_subject(), None);
+        assert!(!bucket.is_public());
     }
 }

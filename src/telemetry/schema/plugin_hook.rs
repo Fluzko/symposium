@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use bucket::{PluginScope, PublicPluginCoordinate};
+pub(in crate::telemetry) use bucket::{PluginHookAttribution, PluginScope, PublicPluginCoordinate};
 use outcome::PluginHookOutcomeCounters;
 
 use super::{

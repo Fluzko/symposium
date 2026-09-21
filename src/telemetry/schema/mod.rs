@@ -25,7 +25,10 @@ pub(in crate::telemetry) use hook::{HookMetricsKey, HookOutcome, HookSurface};
 pub(in crate::telemetry) use metrics::MAX_IDENTIFIED_SESSIONS;
 #[cfg(test)]
 pub(in crate::telemetry) use plugin_hook::PluginBucket;
-pub(in crate::telemetry) use plugin_hook::{PluginHookMetricsKey, PluginHookOutcome};
+pub(in crate::telemetry) use plugin_hook::{
+    PluginHookAttribution, PluginHookMetricsKey, PluginHookOutcome, PluginScope,
+    PublicPluginCoordinate,
+};
 
 use std::{fmt, num::NonZeroU64, sync::LazyLock};
 

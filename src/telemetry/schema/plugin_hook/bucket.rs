@@ -202,6 +202,16 @@ impl PluginHookMetricsKey {
     }
 }
 
+/// Plugin identity observed before private-state admission.
+///
+/// Overflow is deliberately absent. Only the private aggregate store may
+/// assign a public observation to the bounded overflow row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::telemetry) enum PluginHookAttribution {
+    Public(PublicPluginCoordinate),
+    Unnamed,
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::hook_schema::HookEvent;
 
 /// Hook surface included in version 1 aggregate telemetry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::telemetry) enum HookSurface {
     PreToolUse,

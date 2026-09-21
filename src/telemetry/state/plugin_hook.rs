@@ -86,6 +86,10 @@ impl AdmittedPluginBucket {
             AdmittedPluginBucketKind::Overflow => PluginBucketKey::Overflow,
         }
     }
+
+    const fn is_public(&self) -> bool {
+        matches!(self.0, AdmittedPluginBucketKind::Public { .. })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -293,7 +293,7 @@ mod tests {
             IDENTIFIER_WINDOW_TEST_STATE, RowClassification, RowKind, TelemetryRow, UtcSecond,
             classify_row, recording_observation,
         },
-        state::TelemetryStateV1,
+        state::{HookAggregateStore, TelemetryStateV1},
     };
     use chrono::{TimeZone as _, Utc};
 
@@ -367,6 +367,62 @@ mod tests {
             classify_row(&json),
             RowClassification::Supported(TelemetryRow::HookMetrics(_))
         ));
+    }
+
+    #[test]
+    fn hook_store_supplies_trackers_for_creation_updates_and_day_rollover() {
+        let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
+        let vendor_session_id = VendorSessionId::new("vendor-session-123".to_owned());
+        let mut store;
+        let mut row;
+        {
+            let recording = recording_observation(&mut state);
+            store = HookAggregateStore::new(recording.day());
+            let tracker = store
+                .select(&recording, HookAgent::Claude, HookSurface::PreToolUse)
+                .unwrap();
+            row = HookMetricsV1::new(
+                &recording,
+                metric_observation(HookOutcome::Ok, Some(&vendor_session_id)),
+                tracker,
+            )
+            .unwrap();
+            let tracker = store
+                .select(&recording, HookAgent::Claude, HookSurface::PreToolUse)
+                .unwrap();
+
+            row.checked_record(
+                &recording,
+                metric_observation(HookOutcome::Blocked, Some(&vendor_session_id)),
+                tracker,
+            )
+            .unwrap();
+        }
+        let completed_at =
+            UtcSecond::from_datetime(Utc.with_ymd_and_hms(2026, 8, 4, 10, 2, 11).unwrap());
+        let observation = state.observe_recording(completed_at).unwrap();
+        let later = state.bind_recording_observation(observation).unwrap();
+        let row_day = row.day;
+        let tracker = store
+            .select(&later, HookAgent::Claude, HookSurface::PreToolUse)
+            .unwrap();
+        let tracker_before = tracker.clone();
+
+        let result = row.checked_record(
+            &later,
+            metric_observation(HookOutcome::Ok, Some(&vendor_session_id)),
+            tracker,
+        );
+
+        assert_eq!(row.invocations, 2);
+        assert_eq!(
+            result,
+            Err(HookMetricsUpdateError::DayChanged {
+                row_day,
+                observation_day: later.day(),
+            })
+        );
+        assert_eq!(&*tracker, &tracker_before);
     }
 
     #[test]

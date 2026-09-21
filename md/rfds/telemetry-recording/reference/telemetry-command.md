@@ -201,6 +201,8 @@ Event batches are appended. Hook, plugin-hook, and extension-invocation observat
 
 Session-count state is atomically replaced first and carries the snapshot contribution count. After a failed snapshot write, a mismatch discards the sets and makes the row's session counts incomplete for that day.
 
+On load, Symposium rebuilds each daily public-row allowance from every surviving public row for that family and day, saturating the count at 128. When selecting a public aggregate with no private entry, it adopts a matching surviving row without spending another slot only when the row's recorded subject equals the subject derived from the observation. Adoption runs before overflow selection. An unnamed or overflow row with no private entry starts a separate row.
+
 Management commands can wait for the lock. A crash can still lose the last batch or metric update, or leave a partial final event line; `status` reports that line as malformed and `show` preserves it.
 
 Hook and extension-invocation counts are lower bounds. There is no durable all-cause dropped-update counter because contention, termination, and I/O failure can also prevent writing that counter.

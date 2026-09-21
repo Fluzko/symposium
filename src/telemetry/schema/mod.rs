@@ -15,17 +15,13 @@ mod name;
 mod plugin_hook;
 mod resolution;
 
-pub(in crate::telemetry) use agent::SupportedAgent;
+pub(in crate::telemetry) use agent::{HookAgent, SupportedAgent};
 pub(in crate::telemetry) use extension_invocation::{
     ExtensionInvocationAgent, ExtensionInvocationAttribution, ExtensionInvocationPhase,
     ExtensionTargetScope, UnnamedExtensionReason,
 };
 
-#[cfg(test)]
-pub(in crate::telemetry) use agent::HookAgent;
-#[cfg(test)]
-pub(in crate::telemetry) use hook::HookSurface;
-pub(in crate::telemetry) use hook::{HookMetricsKey, HookOutcome};
+pub(in crate::telemetry) use hook::{HookMetricsKey, HookOutcome, HookSurface};
 pub(in crate::telemetry) use metrics::MAX_IDENTIFIED_SESSIONS;
 #[cfg(test)]
 pub(in crate::telemetry) use plugin_hook::PluginBucket;

@@ -17,6 +17,7 @@ use super::{
 };
 
 mod extension_invocation;
+mod hook;
 mod lifecycle;
 mod open_day;
 mod plugin_hook;
@@ -40,8 +41,8 @@ pub(in crate::telemetry) use session_counts::{
 
 #[cfg(test)]
 pub(in crate::telemetry) use {
-    extension_invocation::ExtensionInvocationAggregateStore, plugin_hook::PluginHookAggregateState,
-    public_row_budget::MAX_PUBLIC_ROWS_PER_DAY,
+    extension_invocation::ExtensionInvocationAggregateStore, hook::HookAggregateStore,
+    plugin_hook::PluginHookAggregateState, public_row_budget::MAX_PUBLIC_ROWS_PER_DAY,
 };
 
 #[cfg(test)]

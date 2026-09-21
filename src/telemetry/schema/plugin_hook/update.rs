@@ -3,14 +3,13 @@
 use std::fmt;
 
 use super::{
-    PluginBucket, PluginHookMetricsKey, PluginHookMetricsV1, PluginHookOutcome,
+    PluginHookMetricsV1, PluginHookOutcome,
     outcome::{PluginHookAttempt, PluginHookOutcomeCounterOverflow, PluginHookOutcomeCounters},
 };
 use crate::telemetry::{
     schema::{
         SchemaVersion, SymposiumVersion, UtcDay,
-        agent::{HookAgent, VendorSessionId, derive_session_id},
-        hook::HookSurface,
+        agent::{VendorSessionId, derive_session_id},
         metrics::{LatencyHistogram, LatencyHistogramError},
     },
     state::{
@@ -21,31 +20,23 @@ use crate::telemetry::{
 
 /// One completed plugin-hook attempt added to an aggregate row.
 ///
-/// Named fields keep the aggregate target, process lifecycle, and optional
-/// vendor session identifier together at the write boundary.
+/// The admitted selection supplies the agent, hook surface, and plugin
+/// identity. This value carries only the process result and optional vendor
+/// session identifier observed for the attempt.
 // Intentionally omit `Debug`: this value borrows a raw vendor session id.
 #[derive(Clone)]
 pub(in crate::telemetry) struct PluginHookMetricObservation<'a> {
-    pub(in crate::telemetry) agent: HookAgent,
-    pub(in crate::telemetry) hook: HookSurface,
-    pub(in crate::telemetry) bucket: PluginBucket,
     pub(in crate::telemetry) attempt: PluginHookAttempt,
     pub(in crate::telemetry) vendor_session_id: Option<&'a VendorSessionId>,
-}
-
-impl PluginHookMetricObservation<'_> {
-    #[must_use]
-    fn key(&self, recording: &BoundRecordingObservation<'_>) -> PluginHookMetricsKey {
-        PluginHookMetricsKey::new(recording, self.agent, self.hook, self.bucket.clone())
-    }
 }
 
 impl PluginHookMetricsV1 {
     /// Start an aggregate row with its first completed plugin-hook attempt.
     ///
-    /// The selected private-state entry supplies the stable row identifier and
-    /// session tracker together. The row day and public identity come from the
-    /// same bound recording and plugin bucket used to select that entry.
+    /// The selected private-state entry supplies the stable row identifier,
+    /// agent, hook surface, admitted plugin identity, and session tracker
+    /// together. The recording verifies the selected identifier epoch and
+    /// derives an optional scoped session identifier.
     ///
     /// # Errors
     ///
@@ -57,17 +48,17 @@ impl PluginHookMetricsV1 {
         observation: PluginHookMetricObservation<'_>,
         selected: SelectedPluginHookAggregate<'_>,
     ) -> Result<Self, PluginHookMetricsUpdateError> {
-        let identity = observation.bucket.clone().into_row_identity(recording);
+        let bucket = selected.bucket();
         let mut row = Self {
             version: SchemaVersion::V1,
             kind: Self::KIND,
             event_id: selected.event_id(),
-            day: recording.day(),
+            day: selected.day(),
             symposium: SymposiumVersion::current(),
-            agent: observation.agent,
-            hook: observation.hook,
-            plugin_scope: identity.scope,
-            plugin: identity.plugin,
+            agent: selected.agent(),
+            hook: selected.surface(),
+            plugin_scope: bucket.scope(),
+            plugin: bucket.plugin().cloned(),
             attempts: 0,
             executions: 0,
             outcomes: PluginHookOutcomeCounters::default(),
@@ -76,7 +67,7 @@ impl PluginHookMetricsV1 {
             identified_sessions: None,
             identified_sessions_non_ok: None,
             session_counts_complete: false,
-            plugin_subject: identity.plugin_subject,
+            plugin_subject: bucket.plugin_subject(),
         };
 
         row.checked_record(recording, observation, selected)?;
@@ -103,7 +94,7 @@ impl PluginHookMetricsV1 {
         observation: PluginHookMetricObservation<'_>,
         mut selected: SelectedPluginHookAggregate<'_>,
     ) -> Result<(), PluginHookMetricsUpdateError> {
-        self.ensure_selected_by(recording, &observation, &selected)?;
+        self.ensure_selected_by(recording, &selected)?;
 
         let outcome = observation.attempt.outcome();
         let mut next = self.clone();
@@ -128,14 +119,13 @@ impl PluginHookMetricsV1 {
 
         let session_id = derive_session_id(
             recording.identifier_window_scope(),
-            observation.agent,
+            selected.agent(),
             observation.vendor_session_id,
         );
         // `attempts + 1` succeeded above, so the tracker's matching
         // contribution increment cannot overflow here.
-        let session_counts = selected.session_counts();
-        session_counts.checked_record(self.attempts, session_id, outcome)?;
-        next.apply_session_counts(session_counts.snapshot());
+        let session_counts = selected.checked_record_session(self.attempts, session_id, outcome)?;
+        next.apply_session_counts(session_counts);
 
         *self = next;
         Ok(())
@@ -144,30 +134,27 @@ impl PluginHookMetricsV1 {
     fn ensure_selected_by(
         &self,
         recording: &BoundRecordingObservation<'_>,
-        observation: &PluginHookMetricObservation<'_>,
         selected: &SelectedPluginHookAggregate<'_>,
     ) -> Result<(), PluginHookMetricsUpdateError> {
-        if self.day != recording.day() {
+        if !selected.matches_recording(recording) {
+            return Err(PluginHookMetricsUpdateError::RecordingContextChanged);
+        }
+        if self.day != selected.day() {
             return Err(PluginHookMetricsUpdateError::DayChanged {
                 row_day: self.day,
-                observation_day: recording.day(),
+                observation_day: selected.day(),
             });
         }
-        if self.agent != observation.agent || self.hook != observation.hook {
+        if self.agent != selected.agent() || self.hook != selected.surface() {
             return Err(PluginHookMetricsUpdateError::TargetChanged);
         }
 
-        let identity = observation.bucket.clone().into_row_identity(recording);
-        if self.plugin_scope != identity.scope
-            || self.plugin != identity.plugin
-            || self.plugin_subject != identity.plugin_subject
+        let bucket = selected.bucket();
+        if self.plugin_scope != bucket.scope()
+            || self.plugin.as_ref() != bucket.plugin()
+            || self.plugin_subject != bucket.plugin_subject()
         {
             return Err(PluginHookMetricsUpdateError::PluginIdentityChanged);
-        }
-
-        let key = observation.key(recording);
-        if selected.key() != &key {
-            return Err(PluginHookMetricsUpdateError::PrivateStateChanged);
         }
         if self.event_id != selected.event_id() {
             return Err(PluginHookMetricsUpdateError::RowIdentifierChanged);
@@ -198,13 +185,13 @@ impl PluginHookMetricsV1 {
 /// A plugin-hook aggregate update that cannot be represented safely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::telemetry) enum PluginHookMetricsUpdateError {
+    RecordingContextChanged,
     DayChanged {
         row_day: UtcDay,
         observation_day: UtcDay,
     },
     TargetChanged,
     PluginIdentityChanged,
-    PrivateStateChanged,
     RowIdentifierChanged,
     AttemptCountOverflow,
     ExecutionCountOverflow,
@@ -233,6 +220,9 @@ impl From<HookSessionCountUpdateError> for PluginHookMetricsUpdateError {
 impl fmt::Display for PluginHookMetricsUpdateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RecordingContextChanged => {
+                formatter.write_str("plugin-hook recording context changed before update")
+            }
             Self::DayChanged {
                 row_day,
                 observation_day,
@@ -245,9 +235,6 @@ impl fmt::Display for PluginHookMetricsUpdateError {
             }
             Self::PluginIdentityChanged => {
                 formatter.write_str("plugin-hook aggregate identity changed during update")
-            }
-            Self::PrivateStateChanged => {
-                formatter.write_str("plugin-hook private state belongs to another aggregate")
             }
             Self::RowIdentifierChanged => {
                 formatter.write_str("plugin-hook private state belongs to another aggregate row")
@@ -276,14 +263,17 @@ impl std::error::Error for PluginHookMetricsUpdateError {}
 mod tests {
     use std::time::Duration;
 
-    use super::super::{PluginScope, PublicPluginCoordinate, outcome::PluginHookOutcomeSignals};
+    use super::super::{
+        HookAgent, HookSurface, PluginHookAttribution, PluginScope, PublicPluginCoordinate,
+        outcome::PluginHookOutcomeSignals,
+    };
     use super::*;
     use crate::telemetry::{
         schema::{
             IDENTIFIER_WINDOW_TEST_STATE, RowClassification, TelemetryRow, UtcSecond, classify_row,
             extension::PublicExtensionSource, recording_observation,
         },
-        state::{PluginHookAggregateState, TelemetryStateV1},
+        state::{PluginHookAggregateStore, TelemetryStateV1},
     };
     use chrono::{TimeZone as _, Utc};
 
@@ -303,63 +293,61 @@ mod tests {
     }
 
     fn metric_observation<'a>(
-        bucket: PluginBucket,
         attempt: PluginHookAttempt,
         vendor_session_id: Option<&'a VendorSessionId>,
     ) -> PluginHookMetricObservation<'a> {
         PluginHookMetricObservation {
-            agent: HookAgent::Claude,
-            hook: HookSurface::PreToolUse,
-            bucket,
             attempt,
             vendor_session_id,
         }
     }
 
-    fn private_state(
+    fn aggregate_store(recording: &BoundRecordingObservation<'_>) -> PluginHookAggregateStore {
+        PluginHookAggregateStore::new(recording.day())
+    }
+
+    fn select_private<'a>(
+        store: &'a mut PluginHookAggregateStore,
         recording: &BoundRecordingObservation<'_>,
-        observation: &PluginHookMetricObservation<'_>,
-    ) -> PluginHookAggregateState {
-        PluginHookAggregateState::for_test(observation.key(recording))
+        attribution: PluginHookAttribution,
+        hook: HookSurface,
+    ) -> SelectedPluginHookAggregate<'a> {
+        store
+            .select(recording, HookAgent::Claude, hook, attribution)
+            .unwrap()
     }
 
     fn initialized_aggregate(
         recording: &BoundRecordingObservation<'_>,
-        bucket: PluginBucket,
-    ) -> (
-        PluginHookMetricsV1,
-        PluginHookAggregateState,
-        PluginHookMetricsKey,
-    ) {
-        let observation = metric_observation(bucket, successful_attempt(), None);
-        let key = observation.key(recording);
-        let mut private = private_state(recording, &observation);
-        let row = PluginHookMetricsV1::new(recording, observation, private.select(&key).unwrap())
-            .unwrap();
+        attribution: PluginHookAttribution,
+    ) -> (PluginHookMetricsV1, PluginHookAggregateStore) {
+        let observation = metric_observation(successful_attempt(), None);
+        let mut store = aggregate_store(recording);
+        let selected = select_private(&mut store, recording, attribution, HookSurface::PreToolUse);
+        let row = PluginHookMetricsV1::new(recording, observation, selected).unwrap();
 
-        (row, private, key)
+        (row, store)
     }
 
     fn assert_update_rejected_without_mutation(
         row: &mut PluginHookMetricsV1,
         recording: &BoundRecordingObservation<'_>,
         observation: PluginHookMetricObservation<'_>,
-        private: &mut PluginHookAggregateState,
-        selected_key: &PluginHookMetricsKey,
+        store: &mut PluginHookAggregateStore,
+        attribution: PluginHookAttribution,
+        hook: HookSurface,
         expected: PluginHookMetricsUpdateError,
     ) {
         let row_before = row.clone();
-        let private_before = private.clone();
+        drop(select_private(store, recording, attribution.clone(), hook));
+        let store_before = store.clone();
+        let selected = select_private(store, recording, attribution, hook);
 
-        let result = row.checked_record(
-            recording,
-            observation,
-            private.select(selected_key).unwrap(),
-        );
+        let result = row.checked_record(recording, observation, selected);
 
         assert_eq!(result, Err(expected));
         assert_eq!(*row, row_before);
-        assert_eq!(*private, private_before);
+        assert_eq!(*store, store_before);
     }
 
     #[test]
@@ -371,19 +359,24 @@ mod tests {
             PublicExtensionSource::SymposiumRecommendations,
             "example-tools",
         );
+        let attribution = PluginHookAttribution::Public(plugin.clone());
         let observation = metric_observation(
-            PluginBucket::Public(plugin.clone()),
             PluginHookAttempt::NotExecuted {
                 prepare_duration: Duration::from_millis(7),
             },
             Some(&vendor_session_id),
         );
-        let key = observation.key(&recording);
-        let mut private = private_state(&recording, &observation);
-        let event_id = private.select(&key).unwrap().event_id();
+        let mut store = aggregate_store(&recording);
+        let event_id = select_private(
+            &mut store,
+            &recording,
+            attribution.clone(),
+            HookSurface::PreToolUse,
+        )
+        .event_id();
+        let selected = select_private(&mut store, &recording, attribution, HookSurface::PreToolUse);
 
-        let row = PluginHookMetricsV1::new(&recording, observation, private.select(&key).unwrap())
-            .unwrap();
+        let row = PluginHookMetricsV1::new(&recording, observation, selected).unwrap();
         let json = serde_json::to_string(&row).unwrap();
         let value = serde_json::from_str::<serde_json::Value>(&json).unwrap();
 
@@ -424,12 +417,11 @@ mod tests {
         let recording = recording_observation(&mut state);
         let first_session = VendorSessionId::new("vendor-session-123".to_owned());
         let second_session = VendorSessionId::new("vendor-session-456".to_owned());
-        let bucket = PluginBucket::Public(public_plugin(
+        let attribution = PluginHookAttribution::Public(public_plugin(
             PublicExtensionSource::SymposiumRecommendations,
             "example-tools",
         ));
         let first = metric_observation(
-            bucket.clone(),
             PluginHookAttempt::Executed {
                 signals: PluginHookOutcomeSignals {
                     error: false,
@@ -440,13 +432,16 @@ mod tests {
             },
             Some(&first_session),
         );
-        let key = first.key(&recording);
-        let mut private = private_state(&recording, &first);
-        let mut row =
-            PluginHookMetricsV1::new(&recording, first, private.select(&key).unwrap()).unwrap();
+        let mut store = aggregate_store(&recording);
+        let selected = select_private(
+            &mut store,
+            &recording,
+            attribution.clone(),
+            HookSurface::PreToolUse,
+        );
+        let mut row = PluginHookMetricsV1::new(&recording, first, selected).unwrap();
         let event_id = row.event_id;
         let second = metric_observation(
-            bucket,
             PluginHookAttempt::Executed {
                 signals: PluginHookOutcomeSignals {
                     error: false,
@@ -458,8 +453,8 @@ mod tests {
             Some(&second_session),
         );
 
-        row.checked_record(&recording, second, private.select(&key).unwrap())
-            .unwrap();
+        let selected = select_private(&mut store, &recording, attribution, HookSurface::PreToolUse);
+        row.checked_record(&recording, second, selected).unwrap();
         let json = serde_json::to_string(&row).unwrap();
         let value = serde_json::from_str::<serde_json::Value>(&json).unwrap();
 
@@ -496,7 +491,6 @@ mod tests {
         let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
         let recording = recording_observation(&mut state);
         let observation = metric_observation(
-            PluginBucket::Unnamed,
             PluginHookAttempt::Executed {
                 signals: PluginHookOutcomeSignals {
                     error: false,
@@ -507,11 +501,11 @@ mod tests {
             },
             None,
         );
-        let key = observation.key(&recording);
-        let mut private = private_state(&recording, &observation);
+        let attribution = PluginHookAttribution::Unnamed;
+        let mut store = aggregate_store(&recording);
+        let selected = select_private(&mut store, &recording, attribution, HookSurface::PreToolUse);
 
-        let row = PluginHookMetricsV1::new(&recording, observation, private.select(&key).unwrap())
-            .unwrap();
+        let row = PluginHookMetricsV1::new(&recording, observation, selected).unwrap();
 
         assert!(!row.session_counts_complete);
         assert_eq!(row.identified_sessions, None);
@@ -522,69 +516,51 @@ mod tests {
     fn another_plugin_identity_is_rejected_without_mutation() {
         let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
         let recording = recording_observation(&mut state);
-        let first_plugin = PluginBucket::Public(public_plugin(
+        let first_plugin = PluginHookAttribution::Public(public_plugin(
             PublicExtensionSource::SymposiumRecommendations,
             "example-tools",
         ));
-        let second_plugin = PluginBucket::Public(public_plugin(
+        let second_plugin = PluginHookAttribution::Public(public_plugin(
             PublicExtensionSource::SymposiumRecommendations,
             "another-tools",
         ));
-        let (mut row, mut private, key) = initialized_aggregate(&recording, first_plugin);
-        let observation = metric_observation(second_plugin, successful_attempt(), None);
+        let (mut row, _) = initialized_aggregate(&recording, first_plugin);
+        let observation = metric_observation(successful_attempt(), None);
+        let mut store = aggregate_store(&recording);
 
         assert_update_rejected_without_mutation(
             &mut row,
             &recording,
             observation,
-            &mut private,
-            &key,
+            &mut store,
+            second_plugin,
+            HookSurface::PreToolUse,
             PluginHookMetricsUpdateError::PluginIdentityChanged,
-        );
-    }
-
-    #[test]
-    fn another_private_state_key_is_rejected_without_mutation() {
-        let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let recording = recording_observation(&mut state);
-        let bucket = PluginBucket::Unnamed;
-        let (mut row, _, _) = initialized_aggregate(&recording, bucket.clone());
-        let observation = metric_observation(bucket.clone(), successful_attempt(), None);
-        let mut other_observation = metric_observation(bucket, successful_attempt(), None);
-        other_observation.hook = HookSurface::PostToolUse;
-        let other_key = other_observation.key(&recording);
-        let mut other_private = PluginHookAggregateState::for_test(other_key.clone());
-
-        assert_update_rejected_without_mutation(
-            &mut row,
-            &recording,
-            observation,
-            &mut other_private,
-            &other_key,
-            PluginHookMetricsUpdateError::PrivateStateChanged,
         );
     }
 
     #[test]
     fn another_day_is_rejected_without_mutation() {
         let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let (mut row, mut private, key) = {
+        let (mut row, _) = {
             let recording = recording_observation(&mut state);
-            initialized_aggregate(&recording, PluginBucket::Unnamed)
+            initialized_aggregate(&recording, PluginHookAttribution::Unnamed)
         };
         let completed_at =
             UtcSecond::from_datetime(Utc.with_ymd_and_hms(2026, 8, 4, 10, 2, 11).unwrap());
         let observation = state.observe_recording(completed_at).unwrap();
         let recording = state.bind_recording_observation(observation).unwrap();
-        let observation = metric_observation(PluginBucket::Unnamed, successful_attempt(), None);
+        let observation = metric_observation(successful_attempt(), None);
+        let mut store = aggregate_store(&recording);
         let row_day = row.day;
 
         assert_update_rejected_without_mutation(
             &mut row,
             &recording,
             observation,
-            &mut private,
-            &key,
+            &mut store,
+            PluginHookAttribution::Unnamed,
+            HookSurface::PreToolUse,
             PluginHookMetricsUpdateError::DayChanged {
                 row_day,
                 observation_day: recording.day(),
@@ -596,16 +572,17 @@ mod tests {
     fn another_hook_target_is_rejected_without_mutation() {
         let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
         let recording = recording_observation(&mut state);
-        let (mut row, mut private, key) = initialized_aggregate(&recording, PluginBucket::Unnamed);
-        let mut observation = metric_observation(PluginBucket::Unnamed, successful_attempt(), None);
-        observation.hook = HookSurface::PostToolUse;
+        let (mut row, _) = initialized_aggregate(&recording, PluginHookAttribution::Unnamed);
+        let observation = metric_observation(successful_attempt(), None);
+        let mut store = aggregate_store(&recording);
 
         assert_update_rejected_without_mutation(
             &mut row,
             &recording,
             observation,
-            &mut private,
-            &key,
+            &mut store,
+            PluginHookAttribution::Unnamed,
+            HookSurface::PostToolUse,
             PluginHookMetricsUpdateError::TargetChanged,
         );
     }
@@ -613,10 +590,9 @@ mod tests {
     #[test]
     fn reset_epoch_uses_event_id_to_reject_an_old_unnamed_row() {
         let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
-        let mut row = {
+        let (mut row, mut store) = {
             let recording = recording_observation(&mut state);
             let observation = metric_observation(
-                PluginBucket::Unnamed,
                 PluginHookAttempt::Executed {
                     signals: PluginHookOutcomeSignals {
                         error: false,
@@ -627,16 +603,23 @@ mod tests {
                 },
                 None,
             );
-            let key = observation.key(&recording);
-            let mut private = private_state(&recording, &observation);
+            let mut store = aggregate_store(&recording);
+            let selected = select_private(
+                &mut store,
+                &recording,
+                PluginHookAttribution::Unnamed,
+                HookSurface::PreToolUse,
+            );
 
-            PluginHookMetricsV1::new(&recording, observation, private.select(&key).unwrap())
-                .unwrap()
+            (
+                PluginHookMetricsV1::new(&recording, observation, selected).unwrap(),
+                store,
+            )
         };
         state.reset_identifiers(row.day).unwrap();
+        store.reset_identifier_epoch();
         let recording = recording_observation(&mut state);
         let observation = metric_observation(
-            PluginBucket::Unnamed,
             PluginHookAttempt::Executed {
                 signals: PluginHookOutcomeSignals {
                     error: false,
@@ -647,19 +630,60 @@ mod tests {
             },
             None,
         );
-        let key = observation.key(&recording);
-        let mut private = private_state(&recording, &observation);
         let row_before = row.clone();
-        let private_before = private.clone();
+        drop(select_private(
+            &mut store,
+            &recording,
+            PluginHookAttribution::Unnamed,
+            HookSurface::PreToolUse,
+        ));
+        let store_before = store.clone();
+        let selected = select_private(
+            &mut store,
+            &recording,
+            PluginHookAttribution::Unnamed,
+            HookSurface::PreToolUse,
+        );
 
-        let result = row.checked_record(&recording, observation, private.select(&key).unwrap());
+        let result = row.checked_record(&recording, observation, selected);
 
         assert_eq!(
             result,
             Err(PluginHookMetricsUpdateError::RowIdentifierChanged)
         );
         assert_eq!(row, row_before);
-        assert_eq!(private, private_before);
+        assert_eq!(store, store_before);
+    }
+
+    #[test]
+    fn update_rejects_a_selection_from_another_identifier_epoch() {
+        let mut old_state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
+        let old_recording = recording_observation(&mut old_state);
+        let (mut row, mut store) =
+            initialized_aggregate(&old_recording, PluginHookAttribution::Unnamed);
+
+        let mut reset_state: TelemetryStateV1 =
+            toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
+        reset_state.reset_identifiers(row.day).unwrap();
+        let reset_recording = recording_observation(&mut reset_state);
+        let observation = metric_observation(successful_attempt(), None);
+        let row_before = row.clone();
+        let store_before = store.clone();
+        let selected = select_private(
+            &mut store,
+            &old_recording,
+            PluginHookAttribution::Unnamed,
+            HookSurface::PreToolUse,
+        );
+
+        let result = row.checked_record(&reset_recording, observation, selected);
+
+        assert_eq!(
+            result,
+            Err(PluginHookMetricsUpdateError::RecordingContextChanged)
+        );
+        assert_eq!(row, row_before);
+        assert_eq!(store, store_before);
     }
 
     #[test]
@@ -667,9 +691,7 @@ mod tests {
         let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
         let recording = recording_observation(&mut state);
         let vendor_session_id = VendorSessionId::new("vendor-session-123".to_owned());
-        let bucket = PluginBucket::Unnamed;
         let first = metric_observation(
-            bucket.clone(),
             PluginHookAttempt::Executed {
                 signals: PluginHookOutcomeSignals {
                     error: false,
@@ -680,26 +702,35 @@ mod tests {
             },
             Some(&vendor_session_id),
         );
-        let key = first.key(&recording);
-        let mut private = private_state(&recording, &first);
-        let mut row =
-            PluginHookMetricsV1::new(&recording, first, private.select(&key).unwrap()).unwrap();
+        let mut store = aggregate_store(&recording);
+        let selected = select_private(
+            &mut store,
+            &recording,
+            PluginHookAttribution::Unnamed,
+            HookSurface::PreToolUse,
+        );
+        let mut row = PluginHookMetricsV1::new(&recording, first, selected).unwrap();
         row.prepare_ms = serde_json::from_value(serde_json::json!({
             "bounds": [5, 10, 25, 50, 100, 250, 500, 1000],
             "counts": [u64::MAX, 0, 0, 0, 0, 0, 0, 0, 0],
         }))
         .unwrap();
         let row_before = row.clone();
-        let private_before = private.clone();
+        let store_before = store.clone();
         let second = metric_observation(
-            bucket,
             PluginHookAttempt::NotExecuted {
                 prepare_duration: Duration::from_millis(1),
             },
             Some(&vendor_session_id),
         );
+        let selected = select_private(
+            &mut store,
+            &recording,
+            PluginHookAttribution::Unnamed,
+            HookSurface::PreToolUse,
+        );
 
-        let result = row.checked_record(&recording, second, private.select(&key).unwrap());
+        let result = row.checked_record(&recording, second, selected);
 
         assert_eq!(
             result,
@@ -708,6 +739,6 @@ mod tests {
             ))
         );
         assert_eq!(row, row_before);
-        assert_eq!(private, private_before);
+        assert_eq!(store, store_before);
     }
 }

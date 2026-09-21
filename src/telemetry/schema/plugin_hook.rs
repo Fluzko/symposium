@@ -2,7 +2,6 @@
 
 use std::fmt;
 
-pub(in crate::telemetry) use bucket::{PluginHookAttribution, PluginScope, PublicPluginCoordinate};
 use outcome::PluginHookOutcomeCounters;
 
 use super::{
@@ -18,7 +17,7 @@ mod bucket;
 mod outcome;
 mod update;
 
-pub(in crate::telemetry) use bucket::{PluginBucket, PluginHookMetricsKey};
+pub(in crate::telemetry) use bucket::{PluginHookAttribution, PluginScope, PublicPluginCoordinate};
 pub(in crate::telemetry) use outcome::PluginHookOutcome;
 strict_versioned_row! {
     /// Version 1 daily aggregate for one plugin, agent, and hook surface.

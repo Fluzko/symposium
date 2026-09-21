@@ -42,7 +42,7 @@ pub(in crate::telemetry) use session_counts::{
 #[cfg(test)]
 pub(in crate::telemetry) use {
     extension_invocation::ExtensionInvocationAggregateStore, hook::HookAggregateStore,
-    plugin_hook::PluginHookAggregateState, public_row_budget::MAX_PUBLIC_ROWS_PER_DAY,
+    plugin_hook::PluginHookAggregateStore, public_row_budget::MAX_PUBLIC_ROWS_PER_DAY,
 };
 
 #[cfg(test)]

@@ -2,12 +2,10 @@
 
 use std::{collections::BTreeSet, fmt};
 
+use super::plugin_hook::PluginHookMetricsKey;
 use crate::telemetry::{
     identity::SessionId,
-    schema::{
-        HookMetricsKey, HookOutcome, MAX_IDENTIFIED_SESSIONS, PluginHookMetricsKey,
-        PluginHookOutcome,
-    },
+    schema::{HookMetricsKey, HookOutcome, MAX_IDENTIFIED_SESSIONS, PluginHookOutcome},
 };
 
 use super::set_len;

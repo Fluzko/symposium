@@ -4,6 +4,8 @@ Entry point invoked by the agent's hook system on session events.
 
 ## Flow
 
+The payload is parsed first, and the agent's parser can declare it not an occurrence of the symposium event (`AgentHookInput::should_dispatch`; false for an Antigravity `PreInvocation` after the first of a turn). Such a payload is answered with the agent's neutral output and skips every step below.
+
 1. **Auto-sync** (if enabled) — when `auto-sync = true` in the user config, runs [`cargo agents sync`](./sync-agent-flow.md) to ensure skills are current. The workspace root is resolved from the payload's `cwd` field; if the payload does not include a working directory, the process's current working directory is used as a fallback. Runs quietly and non-fatally — failures are logged but don't block hook dispatch.
 
    **`SessionStart` is the refresh point.** Because it fires once per agent session, it does the expensive work that other events skip: it bypasses the `Cargo.lock` freshness gate (so skills re-sync even when the workspace's dependencies are unchanged) and passes `UpdateLevel::Check` so git registries and `source.git` skill groups are re-fetched if their upstream moved. Every other event keeps the cheap, `Cargo.lock`-gated path with `UpdateLevel::None` (debounced) to avoid per-event network and `cargo metadata` cost. The registry refresh on `SessionStart` (`ensure_registries` with `Check`, decided in the binary entry point from the event) still honors each registry's `auto-update` toggle. `SessionStart` also runs `prewarm_hook_sources`, which *refreshes already-installed* hook binaries/scripts (the `cargo`/`github` sources backing plugin hooks) — refresh-only, so it never eagerly installs a tool a hook may never use; first install still happens lazily at dispatch.

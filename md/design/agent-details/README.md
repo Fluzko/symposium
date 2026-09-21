@@ -18,9 +18,9 @@ The tables below summarize the answers for each agent. Individual agent pages co
 
 | Agent | Project config path | Global config path | Format |
 |---|---|---|---|
+| [Antigravity CLI](./antigravity-cli.md) | `.agents/hooks.json` | `~/.gemini/config/hooks.json` | JSON, named entries per hook |
 | [Claude Code](./claude-code.md) | `.claude/settings.json` | `~/.claude/settings.json` | JSON, `hooks` key with matcher groups |
 | [GitHub Copilot](./copilot.md) | `.github/hooks/*.json` | `~/.copilot/config.json` | JSON, `version: 1` with `hooks` key |
-| [Gemini CLI](./gemini-cli.md) | `.gemini/settings.json` | `~/.gemini/settings.json` | JSON, `hooks` key with matcher groups |
 | [Codex CLI](./codex-cli.md) | `.codex/hooks.json` | `~/.codex/hooks.json` | JSON, `hooks` key with matcher groups |
 | [Kiro](./kiro.md) | `.kiro/agents/*.json` | `~/.kiro/agents/*.json` | JSON, `hooks` key in agent config |
 | [OpenCode](./opencode.md) | `.opencode/plugins/` | `~/.config/opencode/plugins/` | JS/TS plugins (not shell hooks) |
@@ -30,9 +30,9 @@ The tables below summarize the answers for each agent. Individual agent pages co
 
 | Agent | Command field | Platform-specific? |
 |---|---|---|
+| Antigravity CLI | `command` | No |
 | Claude Code | `command` | No |
 | GitHub Copilot | `bash` / `powershell` | Yes |
-| Gemini CLI | `command` | No |
 | Codex CLI | `command` | No |
 | Kiro | `command` | No |
 | OpenCode | N/A (JS function) | N/A |
@@ -42,9 +42,9 @@ The tables below summarize the answers for each agent. Individual agent pages co
 
 | Agent | Default timeout | Unit |
 |---|---|---|
+| Antigravity CLI | 30 | seconds (`timeout`) |
 | Claude Code | 600 | seconds |
 | GitHub Copilot | 30 | seconds (`timeoutSec`) |
-| Gemini CLI | 60,000 | milliseconds (`timeout`) |
 | Codex CLI | 600 | seconds (`timeout` or `timeoutSec`) |
 | Kiro | 30,000 | milliseconds (`timeout_ms`) |
 | OpenCode | 60,000 | milliseconds (community hooks plugin) |
@@ -54,12 +54,12 @@ The tables below summarize the answers for each agent. Individual agent pages co
 
 Symposium registers hooks for four events. Each agent uses different names and casing conventions.
 
-| Symposium event | Claude Code | Copilot | Gemini CLI | Codex CLI | Kiro CLI | OpenCode | Goose |
+| Symposium event | Antigravity CLI | Claude Code | Copilot | Codex CLI | Kiro CLI | OpenCode | Goose |
 |---|---|---|---|---|---|---|---|
-| pre-tool-use | `PreToolUse` | `preToolUse` | `BeforeTool` | `PreToolUse` | `preToolUse` | `tool.execute.before` | N/A |
-| post-tool-use | `PostToolUse` | `postToolUse` | `AfterTool` | `PostToolUse` | `postToolUse` | `tool.execute.after` | N/A |
-| user-prompt-submit | `UserPromptSubmit` | `userPromptSubmitted` | `BeforeAgent` | `UserPromptSubmit` | `userPromptSubmit` | `message.updated` (filter by role) | N/A |
-| session-start | `SessionStart` | `sessionStart` | `SessionStart` | `SessionStart` | `agentSpawn` | `session.created` | N/A |
+| pre-tool-use | `PreToolUse` | `PreToolUse` | `preToolUse` | `PreToolUse` | `preToolUse` | `tool.execute.before` | N/A |
+| post-tool-use | `PostToolUse` | `PostToolUse` | `postToolUse` | `PostToolUse` | `postToolUse` | `tool.execute.after` | N/A |
+| user-prompt-submit | `PreInvocation` | `UserPromptSubmit` | `userPromptSubmitted` | `UserPromptSubmit` | `userPromptSubmit` | `message.updated` (filter by role) | N/A |
+| session-start | `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `agentSpawn` | `session.created` | N/A |
 
 ### Blocking support
 
@@ -67,9 +67,9 @@ Not all events can block the action in all agents.
 
 | Agent | Pre-tool-use can block? | Post-tool-use can block? | User-prompt can block? | Session-start can block? |
 |---|---|---|---|---|
+| Antigravity CLI | Yes | No | No | No |
 | Claude Code | Yes | No | Yes (exit 2) | No |
 | GitHub Copilot | Yes | No | No | No |
-| Gemini CLI | Yes | Yes (block result) | Yes (deny discards message) | No |
 | Codex CLI | Yes | Yes (`continue: false`) | Yes (`continue: false`) | Yes (`continue: false`) |
 | Kiro | Yes (exit 2) | No | No | No |
 | OpenCode | Yes (throw Error) | No | No (observe only) | No (observe only) |
@@ -81,9 +81,9 @@ Not all events can block the action in all agents.
 
 | Agent | Tool name field | Tool args field | Session/context fields |
 |---|---|---|---|
+| Antigravity CLI | `toolCall.name` | `toolCall.args` (object) | `conversationId`, `workspacePaths` (array), `stepIdx` |
 | Claude Code | `tool_name` | `tool_input` (object) | `session_id`, `cwd`, `hook_event_name` |
 | GitHub Copilot | `toolName` | `toolArgs` (JSON **string**) | `timestamp`, `cwd` |
-| Gemini CLI | `tool_name` | `tool_input` (object) | `session_id`, `cwd`, `hook_event_name`, `timestamp` |
 | Codex CLI | `tool_name` | `tool_input` (object) | `session_id`, `cwd`, `hook_event_name`, `model` |
 | Kiro | `tool_name` | `tool_input` (object) | `hook_event_name`, `cwd` |
 | OpenCode | `tool` | `args` (mutable output object) | `sessionID`, `callID` |
@@ -93,9 +93,9 @@ Not all events can block the action in all agents.
 
 | Agent | Permission decision field | Decision values | Modified input field | Nesting |
 |---|---|---|---|---|
+| Antigravity CLI | `decision` (**required**) | allow, deny, ask, force_ask | `overwrite` | flat |
 | Claude Code | `permissionDecision` | allow, deny, ask, defer | `updatedInput` | nested in `hookSpecificOutput` |
 | GitHub Copilot | `permissionDecision` | allow, deny, ask | `modifiedArgs` | flat |
-| Gemini CLI | `decision` | allow, deny | `tool_input` | nested in `hookSpecificOutput` |
 | Codex CLI | `decision` or `permissionDecision` | block/deny | *(not yet implemented)* | flat or nested `hookSpecificOutput` |
 | Kiro | *(exit code only)* | exit 0 = allow, exit 2 = block | *(not supported)* | N/A |
 | OpenCode | *(throw to block)* | allow (return) / deny (throw) | mutate `output.args` | JS mutation |
@@ -111,7 +111,7 @@ All shell-based agents use the same convention (where applicable):
 | `2` | Block/deny; stderr used as reason |
 | Other | Non-blocking warning, action proceeds |
 
-**Exceptions**: Copilot uses exit 0 = allow, non-zero = deny (no special meaning for exit 2). OpenCode uses JS exceptions, not exit codes.
+**Exceptions**: Copilot uses exit 0 = allow, non-zero = deny (no special meaning for exit 2). OpenCode uses JS exceptions, not exit codes. **Antigravity ignores exit codes entirely** — only stdout decides, and on `PreToolUse` an object without a valid `decision` (`{}` included) is a denial.
 
 ## Extension installation
 
@@ -119,9 +119,9 @@ All shell-based agents use the same convention (where applicable):
 
 | Agent | Project skills path | Global skills path |
 |---|---|---|
+| Antigravity CLI | `.agents/skills/<name>/SKILL.md` | `~/.gemini/config/skills/<name>/SKILL.md` |
 | Claude Code | `.claude/skills/<name>/SKILL.md` | `~/.claude/skills/<name>/SKILL.md` |
 | GitHub Copilot | `.agents/skills/<name>/SKILL.md` | *(none)* |
-| Gemini CLI | `.agents/skills/<name>/SKILL.md` | `~/.gemini/skills/<name>/SKILL.md` |
 | Codex CLI | `.agents/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
 | Kiro | `.kiro/skills/<name>/SKILL.md` | `~/.kiro/skills/<name>/SKILL.md` |
 | OpenCode | `.agents/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
@@ -133,9 +133,9 @@ Symposium uses the vendor-neutral `.agents/skills/` path whenever the agent supp
 
 | Agent | Project instructions | Global instructions |
 |---|---|---|
+| Antigravity CLI | `AGENTS.md`, `GEMINI.md`, `.agents/rules/*.md` | *(none)* |
 | Claude Code | `CLAUDE.md`, `.claude/CLAUDE.md` | `~/.claude/CLAUDE.md` |
 | GitHub Copilot | `.github/copilot-instructions.md`, `AGENTS.md` | `~/.copilot/copilot-instructions.md` |
-| Gemini CLI | `GEMINI.md` (walks up to `.git`) | `~/.gemini/GEMINI.md` |
 | Codex CLI | `AGENTS.md` (each dir level) | `~/.codex/AGENTS.md` |
 | Kiro | `.kiro/steering/*.md`, `AGENTS.md` | `~/.kiro/steering/*.md` |
 | OpenCode | `AGENTS.md`, `CLAUDE.md` | `~/.config/opencode/AGENTS.md` |
@@ -155,7 +155,7 @@ symposium reports success for a file the agent never reads.
 | Agent | Project scope | User scope | Entry shape | Verified |
 |---|---|---|---|---|
 | Claude Code | `<project>/.mcp.json` | `~/.claude.json` | `mcpServers.<name>` = `{command, args}` | yes |
-| Gemini CLI | `.gemini/settings.json` | `~/.gemini/settings.json` | `mcpServers.<name>` = `{command, args}` | yes |
+| Antigravity CLI | `<project>/.agents/mcp_config.json` | `~/.gemini/config/mcp_config.json` | `mcpServers.<name>` = `{command, args}` | yes (`agy mcp add`) |
 | OpenCode | `<project>/opencode.json` | `~/.config/opencode/opencode.json` | `mcp.<name>` = `{type: "local", command: [bin, ...args], enabled, environment}` | yes |
 | Codex CLI | *(none - user scope only)* | `~/.codex/config.toml` | `[mcp_servers.<name>]` = `command`, `args` | yes |
 | GitHub Copilot CLI | *(none - user scope only)* | `~/.copilot/mcp-config.json` | `mcpServers.<name>` = `{command, args}` | yes |
@@ -175,6 +175,9 @@ Notes that cost real debugging time:
   `environment` (an `env` key parses but never reaches the child).
 - Codex, Copilot CLI and Goose have no project-level MCP config, so project
   scope resolves to their user-level file rather than to a file nobody reads.
+- Antigravity keeps MCP in its own `mcp_config.json`, not in the `hooks.json`
+  beside it, so a broken hooks file cannot take MCP down with it. `agy mcp add`
+  has no scope flag and always writes the user-level file.
 - Goose uses `cmd`, not `command`, and requires a `type`; the nested
   `provider: mcp` / `config:` form it once got is rejected outright. Remote is
   `type: streamable_http` with `uri` - Goose has no `sse` variant.

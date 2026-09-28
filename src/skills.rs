@@ -434,7 +434,7 @@ fn frontmatter_predicates(
 /// its `depends-on`/`predicates` hoisted into one set (so the plugin is gated
 /// by them and the ordinary dormancy rule applies — a bare skill with no
 /// dependency is dormant until `use`d). See
-/// [`plugins::load_standalone_skill_plugin`](crate::plugins).
+/// [`plugins::standalone_skill_manifest`](crate::plugins::standalone_skill_manifest).
 pub(crate) fn standalone_skill_meta(skill_md: &Path) -> Result<(Option<String>, PredicateSet)> {
     let content = std::fs::read_to_string(skill_md)
         .with_context(|| format!("failed to read {}", skill_md.display()))?;
@@ -949,7 +949,7 @@ mod tests {
         assert_eq!(skill.frontmatter.get("name").unwrap(), "no-own-crates");
     }
 
-    // --- Bare SKILL.md loading (see plugins::load_standalone_skill_plugin
+    // --- Bare SKILL.md loading (see plugins::standalone_skill_manifest
     // for how a bare skill becomes a plugin) ---
 
     #[test]

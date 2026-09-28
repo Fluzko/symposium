@@ -56,7 +56,7 @@ impl CargoPm {
     ///
     /// A crate with no manifest sources still yields a plugin: an empty
     /// manifest, which validation turns into a plugin whose only content is the
-    /// default `skills/` group. So this is `Some` for any fetchable crate.
+    /// default `skills/` group.
     fn plugin_from_fetched(&self, fetched: FetchedPackage) -> UnvalidatedPlugin {
         let name = &fetched.id.name;
         let metadata = crate::crate_metadata::symposium_metadata(&fetched.root.join("Cargo.toml"))

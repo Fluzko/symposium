@@ -6,7 +6,7 @@
 //! [`CargoPm::load_plugin`](crate::pm::CargoPm::load_plugin) deserializes
 //! whatever this returns into a plugin manifest and merges it with any
 //! `SYMPOSIUM.toml` the crate ships (see
-//! [`load_crate_manifest`](crate::plugins::load_crate_manifest)).
+//! [`merge_crate_manifest`](crate::plugins::merge_crate_manifest)).
 
 use std::path::Path;
 

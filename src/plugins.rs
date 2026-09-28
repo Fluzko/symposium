@@ -984,7 +984,7 @@ pub(crate) fn validate_plugin(plugin: UnvalidatedPlugin, kind: PluginKind) -> Re
         label_root,
     } = plugin;
     let mut plugin = validate_manifest(manifest, origin)
-        .with_context(|| format!("validating manifest for `{id}`"))?;
+        .with_context(|| format!("invalid plugin at `{}`", crate::output::display_path(&root)))?;
     resolve_group_sources(&mut plugin, &root, label_root.as_deref().unwrap_or(&root));
     Ok(Plugin {
         canonical: id,
@@ -1398,8 +1398,8 @@ pub fn validate_source_dir(dir: &Path) -> Result<Vec<ValidationResult>> {
 
     for plugin_result in contents.plugins {
         let (id, plugin, result) = match plugin_result {
-            // The plugin's own name is its id; the load error already names the
-            // file it came from.
+            // The plugin's own name is its id; the error names the directory it
+            // came from.
             Ok(parsed) => (parsed.canonical.name.clone(), Some(parsed), Ok(())),
             Err(e) => ("<unknown>".to_string(), None, Err(e)),
         };
@@ -2761,6 +2761,22 @@ mod tests {
             results[0].result.is_err(),
             "standalone skill with non-string YAML value should fail validation"
         );
+    }
+
+    #[test]
+    fn validate_source_dir_names_the_entry_that_failed_validation() {
+        use crate::test_utils::{File, instantiate_fixture};
+        let tmp = instantiate_fixture(&[File(
+            "unnamed/SYMPOSIUM.toml",
+            indoc! {r#"
+                depends-on = ["*"]
+            "#},
+        )]);
+
+        let results = validate_source_dir(tmp.path()).unwrap();
+        assert_eq!(results.len(), 1);
+        let err = format!("{:#}", results[0].result.as_ref().unwrap_err());
+        assert!(err.contains("unnamed"), "{err}");
     }
 
     #[test]

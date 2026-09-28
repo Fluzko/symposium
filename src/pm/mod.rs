@@ -174,6 +174,9 @@ impl PmInstance {
         self.validate_all(self.pm.load_plugin(id).await)
     }
 
+    /// A registry entry that fails validation is the user's to fix, so it is
+    /// reported. A package's is its author's, and the hook path must not print
+    /// it next to the agent's JSON, so it is only logged.
     fn validate_all(&self, unvalidated: Vec<UnvalidatedPlugin>) -> Vec<Plugin> {
         unvalidated
             .into_iter()
@@ -182,11 +185,16 @@ impl PmInstance {
                 match crate::plugins::validate_plugin(plugin, self.kind) {
                     Ok(p) => Some(p),
                     Err(e) => {
-                        tracing::warn!(
-                            report = %crate::report::ReportEvent::Warning {
-                                message: format!("skipping {id}: {e:#}"),
-                            },
-                        );
+                        match self.kind {
+                            PluginKind::Registry => tracing::warn!(
+                                report = %crate::report::ReportEvent::Warning {
+                                    message: format!("skipping {e:#}"),
+                                },
+                            ),
+                            PluginKind::Package => {
+                                tracing::warn!(id = %id, error = %e, "failed to validate plugin")
+                            }
+                        }
                         None
                     }
                 }
@@ -290,6 +298,71 @@ mod tests {
     fn package_id_display_is_colon_tuple() {
         let id = PackageId::new("cargo", "serde", "1.0.210");
         assert_eq!(id.to_string(), "cargo:serde:1.0.210");
+    }
+
+    /// A PM that answers with one plugin whose manifest fails validation.
+    struct InvalidPluginPm;
+
+    #[async_trait::async_trait]
+    impl PackageManager for InvalidPluginPm {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        async fn active_plugins(&self, _deps: &[PackageId]) -> Vec<UnvalidatedPlugin> {
+            let manifest = symposium_sdk::manifest::RawPluginManifest::parse(
+                "name = \"broken\"\n[[skills]]\n",
+            )
+            .unwrap();
+            vec![UnvalidatedPlugin::new(
+                PackageId::any_version("stub", "broken"),
+                PathBuf::from("/nonexistent/broken"),
+                manifest,
+            )]
+        }
+        async fn load_plugin(&self, _id: &PackageId) -> Vec<UnvalidatedPlugin> {
+            Vec::new()
+        }
+        async fn list_deps(&self) -> Result<Vec<PackageId>> {
+            Ok(Vec::new())
+        }
+        async fn search(&self, _query: &str) -> Result<Vec<PluginInfo>> {
+            Ok(Vec::new())
+        }
+        async fn fetch(&self, id: &PackageId, _update: UpdateLevel) -> Result<FetchedPackage> {
+            anyhow::bail!("cannot fetch {id}")
+        }
+    }
+
+    /// The report events emitted while validating the stub's plugin under `kind`.
+    async fn reports_for_invalid_plugin(kind: PluginKind) -> Vec<serde_json::Value> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let (layer, handle) =
+            crate::report::ReportLayer::new(crate::report::ReportMode::Json, tracing::Level::DEBUG);
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+        let instance = PmInstance {
+            name: "stub".into(),
+            trusted: false,
+            kind,
+            pm: Box::new(InvalidPluginPm),
+        };
+        assert!(instance.active_plugins(&[]).await.is_empty());
+        handle.drain()
+    }
+
+    #[tokio::test]
+    async fn invalid_registry_plugin_is_reported_with_its_path() {
+        let reports = reports_for_invalid_plugin(PluginKind::Registry).await;
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        let message = reports[0]["message"].as_str().unwrap();
+        assert!(message.contains("/nonexistent/broken"), "{message}");
+    }
+
+    /// A package's manifest is its author's problem, and the hook path prints
+    /// reports next to the agent's JSON, so a package failure is only logged.
+    #[tokio::test]
+    async fn invalid_package_plugin_is_not_reported() {
+        let reports = reports_for_invalid_plugin(PluginKind::Package).await;
+        assert!(reports.is_empty(), "{reports:?}");
     }
 
     #[tokio::test]

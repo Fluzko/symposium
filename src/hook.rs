@@ -268,7 +268,7 @@ pub async fn execute_hook(
         // Auto-sync: install applicable skills into agent dirs (non-fatal).
         // SessionStart refreshes source caches and syncs unconditionally.
         let session_start = event == HookEvent::SessionStart;
-        run_auto_sync(sym, &deps, session_start).await;
+        let notify_about_possible_new_plugins = run_auto_sync(sym, &deps, session_start).await;
 
         // SessionStart (once per session) also refreshes every hook's already-
         // cached source, so later events dispatch fresh binaries without per-
@@ -278,7 +278,8 @@ pub async fn execute_hook(
         }
 
         // Builtin dispatch → symposium output → host agent output as Value
-        let builtin_sym_output = dispatch_builtin(sym, &sym_input, &deps).await;
+        let builtin_sym_output =
+            dispatch_builtin(sym, &sym_input, &deps, notify_about_possible_new_plugins).await;
         let builtin_agent_output = handler.translate_output(&builtin_sym_output);
         let prior_output = builtin_agent_output.to_hook_output();
 
@@ -376,10 +377,12 @@ fn write_hook_trace(agent: HookAgent, event: HookEvent, input: &str, output: &[u
 /// every source cache (`UpdateLevel::Check`) and sync unconditionally, ignoring
 /// the `Cargo.lock` freshness gate — upstream skill changes land even when the
 /// workspace's dependencies are unchanged.
-async fn run_auto_sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, session_start: bool) {
+///
+/// Returns whether it re-synced because `Cargo.lock` changed mid-session.
+async fn run_auto_sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, session_start: bool) -> bool {
     if !sym.config.auto_sync {
         tracing::debug!("auto-sync disabled, skipping");
-        return;
+        return false;
     }
 
     let cwd = deps.cwd().to_path_buf();
@@ -395,9 +398,10 @@ async fn run_auto_sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, session_start
         let state = crate::workspace_state::WorkspaceState::load(sym, root);
         if state.sync_is_fresh(root) {
             tracing::debug!("auto-sync skipped: Cargo.lock unchanged since last sync");
-            return;
+            return false;
         }
     }
+    let dependencies_changed = !session_start && workspace_root.is_some();
 
     let update = if session_start {
         symposium_install::UpdateLevel::Check
@@ -408,7 +412,7 @@ async fn run_auto_sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, session_start
     tracing::debug!("auto-sync running");
     if let Err(e) = crate::sync::sync(sym, deps, update).await {
         tracing::warn!(error = %e, "auto-sync during hook failed (continuing)");
-        return;
+        return false;
     }
 
     // Record successful sync. If we didn't find the root earlier,
@@ -420,6 +424,7 @@ async fn run_auto_sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, session_start
         state.workspace_root = Some(root.clone());
         state.save(sym, root);
     }
+    dependencies_changed
 }
 
 /// Whether the hook pipeline must resolve the workspace crate graph before
@@ -511,14 +516,17 @@ pub async fn dispatch_builtin(
     sym: &Symposium,
     input: &symposium::InputEvent,
     deps: &Arc<WorkspaceDeps>,
+    notify_about_possible_new_plugins: bool,
 ) -> symposium::OutputEvent {
     match input {
         symposium::InputEvent::PreToolUse(_) => {
             symposium::OutputEvent::empty_for(HookEvent::PreToolUse)
         }
-        symposium::InputEvent::PostToolUse(post) => handle_post_tool_use(sym, post).await,
+        symposium::InputEvent::PostToolUse(post) => {
+            handle_post_tool_use(sym, post, notify_about_possible_new_plugins).await
+        }
         symposium::InputEvent::UserPromptSubmit(prompt) => {
-            handle_user_prompt_submit(sym, prompt).await
+            handle_user_prompt_submit(sym, prompt, notify_about_possible_new_plugins).await
         }
         symposium::InputEvent::SessionStart(session) => {
             handle_session_start(sym, session, deps).await
@@ -623,20 +631,36 @@ fn update_nudge(sym: &Symposium) -> Option<String> {
     ))
 }
 
-/// Handle PostToolUse: no-op for now.
 async fn handle_post_tool_use(
     _sym: &Symposium,
     _post: &symposium::PostToolUseInput,
+    notify_about_possible_new_plugins: bool,
 ) -> symposium::OutputEvent {
-    symposium::OutputEvent::empty_for(HookEvent::PostToolUse)
+    possible_new_plugins_notice(HookEvent::PostToolUse, notify_about_possible_new_plugins)
 }
 
-/// Handle UserPromptSubmit: no-op for now.
 async fn handle_user_prompt_submit(
     _sym: &Symposium,
     _prompt_payload: &symposium::UserPromptSubmitInput,
+    notify_about_possible_new_plugins: bool,
 ) -> symposium::OutputEvent {
-    symposium::OutputEvent::empty_for(HookEvent::UserPromptSubmit)
+    possible_new_plugins_notice(
+        HookEvent::UserPromptSubmit,
+        notify_about_possible_new_plugins,
+    )
+}
+
+fn possible_new_plugins_notice(event: HookEvent, notify: bool) -> symposium::OutputEvent {
+    if !notify {
+        return symposium::OutputEvent::empty_for(event);
+    }
+    symposium::OutputEvent::with_context(
+        event,
+        "The workspace's dependencies just changed, so there may be new agent plugins \
+         available from them. They stay off until the user consents: tell the user to run \
+         `cargo agents sync` in their terminal to review them. Do not enable them yourself."
+            .to_string(),
+    )
 }
 
 pub enum PluginHookOutput {
@@ -1125,12 +1149,12 @@ mod tests {
             None,
             None,
         ));
-        let output = dispatch_builtin(&sym, &input, &deps).await;
+        let output = dispatch_builtin(&sym, &input, &deps, false).await;
         assert!(output.additional_context().is_none());
     }
 
     #[tokio::test]
-    async fn builtin_post_tool_use_returns_empty_for_now() {
+    async fn builtin_post_tool_use_returns_empty_when_dependencies_are_unchanged() {
         let tmp = tempfile::tempdir().unwrap();
         let sym = Symposium::from_dir(tmp.path());
         let deps = sym.workspace_deps(tmp.path());
@@ -1141,12 +1165,12 @@ mod tests {
             Some("test-session".to_string()),
             Some("/tmp".to_string()),
         ));
-        let output = dispatch_builtin(&sym, &input, &deps).await;
+        let output = dispatch_builtin(&sym, &input, &deps, false).await;
         assert!(output.additional_context().is_none());
     }
 
     #[tokio::test]
-    async fn builtin_user_prompt_submit_returns_empty_for_now() {
+    async fn builtin_user_prompt_submit_returns_empty_when_dependencies_are_unchanged() {
         let tmp = tempfile::tempdir().unwrap();
         let sym = Symposium::from_dir(tmp.path());
         let deps = sym.workspace_deps(tmp.path());
@@ -1155,7 +1179,7 @@ mod tests {
             Some("test-session".to_string()),
             Some("/tmp".to_string()),
         ));
-        let output = dispatch_builtin(&sym, &input, &deps).await;
+        let output = dispatch_builtin(&sym, &input, &deps, false).await;
         assert!(output.additional_context().is_none());
     }
 

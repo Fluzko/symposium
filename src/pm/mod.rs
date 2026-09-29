@@ -29,7 +29,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use symposium_install::UpdateLevel;
 
-use crate::plugins::ParsedPlugin;
+use crate::plugins::Plugin;
 
 mod cargo;
 mod git;
@@ -41,67 +41,9 @@ pub use cargo::{
 pub use git::GitPm;
 pub use path::PathPm;
 
-/// The `pm` component of cargo package ids.
-pub const CARGO_PM: &str = "cargo";
-
-/// Version placeholder for "no requirement": the package manager resolves it
-/// (for cargo: a workspace pin, or the newest published version).
-pub const ANY_VERSION: &str = "*";
-
-/// Canonical package coordinates: which package manager, which package,
-/// which version.
-///
-/// `version` may still be a *requirement* (a semver range, or
-/// [`ANY_VERSION`]); [`PackageManager::fetch`] canonicalizes it — the id on
-/// a [`FetchedPackage`] always names the exact resolved version.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PackageId {
-    pub pm: String,
-    pub name: String,
-    pub version: String,
-}
-
-impl PackageId {
-    pub fn new(pm: impl Into<String>, name: impl Into<String>, version: impl Into<String>) -> Self {
-        Self {
-            pm: pm.into(),
-            name: name.into(),
-            version: version.into(),
-        }
-    }
-
-    /// An id with no version requirement — the PM resolves it at fetch.
-    pub fn any_version(pm: impl Into<String>, name: impl Into<String>) -> Self {
-        Self::new(pm, name, ANY_VERSION)
-    }
-}
-
-impl std::fmt::Display for PackageId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}:{}", self.pm, self.name, self.version)
-    }
-}
-
-/// What [`search`](PackageManager::search) knows about a candidate package
-/// before its content is on disk: its identity and an optional description.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginInfo {
-    /// Canonical identity. The version component may still be a requirement
-    /// that fetch canonicalizes.
-    pub id: PackageId,
-    /// Human-oriented description when the PM's registry provides one.
-    pub description: Option<String>,
-}
-
-impl PluginInfo {
-    /// An info with just the identity.
-    pub fn from_id(id: PackageId) -> Self {
-        Self {
-            id,
-            description: None,
-        }
-    }
-}
+/// The identity types are the SDK's, since they cross the PM boundary: a
+/// package-manager binary speaks in them too.
+pub use symposium_sdk::pm::{ANY_VERSION, CARGO_PM, PackageId, PluginInfo, UnvalidatedPlugin};
 
 /// A fetched package: the exact id it resolved to, plus the directory
 /// holding its content.
@@ -124,10 +66,14 @@ pub struct FetchedPackage {
 /// PM activates for the workspace's dependency set (a registry lists its
 /// entries; the cargo transport surfaces dependency-embedded plugins);
 /// [`load_plugin`](Self::load_plugin) resolves a *specific* id named elsewhere
-/// (a `[[plugins]]` chained reference, an explicitly enabled crate). Both return
-/// fully-resolved [`ParsedPlugin`]s (absolute skill dirs) and are best-effort —
-/// failures are logged and dropped, not surfaced, so one bad plugin never
-/// aborts a sync or hook.
+/// (a `[[plugins]]` chained reference, an explicitly enabled crate). Both
+/// answer with [`UnvalidatedPlugin`]s: an id, a content directory, and an
+/// *unvalidated* manifest, and are best-effort: failures are logged and
+/// dropped, not surfaced, so one bad plugin never aborts a sync or hook.
+///
+/// Validating an [`UnvalidatedPlugin`] into a [`Plugin`] is [`PmInstance`]'s
+/// job, not the PM's, because the policy depends on where the plugin came from rather than
+/// on what it says. That is the whole trust boundary: see [`PluginKind`].
 #[async_trait::async_trait]
 pub trait PackageManager {
     /// The PM's registry name — the `pm` component of every id it owns. For
@@ -139,11 +85,11 @@ pub trait PackageManager {
     /// registry lists its own entries (deps ignored); the cargo transport
     /// surfaces the plugins its dependencies embed. Whether a dependency-embedded
     /// plugin is *trusted* is the caller's decision — see [`PmInstance::trusted`].
-    async fn active_plugins(&self, deps: &[PackageId]) -> Vec<ParsedPlugin>;
+    async fn active_plugins(&self, deps: &[PackageId]) -> Vec<UnvalidatedPlugin>;
 
     /// The plugin(s) a specific id maps to — zero, one, or many. Used for
     /// `[[plugins]]` chained references and explicitly enabled crates.
-    async fn load_plugin(&self, id: &PackageId) -> Vec<ParsedPlugin>;
+    async fn load_plugin(&self, id: &PackageId) -> Vec<UnvalidatedPlugin>;
 
     /// The package ids the current workspace depends on. Empty for PMs with no
     /// workspace notion.
@@ -184,9 +130,26 @@ pub enum RegistrySource {
     Path { dir: PathBuf },
 }
 
+/// Which validation policy an instance's plugins get.
+///
+/// Symposium's decision, keyed on the kind of instance the plugin came from:
+/// never something a package manager states about itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginKind {
+    /// A curated registry entry. It must name itself, `[defaults]` is
+    /// rejected, and one that references no dependency anywhere loads
+    /// [dormant](crate::plugins::PluginManifest::requires_use): there is nothing to
+    /// infer a gate from, and "always on" would fire it in every workspace.
+    Registry,
+    /// A package in an ecosystem. Its id supplies the name, the reference that
+    /// reached it supplies the gate (so dormancy does not apply), and it picks
+    /// up the default `skills/` group.
+    Package,
+}
+
 /// A package-manager instance: its attribution name (the config registry name,
-/// or `cargo` for the transport — the `pm` component of every id it owns), a
-/// trust marker, and the PM itself.
+/// or `cargo` for the transport: the `pm` component of every id it owns), the
+/// policy its plugins are validated under, a trust marker, and the PM itself.
 pub struct PmInstance {
     pub name: String,
     /// Whether this instance's [`active_plugins`](PackageManager::active_plugins)
@@ -194,7 +157,50 @@ pub struct PmInstance {
     /// transport is not, since its `active_plugins` are the plugins *embedded in
     /// dependencies*, which run only with the user's consent.
     pub trusted: bool,
+    /// Validation policy for this instance's plugins.
+    pub kind: PluginKind,
     pub pm: Box<dyn PackageManager + Send + Sync>,
+}
+
+impl PmInstance {
+    /// This instance's active plugins, validated. A plugin that fails
+    /// validation is logged and dropped: best-effort, like the PM layer above.
+    pub async fn active_plugins(&self, deps: &[PackageId]) -> Vec<Plugin> {
+        self.validate_all(self.pm.active_plugins(deps).await)
+    }
+
+    /// The plugin(s) an id maps to, validated.
+    pub async fn load_plugin(&self, id: &PackageId) -> Vec<Plugin> {
+        self.validate_all(self.pm.load_plugin(id).await)
+    }
+
+    /// A registry entry that fails validation is the user's to fix, so it is
+    /// reported. A package's is its author's, and the hook path must not print
+    /// it next to the agent's JSON, so it is only logged.
+    fn validate_all(&self, unvalidated: Vec<UnvalidatedPlugin>) -> Vec<Plugin> {
+        unvalidated
+            .into_iter()
+            .filter_map(|plugin| {
+                let id = plugin.id.clone();
+                match crate::plugins::validate_plugin(plugin, self.kind) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        match self.kind {
+                            PluginKind::Registry => tracing::warn!(
+                                report = %crate::report::ReportEvent::Warning {
+                                    message: format!("skipping {e:#}"),
+                                },
+                            ),
+                            PluginKind::Package => {
+                                tracing::warn!(id = %id, error = %e, "failed to validate plugin")
+                            }
+                        }
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
 }
 
 /// The active set of package-manager instances — one flat collection, the cargo
@@ -239,11 +245,12 @@ impl PmRegistry {
     }
 
     /// Load the plugin(s) an id maps to, asking every instance. Any instance may
-    /// contribute a plugin relevant to the id, so this can return several.
-    pub async fn load_plugin(&self, id: &PackageId) -> Vec<ParsedPlugin> {
+    /// contribute a plugin relevant to the id, so this can return several. Each
+    /// instance's plugins are validated under its own [`PluginKind`].
+    pub async fn load_plugin(&self, id: &PackageId) -> Vec<Plugin> {
         let mut out = Vec::new();
         for inst in &self.instances {
-            out.extend(inst.pm.load_plugin(id).await);
+            out.extend(inst.load_plugin(id).await);
         }
         out
     }
@@ -291,6 +298,71 @@ mod tests {
     fn package_id_display_is_colon_tuple() {
         let id = PackageId::new("cargo", "serde", "1.0.210");
         assert_eq!(id.to_string(), "cargo:serde:1.0.210");
+    }
+
+    /// A PM that answers with one plugin whose manifest fails validation.
+    struct InvalidPluginPm;
+
+    #[async_trait::async_trait]
+    impl PackageManager for InvalidPluginPm {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        async fn active_plugins(&self, _deps: &[PackageId]) -> Vec<UnvalidatedPlugin> {
+            let manifest = symposium_sdk::manifest::RawPluginManifest::parse(
+                "name = \"broken\"\n[[skills]]\n",
+            )
+            .unwrap();
+            vec![UnvalidatedPlugin::new(
+                PackageId::any_version("stub", "broken"),
+                PathBuf::from("/nonexistent/broken"),
+                manifest,
+            )]
+        }
+        async fn load_plugin(&self, _id: &PackageId) -> Vec<UnvalidatedPlugin> {
+            Vec::new()
+        }
+        async fn list_deps(&self) -> Result<Vec<PackageId>> {
+            Ok(Vec::new())
+        }
+        async fn search(&self, _query: &str) -> Result<Vec<PluginInfo>> {
+            Ok(Vec::new())
+        }
+        async fn fetch(&self, id: &PackageId, _update: UpdateLevel) -> Result<FetchedPackage> {
+            anyhow::bail!("cannot fetch {id}")
+        }
+    }
+
+    /// The report events emitted while validating the stub's plugin under `kind`.
+    async fn reports_for_invalid_plugin(kind: PluginKind) -> Vec<serde_json::Value> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let (layer, handle) =
+            crate::report::ReportLayer::new(crate::report::ReportMode::Json, tracing::Level::DEBUG);
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+        let instance = PmInstance {
+            name: "stub".into(),
+            trusted: false,
+            kind,
+            pm: Box::new(InvalidPluginPm),
+        };
+        assert!(instance.active_plugins(&[]).await.is_empty());
+        handle.drain()
+    }
+
+    #[tokio::test]
+    async fn invalid_registry_plugin_is_reported_with_its_path() {
+        let reports = reports_for_invalid_plugin(PluginKind::Registry).await;
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        let message = reports[0]["message"].as_str().unwrap();
+        assert!(message.contains("/nonexistent/broken"), "{message}");
+    }
+
+    /// A package's manifest is its author's problem, and the hook path prints
+    /// reports next to the agent's JSON, so a package failure is only logged.
+    #[tokio::test]
+    async fn invalid_package_plugin_is_not_reported() {
+        let reports = reports_for_invalid_plugin(PluginKind::Package).await;
+        assert!(reports.is_empty(), "{reports:?}");
     }
 
     #[tokio::test]

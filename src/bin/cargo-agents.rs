@@ -295,7 +295,7 @@ async fn handle_plugin_command(sym: &config::Symposium, command: PluginCommand) 
                         ExitCode::SUCCESS
                     }
                     Err(e) => {
-                        eprintln!("{}: {e}", path.display());
+                        eprintln!("{}: {e:#}", path.display());
                         ExitCode::FAILURE
                     }
                 }
@@ -306,7 +306,7 @@ async fn handle_plugin_command(sym: &config::Symposium, command: PluginCommand) 
             // configuration rather than re-reading a manifest file.
             Some(p) => {
                 println!("# {}", p.canonical);
-                match toml::to_string_pretty(&p.plugin) {
+                match toml::to_string_pretty(&p.manifest) {
                     Ok(rendered) => {
                         println!();
                         print!("{rendered}");
@@ -346,7 +346,7 @@ fn emit_validation_results(r: &plugins::ValidationResult) -> usize {
                     path: r.id.clone(),
                     item_kind: r.kind.to_string(),
                     valid: false,
-                    error: Some(e.to_string()),
+                    error: Some(format!("{e:#}")),
                     warning: None,
                 },
             );

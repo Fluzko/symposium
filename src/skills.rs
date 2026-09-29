@@ -3,6 +3,7 @@
 //! Skills follow the [agentskills.io](https://agentskills.io/specification.md) format
 //! and live inside plugin directories under `skills/*/SKILL.md`.
 
+use crate::predicate::PredicateEval;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use symposium_install::UpdateLevel;
 
 use crate::config::Symposium;
-use crate::plugins::{ParsedPlugin, PluginSource, SkillGroup};
+use crate::plugins::{Plugin, PluginSource, SkillGroup};
 use crate::predicate::{PredicateContext, PredicateSet};
 
 fn source_display(source: &PluginSource) -> String {
@@ -149,20 +150,20 @@ pub async fn skills_applicable_to(
 /// from [`crate::plugins::active_plugins`] — the plugin walk never touches the network.
 pub(crate) async fn collect_skills(
     sym: &Symposium,
-    active: &[ParsedPlugin],
+    active: &[Plugin],
     ctx: &mut PredicateContext<'_>,
     update: UpdateLevel,
 ) -> Vec<SkillWithGroupContext> {
     let mut results = Vec::new();
     for parsed in active {
         ctx.set_workspace_member(parsed.workspace_member);
-        for group in &parsed.plugin.skills {
+        for group in &parsed.manifest.skills {
             let skills = load_skills_for_group(sym, parsed, group, ctx, update).await;
             for (skill, origin_hash) in skills {
                 collect_skill_applicable_to(
                     skill,
                     origin_hash,
-                    &parsed.plugin.name,
+                    &parsed.manifest.name,
                     ctx,
                     &mut results,
                 );
@@ -181,12 +182,12 @@ pub(crate) async fn collect_skills(
 /// with the SKILL.md's path within that origin, one per discovered SKILL.md.
 async fn load_skills_for_group(
     sym: &Symposium,
-    parsed: &ParsedPlugin,
+    parsed: &Plugin,
     group: &SkillGroup,
     ctx: &mut PredicateContext<'_>,
     update: UpdateLevel,
 ) -> Vec<(Skill, String)> {
-    let plugin = &parsed.plugin;
+    let plugin = &parsed.manifest;
 
     // Pre-fetch filtering: skip groups whose predicates don't hold (crate
     // matching and runtime checks alike). Done before any git/crates fetch so
@@ -252,11 +253,11 @@ struct ResolvedSkillDir {
 /// path (see the module-level note above `skill_origin_hash`).
 async fn resolve_group_dirs(
     sym: &Symposium,
-    parsed: &ParsedPlugin,
+    parsed: &Plugin,
     group: &SkillGroup,
     update: UpdateLevel,
 ) -> Vec<ResolvedSkillDir> {
-    let plugin = &parsed.plugin;
+    let plugin = &parsed.manifest;
 
     match &group.source {
         // Resolved to an absolute directory by the package manager, so there is
@@ -447,7 +448,7 @@ fn frontmatter_predicates(
 /// its `depends-on`/`predicates` hoisted into one set (so the plugin is gated
 /// by them and the ordinary dormancy rule applies — a bare skill with no
 /// dependency is dormant until `use`d). See
-/// [`plugins::load_standalone_skill_plugin`](crate::plugins).
+/// [`plugins::standalone_skill_manifest`](crate::plugins::standalone_skill_manifest).
 pub(crate) fn standalone_skill_meta(skill_md: &Path) -> Result<(Option<String>, PredicateSet)> {
     let content = std::fs::read_to_string(skill_md)
         .with_context(|| format!("failed to read {}", skill_md.display()))?;
@@ -966,7 +967,7 @@ mod tests {
             indoc! {"
                 ---
                 name: no-own-crates
-                description: Plugin provides crates
+                description: PluginManifest provides crates
                 ---
 
                 Body.
@@ -980,7 +981,7 @@ mod tests {
         assert_eq!(skill.frontmatter.get("name").unwrap(), "no-own-crates");
     }
 
-    // --- Bare SKILL.md loading (see plugins::load_standalone_skill_plugin
+    // --- Bare SKILL.md loading (see plugins::standalone_skill_manifest
     // for how a bare skill becomes a plugin) ---
 
     #[test]
@@ -1098,14 +1099,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_plugin_level_filtering_blocks_skills() {
-        use crate::plugins::{ParsedPlugin, Plugin, PluginRegistry, PluginSource, SkillGroup};
+        use crate::plugins::{Plugin, PluginManifest, PluginRegistry, PluginSource, SkillGroup};
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
         let sym = crate::config::Symposium::from_dir(tmp.path());
 
         // Create a plugin that only applies to "other-crate"
-        let plugin = Plugin {
+        let plugin = PluginManifest {
             name: "other-crate-plugin".to_string(),
             predicates: pred_set("other-crate"),
             hooks: vec![],
@@ -1124,9 +1125,9 @@ mod tests {
         };
 
         let registry = PluginRegistry {
-            plugins: vec![ParsedPlugin {
+            plugins: vec![Plugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                plugin,
+                manifest: plugin,
                 workspace_member: false,
             }],
             warnings: vec![],
@@ -1157,14 +1158,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_group_level_filtering_blocks_skills() {
-        use crate::plugins::{ParsedPlugin, Plugin, PluginRegistry, PluginSource, SkillGroup};
+        use crate::plugins::{Plugin, PluginManifest, PluginRegistry, PluginSource, SkillGroup};
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
         let sym = crate::config::Symposium::from_dir(tmp.path());
 
         // Create a plugin with wildcard that has a group targeting different crate
-        let plugin = Plugin {
+        let plugin = PluginManifest {
             name: "wildcard-plugin".to_string(),
             predicates: pred_set("*"), // Plugin applies to all
             hooks: vec![],
@@ -1183,9 +1184,9 @@ mod tests {
         };
 
         let registry = PluginRegistry {
-            plugins: vec![ParsedPlugin {
+            plugins: vec![Plugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                plugin,
+                manifest: plugin,
                 workspace_member: false,
             }],
             warnings: vec![],
@@ -1216,7 +1217,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_levels_match_allows_skills() {
-        use crate::plugins::{ParsedPlugin, Plugin, PluginRegistry, PluginSource, SkillGroup};
+        use crate::plugins::{Plugin, PluginManifest, PluginRegistry, PluginSource, SkillGroup};
         use std::fs;
         use tempfile::TempDir;
 
@@ -1241,7 +1242,7 @@ mod tests {
         .unwrap();
 
         // Create a plugin where all levels match serde
-        let plugin = Plugin {
+        let plugin = PluginManifest {
             name: "serde-plugin".to_string(),
             predicates: pred_set("serde"), // Plugin targets serde
             hooks: vec![],
@@ -1260,9 +1261,9 @@ mod tests {
         };
 
         let registry = PluginRegistry {
-            plugins: vec![ParsedPlugin {
+            plugins: vec![Plugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                plugin,
+                manifest: plugin,
                 workspace_member: false,
             }],
             warnings: vec![],
@@ -1294,7 +1295,7 @@ mod tests {
 
     #[tokio::test]
     async fn predicate_failure_filters_skill() {
-        use crate::plugins::{ParsedPlugin, Plugin, PluginRegistry, PluginSource, SkillGroup};
+        use crate::plugins::{Plugin, PluginManifest, PluginRegistry, PluginSource, SkillGroup};
         use std::fs;
         use tempfile::TempDir;
 
@@ -1318,7 +1319,7 @@ mod tests {
         .unwrap();
 
         // Plugin matches by crates, but its shell predicate fails.
-        let plugin = Plugin {
+        let plugin = PluginManifest {
             name: "p".into(),
             predicates: PredicateSet {
                 predicates: vec![
@@ -1342,9 +1343,9 @@ mod tests {
         };
 
         let registry = PluginRegistry {
-            plugins: vec![ParsedPlugin {
+            plugins: vec![Plugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                plugin,
+                manifest: plugin,
                 workspace_member: false,
             }],
             warnings: vec![],
@@ -1373,7 +1374,7 @@ mod tests {
 
     #[tokio::test]
     async fn predicate_pass_allows_skill() {
-        use crate::plugins::{ParsedPlugin, Plugin, PluginRegistry, PluginSource, SkillGroup};
+        use crate::plugins::{Plugin, PluginManifest, PluginRegistry, PluginSource, SkillGroup};
         use std::fs;
         use tempfile::TempDir;
 
@@ -1396,7 +1397,7 @@ mod tests {
         )
         .unwrap();
 
-        let plugin = Plugin {
+        let plugin = PluginManifest {
             name: "p".into(),
             predicates: PredicateSet {
                 predicates: vec![
@@ -1425,9 +1426,9 @@ mod tests {
         };
 
         let registry = PluginRegistry {
-            plugins: vec![ParsedPlugin {
+            plugins: vec![Plugin {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
-                plugin,
+                manifest: plugin,
                 workspace_member: false,
             }],
             warnings: vec![],
@@ -1514,7 +1515,7 @@ mod tests {
     /// plugin path.
     #[tokio::test]
     async fn bare_skill_plugin_contributes_its_skill() {
-        use crate::plugins::{ParsedPlugin, Plugin, PluginRegistry, PluginSource, SkillGroup};
+        use crate::plugins::{Plugin, PluginManifest, PluginRegistry, PluginSource, SkillGroup};
 
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join("my-skill");
@@ -1533,7 +1534,7 @@ mod tests {
         )
         .unwrap();
 
-        let plugin = Plugin {
+        let plugin = PluginManifest {
             name: "my-skill".to_string(),
             predicates: pred_set("serde"),
             installations: vec![],
@@ -1553,9 +1554,9 @@ mod tests {
             requires_use: false,
         };
         let registry = PluginRegistry {
-            plugins: vec![ParsedPlugin {
+            plugins: vec![Plugin {
                 canonical: crate::pm::PackageId::any_version("recs", "my-skill"),
-                plugin,
+                manifest: plugin,
                 workspace_member: false,
             }],
             warnings: vec![],

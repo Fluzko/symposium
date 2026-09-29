@@ -1,14 +1,26 @@
+use crate::predicate::PredicateEval;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::config::Symposium;
 use crate::hook::HookEvent;
 use crate::hook_schema::HookAgent;
-use crate::pm::{ANY_VERSION, PackageId};
+use crate::pm::{ANY_VERSION, PackageId, PluginKind, UnvalidatedPlugin};
 use symposium_install::Source;
+
+pub use symposium_sdk::manifest::{Audience, HookFormat};
+/// The unvalidated manifest schema lives in the SDK, because it is what
+/// crosses the package-manager boundary. This module owns the other half:
+/// turning one into a validated [`PluginManifest`]: applying defaults, promoting
+/// inline installations, and deciding dormancy.
+use symposium_sdk::manifest::{
+    RawChainedCargo, RawChainedPlugin, RawCustomPredicate, RawHook, RawInlineInstallation,
+    RawInstallationRef, RawNamedInstallation, RawPluginManifest, RawPluginMcpServer,
+    RawPluginSource, RawSkillGroup, RawSubcommand,
+};
 
 use sacp::schema::McpServer;
 
@@ -31,27 +43,13 @@ pub struct PluginMcpServer {
     pub server: McpServerEntry,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawPluginMcpServer {
-    #[serde(default, rename = "depends-on")]
-    depends_on: Option<crate::predicate::DependsOnList>,
-    /// Rejected: renamed to `depends-on`.
-    #[serde(default)]
-    crates: Option<toml::Value>,
-    #[serde(default)]
-    predicates: crate::predicate::PredicateSet,
-    #[serde(flatten)]
-    server: McpServerEntry,
-}
-
-impl RawPluginMcpServer {
-    fn validate(self) -> Result<PluginMcpServer> {
-        reject_crates_field(&self.crates)?;
-        Ok(PluginMcpServer {
-            predicates: crate::predicate::PredicateSet::merged(self.depends_on, self.predicates),
-            server: self.server,
-        })
-    }
+/// Validate a raw `[[mcp_servers]]` entry.
+fn validate_mcp_server(raw: RawPluginMcpServer) -> Result<PluginMcpServer> {
+    reject_crates_field(&raw.crates)?;
+    Ok(PluginMcpServer {
+        predicates: crate::predicate::PredicateSet::merged(raw.depends_on, raw.predicates),
+        server: raw.server,
+    })
 }
 
 /// Shared rejection for the retired `crates` field, with a migration hint.
@@ -81,31 +79,10 @@ pub enum PluginSource {
     Git(String),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawPluginSource {
-    Shorthand(String),
-    Table(RawPluginSourceTable),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawPluginSourceTable {
-    #[serde(default)]
-    path: Option<PathBuf>,
-    #[serde(default)]
-    git: Option<String>,
-    /// Rejected: `source.crate = { ... }` is no longer valid.
-    #[serde(default, rename = "crate")]
-    crate_field: Option<toml::Value>,
-    /// Rejected: `source.crate_path = "..."` is no longer valid.
-    #[serde(default)]
-    crate_path: Option<toml::Value>,
-}
-
-impl RawPluginSource {
-    fn validate(self) -> Result<PluginSource> {
-        match self {
+/// Validate a raw skill-group `source` into a [`PluginSource`].
+fn validate_plugin_source(raw: RawPluginSource) -> Result<PluginSource> {
+    {
+        match raw {
             RawPluginSource::Shorthand(value) => bail!(
                 "`source = \"{value}\"` is no longer supported; a crate now provides a plugin \
                  via a `[[plugins]] source.cargo = \"...\"` reference"
@@ -189,29 +166,16 @@ pub struct SkillGroup {
     pub workspace_member: bool,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawSkillGroup {
-    #[serde(default, rename = "depends-on")]
-    depends_on: Option<crate::predicate::DependsOnList>,
-    /// Rejected: renamed to `depends-on`.
-    #[serde(default)]
-    crates: Option<toml::Value>,
-    #[serde(default)]
-    predicates: crate::predicate::PredicateSet,
-    #[serde(default)]
-    source: Option<RawPluginSource>,
-}
-
-impl RawSkillGroup {
-    fn validate(self) -> Result<SkillGroup> {
-        reject_crates_field(&self.crates)?;
-        let source = self
-            .source
-            .context("a `[[skills]]` group must set `source.path` or `source.git`")?
-            .validate()?;
+/// Validate a raw `[[skills]]` entry.
+fn validate_skill_group(raw: RawSkillGroup) -> Result<SkillGroup> {
+    {
+        reject_crates_field(&raw.crates)?;
+        let source = validate_plugin_source(
+            raw.source
+                .context("a `[[skills]]` group must set `source.path` or `source.git`")?,
+        )?;
         Ok(SkillGroup {
-            predicates: crate::predicate::PredicateSet::merged(self.depends_on, self.predicates),
+            predicates: crate::predicate::PredicateSet::merged(raw.depends_on, raw.predicates),
             source,
             source_label: None,
             workspace_member: false,
@@ -219,59 +183,16 @@ impl RawSkillGroup {
     }
 }
 
-/// A raw `[[plugins]]` entry.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawChainedPlugin {
-    #[serde(default, rename = "depends-on")]
-    depends_on: Option<crate::predicate::DependsOnList>,
-    #[serde(default)]
-    predicates: crate::predicate::PredicateSet,
-    source: RawChainedSource,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawChainedSource {
-    /// Dependency-atom string (`source.cargo = "widget>=1"`) or explicit
-    /// table (`source.cargo = { name = "widget", version = ">=1" }`).
-    #[serde(default)]
-    cargo: Option<RawChainedCargo>,
-    /// Not yet implemented — reserved so the error is a clear message rather
-    /// than an unknown-field parse failure.
-    #[serde(default)]
-    git: Option<toml::Value>,
-    /// Not yet implemented — reserved like `git`.
-    #[serde(default)]
-    path: Option<toml::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawChainedCargo {
-    Atom(String),
-    Table(RawChainedCargoTable),
-    /// Anything else — rejected with a migration hint.
-    Other(toml::Value),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawChainedCargoTable {
-    name: String,
-    #[serde(default)]
-    version: Option<String>,
-}
-
-impl RawChainedPlugin {
-    fn validate(self) -> Result<ChainedPlugin> {
-        if self.source.git.is_some() || self.source.path.is_some() {
+/// Validate a raw `[[plugins]]` chained reference.
+fn validate_chained_plugin(raw: RawChainedPlugin) -> Result<ChainedPlugin> {
+    {
+        if raw.source.git.is_some() || raw.source.path.is_some() {
             bail!(
                 "[[plugins]] currently supports only `source.cargo`; \
                  git and path chained plugins are not yet implemented"
             );
         }
-        let Some(cargo) = self.source.cargo else {
+        let Some(cargo) = raw.source.cargo else {
             bail!(
                 "[[plugins]] entry needs `source.cargo = \"<crate><version req>\"` \
                  or `source.cargo = {{ name = \"...\", version = \"...\" }}`"
@@ -315,50 +236,19 @@ impl RawChainedPlugin {
             }
         };
         Ok(ChainedPlugin {
-            predicates: crate::predicate::PredicateSet::merged(self.depends_on, self.predicates),
+            predicates: crate::predicate::PredicateSet::merged(raw.depends_on, raw.predicates),
             name,
             version,
         })
     }
 }
 
-/// Raw command reference as it appears in TOML: a string (named installation
-/// reference) or an inline installation table.
-///
-/// Inline forms are promoted at validation time into synthetic
-/// `[[installations]]` entries, so the validated `Plugin` only ever stores
-/// installation references as plain names.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawInstallationRef {
-    Named(String),
-    Inline(RawInlineInstallation),
-}
-
-/// Inline installation table. Carries the same fields as a
-/// `[[installations]]` entry minus `name`.
-#[derive(Debug, Deserialize)]
-struct RawInlineInstallation {
-    #[serde(default)]
-    install_commands: Vec<String>,
-    #[serde(default)]
-    requirements: Vec<RawInstallationRef>,
-    #[serde(flatten, default)]
-    source: Option<Source>,
-    #[serde(default)]
-    executable: Option<String>,
-    #[serde(default)]
-    script: Option<String>,
-    #[serde(default)]
-    args: Vec<String>,
-}
-
-/// A `[[installations]]` entry in the validated `Plugin`.
+/// A `[[installations]]` entry in the validated `PluginManifest`.
 ///
 /// Inline references on hooks and on other installations are promoted to
 /// synthetic entries here, so this is the single source of truth: every
 /// `Hook.command` and `Hook.requirements` / `Installation.requirements`
-/// names a member of `Plugin.installations`.
+/// names a member of `PluginManifest.installations`.
 ///
 /// Installations may be runnable (have `executable` or `script`), pure setup
 /// (only `install_commands`), pure aggregators (only `requirements`), or any
@@ -402,12 +292,12 @@ pub struct CustomPredicate {
     pub args: Vec<String>,
 }
 
-/// A parsed plugin with its path and manifest.
+/// A validated plugin: its manifest, identity, and provenance.
 #[derive(Debug, Clone)]
-pub struct ParsedPlugin {
-    /// The parsed plugin manifest, with every `source.path` group resolved to
-    /// an absolute directory by the package manager.
-    pub plugin: Plugin,
+pub struct Plugin {
+    /// The validated manifest, with every `source.path` group resolved to an
+    /// absolute directory.
+    pub manifest: PluginManifest,
 
     /// Whether this plugin is defined by a member of the active workspace.
     /// Provenance, stamped by the loader: registry sources stamp `false`;
@@ -430,7 +320,7 @@ pub struct ParsedPlugin {
     pub canonical: crate::pm::PackageId,
 }
 
-impl ParsedPlugin {
+impl Plugin {
     /// Evaluate the plugin-level predicate set, stamping this plugin's
     /// provenance into the context first. Use this — not
     /// `plugin.applies()` directly — when iterating loaded plugins, so
@@ -439,7 +329,7 @@ impl ParsedPlugin {
     /// skills, hooks, MCP servers, subcommands) on the same context.
     pub fn applies(&self, ctx: &mut crate::predicate::PredicateContext) -> bool {
         ctx.set_workspace_member(self.workspace_member);
-        self.plugin.applies(ctx)
+        self.manifest.applies(ctx)
     }
 }
 
@@ -449,7 +339,7 @@ impl ParsedPlugin {
 /// available, but does not load skill content. The skills layer handles
 /// discovery and loading.
 #[derive(Debug, Clone, Serialize)]
-pub struct Plugin {
+pub struct PluginManifest {
     pub name: String,
     /// Activation predicates for this plugin — the plugin's `depends-on`
     /// (lowered to `any(depends-on(...))`) merged with its `predicates`. Holds
@@ -506,7 +396,7 @@ pub struct ChainedPlugin {
     pub version: Option<String>,
 }
 
-impl Plugin {
+impl PluginManifest {
     /// Check if this plugin's activation predicates hold in `ctx`. A dormant
     /// plugin ([`requires_use`](Self::requires_use)) applies only when an
     /// applicable `[plugins] use` entry names it.
@@ -545,17 +435,6 @@ impl Plugin {
             .map(|s| s.server.clone())
             .collect()
     }
-}
-
-/// Whether a subcommand is intended for human or agent use.
-///
-/// Controls grouping in `cargo agents --help`; does not gate dispatch.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Audience {
-    Humans,
-    #[default]
-    Agents,
 }
 
 /// A validated `[subcommand.<name>]` entry.
@@ -817,42 +696,6 @@ fn validate_installation(install: &Installation) -> Result<()> {
     Ok(())
 }
 
-/// The wire format a plugin hook expects for input/output.
-///
-/// This is distinct from `HookAgent` because:
-/// - `Symposium` is a wire format but not an agent (no CLI invokes hooks
-///   in symposium format natively).
-/// - Not all agents have hook wire formats (e.g., Goose uses MCP extensions,
-///   OpenCode uses JS plugins), so only agents with shell-hook JSON formats
-///   appear here.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HookFormat {
-    /// Symposium canonical format (default).
-    #[default]
-    Symposium,
-    /// A specific agent's wire format.
-    Antigravity,
-    Claude,
-    Codex,
-    Copilot,
-    Kiro,
-}
-
-impl HookFormat {
-    /// Convert to the corresponding HookAgent, if this is an agent format.
-    pub fn as_agent(&self) -> Option<HookAgent> {
-        match self {
-            HookFormat::Symposium => None,
-            HookFormat::Antigravity => Some(HookAgent::Antigravity),
-            HookFormat::Claude => Some(HookAgent::Claude),
-            HookFormat::Codex => Some(HookAgent::Codex),
-            HookFormat::Copilot => Some(HookAgent::Copilot),
-            HookFormat::Kiro => Some(HookAgent::Kiro),
-        }
-    }
-}
-
 #[derive(Debug, serde::Serialize)]
 pub struct ProviderInfo {
     pub name: String,
@@ -921,7 +764,7 @@ impl CustomPredicateRegistry {
 pub struct PluginRegistry {
     /// Plugins loaded from `.toml` manifest files, and bare-`SKILL.md`
     /// entries loaded as default plugins (one `source.path = "."` group).
-    pub plugins: Vec<ParsedPlugin>,
+    pub plugins: Vec<Plugin>,
     /// Non-fatal load warnings for entries that were skipped.
     pub warnings: Vec<LoadWarning>,
     /// Global custom predicate registry. Built from all plugins' `custom_predicates`.
@@ -941,46 +784,13 @@ pub struct LoadWarning {
 /// are synthesized into default plugins, so this is just a plugin list.
 #[derive(Debug)]
 struct SourceDirContents {
-    plugins: Vec<Result<ParsedPlugin>>,
-}
-
-/// A `[[predicate]]` entry in the raw TOML manifest.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawCustomPredicate {
-    name: String,
-    /// Named installation or inline installation table.
-    command: RawInstallationRef,
-    #[serde(default)]
-    args: Vec<String>,
-}
-
-/// `[defaults]` section: opt-outs for the default content added to
-/// workspace plugin manifests (and, later, crate-embedded plugins).
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawDefaults {
-    /// Add the default `[[skills]] source.path = "skills"` group.
-    #[serde(default = "default_skills_flag")]
-    skills: bool,
-}
-
-fn default_skills_flag() -> bool {
-    true
-}
-
-impl Default for RawDefaults {
-    fn default() -> Self {
-        Self {
-            skills: default_skills_flag(),
-        }
-    }
+    plugins: Vec<Result<Plugin>>,
 }
 
 /// Where a plugin manifest came from, for validation rules that differ by
 /// origin: a registry manifest must carry its own `name`, and one that
 /// references no dependency is stamped dormant
-/// ([`Plugin::requires_use`]); a workspace-member manifest is already gated
+/// ([`PluginManifest::requires_use`]); a workspace-member manifest is already gated
 /// by workspace membership, and a crate-embedded manifest is already gated by
 /// the chained reference that reached it, so both are relaxed (the name
 /// defaults to a fallback) and default content applies.
@@ -1000,140 +810,6 @@ enum ManifestOrigin<'a> {
     Crate {
         crate_name: &'a str,
     },
-}
-
-/// Raw TOML manifest deserialized from a plugin `.toml` file.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawPluginManifest {
-    /// Required for registry plugins; defaults to the directory name for
-    /// workspace plugins.
-    name: Option<String>,
-    /// Default-content opt-outs. Only meaningful for workspace plugins.
-    #[serde(default)]
-    defaults: Option<RawDefaults>,
-    #[serde(default, rename = "depends-on")]
-    depends_on: crate::predicate::DependsOnList,
-    /// Rejected: renamed to `depends-on`.
-    #[serde(default)]
-    crates: Option<toml::Value>,
-    #[serde(default)]
-    predicates: crate::predicate::PredicateSet,
-    #[serde(default)]
-    installations: Vec<RawNamedInstallation>,
-    #[serde(default)]
-    hooks: Vec<RawHook>,
-    #[serde(default)]
-    skills: Vec<RawSkillGroup>,
-    #[serde(default)]
-    mcp_servers: Vec<RawPluginMcpServer>,
-    /// TOML key is singular (`[subcommand.<name>]`); the validated field on
-    /// `Plugin` is plural (`subcommands`).
-    #[serde(default)]
-    subcommand: std::collections::BTreeMap<String, RawSubcommand>,
-    #[serde(default)]
-    predicate: Vec<RawCustomPredicate>,
-    /// Chained plugin references — `[[plugins]]`.
-    #[serde(default)]
-    plugins: Vec<RawChainedPlugin>,
-}
-
-impl RawPluginManifest {
-    /// Layer `over` on top of `self`. List-shaped content (skills, chained
-    /// plugins, hooks, installations, MCP servers, custom predicates) appends
-    /// in `self`-then-`over` order; the `subcommand` map and scalar fields take
-    /// `over` where it sets them; `depends-on` / `predicates` gates AND
-    /// together. Used to combine a crate's `[package.metadata.symposium]` (base)
-    /// with its `SYMPOSIUM.toml` (over).
-    fn merge(mut self, over: RawPluginManifest) -> RawPluginManifest {
-        self.installations.extend(over.installations);
-        self.hooks.extend(over.hooks);
-        self.skills.extend(over.skills);
-        self.mcp_servers.extend(over.mcp_servers);
-        self.predicate.extend(over.predicate);
-        self.plugins.extend(over.plugins);
-        self.subcommand.extend(over.subcommand);
-        self.depends_on.0.extend(over.depends_on.0);
-        self.predicates
-            .predicates
-            .extend(over.predicates.predicates);
-        if over.name.is_some() {
-            self.name = over.name;
-        }
-        if over.defaults.is_some() {
-            self.defaults = over.defaults;
-        }
-        if over.crates.is_some() {
-            self.crates = over.crates;
-        }
-        self
-    }
-}
-
-/// `[[installations]]` entry: a name plus the same fields as a `RawInlineInstallation`.
-#[derive(Debug, Deserialize)]
-struct RawNamedInstallation {
-    name: String,
-    #[serde(default)]
-    requirements: Vec<RawInstallationRef>,
-    #[serde(default)]
-    install_commands: Vec<String>,
-    #[serde(flatten, default)]
-    source: Option<Source>,
-    #[serde(default)]
-    executable: Option<String>,
-    #[serde(default)]
-    script: Option<String>,
-    #[serde(default)]
-    args: Vec<String>,
-}
-
-/// Raw `[subcommand.<name>]` entry. The TOML table-key is the subcommand
-/// name; this struct carries the table body.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawSubcommand {
-    description: String,
-    #[serde(default)]
-    audience: Audience,
-    /// Named installation (`"my-install"`) or inline installation table —
-    /// same shape as `RawHook.command`.
-    command: RawInstallationRef,
-    #[serde(default, rename = "depends-on")]
-    depends_on: Option<crate::predicate::DependsOnList>,
-    /// Rejected: renamed to `depends-on`.
-    #[serde(default)]
-    crates: Option<toml::Value>,
-    #[serde(default)]
-    predicates: crate::predicate::PredicateSet,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawHook {
-    name: String,
-    event: HookEvent,
-    #[serde(default)]
-    agent: Option<HookAgent>,
-    #[serde(default)]
-    matcher: Option<String>,
-    #[serde(default)]
-    requirements: Vec<RawInstallationRef>,
-    /// Named installation (`"my-install"`) or inline installation table.
-    command: RawInstallationRef,
-    /// What to run from the installation. Across hook + installation, at most
-    /// one of `executable` / `script` may be set.
-    #[serde(default)]
-    executable: Option<String>,
-    #[serde(default)]
-    script: Option<String>,
-    /// Invocation arguments. Forbidden when the installation also declares `args`.
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    format: HookFormat,
-    #[serde(default)]
-    predicates: crate::predicate::PredicateSet,
 }
 
 /// Fetch/update git-based registries.
@@ -1193,14 +869,14 @@ pub async fn list_plugins(sym: &Symposium) -> Vec<ProviderInfo> {
 
     // Trusted instances only: registry entries, not dependency-embedded crates.
     for inst in pms.instances().filter(|i| i.trusted) {
-        for p in inst.pm.active_plugins(&[]).await {
+        for p in inst.active_plugins(&[]).await {
             by_registry
                 .entry(inst.name.clone())
                 .or_default()
                 .push(PluginInfo {
-                    name: p.plugin.name,
-                    hooks_count: p.plugin.hooks.len(),
-                    skill_groups_count: p.plugin.skills.len(),
+                    name: p.manifest.name,
+                    hooks_count: p.manifest.hooks.len(),
+                    skill_groups_count: p.manifest.skills.len(),
                 });
         }
     }
@@ -1229,11 +905,11 @@ pub async fn list_plugins(sym: &Symposium) -> Vec<ProviderInfo> {
 }
 
 /// Find a plugin by name across all registries. First match wins.
-pub async fn find_plugin(sym: &Symposium, name: &str) -> Option<ParsedPlugin> {
+pub async fn find_plugin(sym: &Symposium, name: &str) -> Option<Plugin> {
     let pms = sym.detached_managers();
     for inst in pms.instances().filter(|i| i.trusted) {
-        for parsed in inst.pm.active_plugins(&[]).await {
-            if parsed.plugin.name == name {
+        for parsed in inst.active_plugins(&[]).await {
+            if parsed.manifest.name == name {
                 return Some(parsed);
             }
         }
@@ -1241,26 +917,82 @@ pub async fn find_plugin(sym: &Symposium, name: &str) -> Option<ParsedPlugin> {
     None
 }
 
-/// Load the plugin at `root/subpath` as a registry entry: a `SYMPOSIUM.toml`
-/// manifest loads as an ordinary registry plugin; a bare `SKILL.md` is
-/// synthesized into a default plugin ([`load_standalone_skill_plugin`]). `None`
-/// when the directory is neither. Called by [`PathPm`](crate::pm::PathPm).
-pub(crate) fn load_entry(
+/// The unvalidated plugin for a registry entry at `root/subpath`: a `SYMPOSIUM.toml`
+/// manifest read as-is, or a bare `SKILL.md` synthesized into one
+/// ([`standalone_skill_manifest`]). `None` when the directory is neither.
+/// Called by [`PathPm`](crate::pm::PathPm).
+///
+/// Skill paths are displayed relative to the registry root, so an entry reads
+/// as `path:<entry>/skills` rather than `path:skills`.
+pub(crate) fn entry_plugin(
     root: &Path,
     subpath: &Path,
     source_name: &str,
-) -> Option<Result<ParsedPlugin>> {
+) -> Option<Result<UnvalidatedPlugin>> {
     let dir = root.join(subpath);
-    match crate::pm::layout::classify(&dir)? {
-        crate::pm::layout::EntryKind::Plugin(toml_path) => Some(
-            load_plugin_as(&toml_path, source_name, root, ManifestOrigin::Registry)
-                .with_context(|| format!("loading plugin from `{}`", toml_path.display())),
-        ),
-        crate::pm::layout::EntryKind::Skill(skill_md) => Some(
-            load_standalone_skill_plugin(&skill_md, source_name, root)
-                .with_context(|| format!("loading skill from `{}`", skill_md.display())),
-        ),
-    }
+    Some(match crate::pm::layout::classify(&dir)? {
+        crate::pm::layout::EntryKind::Plugin(toml_path) => (|| -> Result<UnvalidatedPlugin> {
+            let content = fs::read_to_string(&toml_path)?;
+            let manifest = RawPluginManifest::parse(&content)?;
+            let base = toml_path.parent().unwrap_or(&dir).to_path_buf();
+            let name = manifest.name.clone().unwrap_or_default();
+            Ok(UnvalidatedPlugin::new(
+                PackageId::new(source_name, name, ANY_VERSION),
+                base,
+                manifest,
+            )
+            .with_label_root(root))
+        })()
+        .with_context(|| format!("loading plugin from `{}`", toml_path.display())),
+        crate::pm::layout::EntryKind::Skill(skill_md) => (|| -> Result<UnvalidatedPlugin> {
+            let manifest = standalone_skill_manifest(&skill_md)?;
+            let base = skill_md.parent().unwrap_or(&dir).to_path_buf();
+            let name = manifest.name.clone().unwrap_or_default();
+            Ok(UnvalidatedPlugin::new(
+                PackageId::new(source_name, name, ANY_VERSION),
+                base,
+                manifest,
+            )
+            .with_label_root(root))
+        })()
+        .with_context(|| format!("loading skill from `{}`", skill_md.display())),
+    })
+}
+
+/// Turn a package manager's [`UnvalidatedPlugin`] into a validated [`Plugin`].
+///
+/// This is the seam the whole out-of-process design rests on. A PM produces a
+/// manifest (parsed, translated, or synthesized; Symposium cannot tell) and
+/// everything that decides what the manifest is *allowed to mean* happens
+/// here: schema validation, inline-installation promotion, default content,
+/// dormancy, and resolving `source.path` groups against the plugin's root.
+///
+/// `kind` comes from the instance that answered, never from the plugin, so a PM
+/// cannot elect its own policy.
+pub(crate) fn validate_plugin(plugin: UnvalidatedPlugin, kind: PluginKind) -> Result<Plugin> {
+    let package_name = plugin.id.name.clone();
+    let origin = match kind {
+        PluginKind::Registry => ManifestOrigin::Registry,
+        PluginKind::Package => ManifestOrigin::Crate {
+            crate_name: &package_name,
+        },
+    };
+    let UnvalidatedPlugin {
+        id,
+        root,
+        manifest,
+        label_root,
+    } = plugin;
+    let mut plugin = validate_manifest(manifest, origin)
+        .with_context(|| format!("invalid plugin at `{}`", crate::output::display_path(&root)))?;
+    resolve_group_sources(&mut plugin, &root, label_root.as_deref().unwrap_or(&root));
+    Ok(Plugin {
+        canonical: id,
+        manifest: plugin,
+        // Only the workspace-plugin loader stamps true; nothing a PM offers is
+        // a workspace member.
+        workspace_member: false,
+    })
 }
 
 /// Resolve each `source.path` skill group to an absolute directory and a
@@ -1268,9 +1000,13 @@ pub(crate) fn load_entry(
 /// path is joined onto) and the attribution root the label is shown relative
 /// to. Git sources are left untouched — they are fetched at collection time.
 ///
-/// This is what lets a `ParsedPlugin` carry absolute skill dirs and no
-/// manifest/base path: the package manager bakes location in before returning.
-pub(crate) fn resolve_group_sources(plugin: &mut Plugin, base_dir: &Path, attribution_root: &Path) {
+/// This is what lets a `Plugin` carry absolute skill dirs and no
+/// manifest-file/base path: the package manager bakes location in before returning.
+pub(crate) fn resolve_group_sources(
+    plugin: &mut PluginManifest,
+    base_dir: &Path,
+    attribution_root: &Path,
+) {
     let attribution =
         fs::canonicalize(attribution_root).unwrap_or_else(|_| attribution_root.into());
     for group in &mut plugin.skills {
@@ -1289,19 +1025,17 @@ pub(crate) fn resolve_group_sources(plugin: &mut Plugin, base_dir: &Path, attrib
     }
 }
 
-/// Build a plugin from a bare `SKILL.md` entry (no manifest): a plugin whose
-/// single `source.path = "."` skill group discovers that skill. The plugin is
-/// named for the skill's declared `name` (its identity, falling back to the
-/// entry directory), and the skill's frontmatter `depends-on`/`predicates` are
-/// hoisted to the plugin gate, so the ordinary dormancy rule applies — a skill
-/// that names a dependency activates when present, a bare one is dormant until
-/// `use`d. Skill identity is unchanged (the `SKILL.md` path hash), so a skill
-/// reached this way and via a plugin group dedupes to one install.
-fn load_standalone_skill_plugin(
-    skill_md: &Path,
-    source_name: &str,
-    source_dir: &Path,
-) -> Result<ParsedPlugin> {
+/// Synthesize a manifest for a bare `SKILL.md` entry: a directory holding a
+/// skill and nothing else.
+///
+/// This is the in-tree example of what the PM boundary is for: the entry has no
+/// manifest, so one is made up. The plugin is named for the skill's declared
+/// `name` (falling back to the entry directory), its single `source.path = "."`
+/// group rediscovers that skill, and the skill's frontmatter gates are hoisted
+/// to the plugin level so ordinary registry validation decides dormancy: a
+/// skill naming a dependency activates when it is present, a bare one waits to
+/// be `use`d.
+pub(crate) fn standalone_skill_manifest(skill_md: &Path) -> Result<RawPluginManifest> {
     let (frontmatter_name, predicates) = crate::skills::standalone_skill_meta(skill_md)?;
     let name = frontmatter_name
         .or_else(|| {
@@ -1313,37 +1047,13 @@ fn load_standalone_skill_plugin(
         })
         .context("standalone skill has neither a frontmatter `name` nor a named directory")?;
 
-    let has_custom = predicates
-        .predicates
-        .iter()
-        .any(|p| matches!(p, crate::predicate::Predicate::Custom { .. }));
-    let requires_use = !(has_custom || predicates.mentions_dep());
-
-    // A single group scanning the entry directory (the SKILL.md's parent, via
-    // `path`) discovers the skill itself.
-    let group: RawSkillGroup =
-        toml::from_str(r#"source.path = ".""#).expect("static default group");
-    let skills = vec![group.validate()?];
-
-    let mut plugin = Plugin {
-        name: name.clone(),
+    let mut manifest = RawPluginManifest {
+        name: Some(name),
         predicates,
-        installations: Vec::new(),
-        hooks: Vec::new(),
-        skills,
-        mcp_servers: Vec::new(),
-        subcommands: std::collections::BTreeMap::new(),
-        custom_predicates: Vec::new(),
-        chained: Vec::new(),
-        requires_use,
+        ..Default::default()
     };
-    let base = skill_md.parent().unwrap_or(source_dir);
-    resolve_group_sources(&mut plugin, base, source_dir);
-    Ok(ParsedPlugin {
-        canonical: PackageId::new(source_name, &name, ANY_VERSION),
-        plugin,
-        workspace_member: false,
-    })
+    manifest.push_skill_group(".", crate::predicate::PredicateSet::default());
+    Ok(manifest)
 }
 
 /// Load the plugin registry from the active package-manager instances.
@@ -1384,7 +1094,7 @@ async fn load_registry_impl(
     // active set through discovery / consent and the driver's `load_plugin`,
     // never here. Each registry instance logs its own load failures.
     for inst in pms.instances().filter(|i| i.trusted) {
-        plugins.extend(inst.pm.active_plugins(&[]).await);
+        plugins.extend(inst.active_plugins(&[]).await);
     }
 
     if let Some(ws) = workspace {
@@ -1413,7 +1123,7 @@ async fn load_registry_impl(
 /// This is the single seam every facet resolves over — skills, MCP servers,
 /// hooks, and subcommands — so a crate-sourced plugin's extensions dispatch
 /// exactly like a registry plugin's. Each returned plugin has passed its own
-/// plugin-level gate; a facet still calls [`ParsedPlugin::applies`] before its
+/// plugin-level gate; a facet still calls [`Plugin::applies`] before its
 /// own predicates, to re-stamp `workspace-member()` for the plugin being read.
 ///
 /// Crate loading goes through `pms` ([`crate::pm::PmRegistry::load_plugin`]),
@@ -1425,7 +1135,7 @@ pub async fn active_plugins(
     pms: &crate::pm::PmRegistry,
     workspace_root: Option<&Path>,
     ctx: &mut crate::predicate::PredicateContext<'_>,
-) -> Vec<ParsedPlugin> {
+) -> Vec<Plugin> {
     let mut active = Vec::new();
     // Crate identities already loaded through the set, keyed on `(pm, name)` so
     // a crate reached through two chains — or a chain and dependency enablement —
@@ -1448,7 +1158,7 @@ pub async fn active_plugins(
         let registry_names: std::collections::HashSet<String> = registry
             .plugins
             .iter()
-            .map(|p| crate::crate_sources::normalize_crate_name(&p.plugin.name))
+            .map(|p| crate::crate_sources::normalize_crate_name(&p.manifest.name))
             .collect();
         for name in crate::discovery::enabled_dependencies(sym, ctx.deps, root) {
             if !registry_names.contains(&crate::crate_sources::normalize_crate_name(&name)) {
@@ -1485,15 +1195,15 @@ fn plugin_key(id: &crate::pm::PackageId) -> String {
 /// `[[plugins]]` chained references (evaluated against this plugin's provenance)
 /// onto `worklist`.
 fn record_active(
-    plugin: ParsedPlugin,
+    plugin: Plugin,
     ctx: &mut crate::predicate::PredicateContext<'_>,
-    active: &mut Vec<ParsedPlugin>,
+    active: &mut Vec<Plugin>,
     worklist: &mut Vec<crate::pm::PackageId>,
 ) {
     if !plugin.applies(ctx) {
         tracing::debug!(
             report = %crate::report::ReportEvent::PluginConsidered {
-                plugin: plugin.plugin.name.clone(),
+                plugin: plugin.manifest.name.clone(),
                 matched: false,
                 reason: Some("plugin-level predicates not satisfied".into()),
             },
@@ -1502,13 +1212,13 @@ fn record_active(
     }
     tracing::debug!(
         report = %crate::report::ReportEvent::PluginConsidered {
-            plugin: plugin.plugin.name.clone(),
+            plugin: plugin.manifest.name.clone(),
             matched: true,
             reason: None,
         },
     );
     warn_undispatched_crate_features(&plugin);
-    for edge in &plugin.plugin.chained {
+    for edge in &plugin.manifest.chained {
         ctx.set_workspace_member(plugin.workspace_member);
         if edge.predicates.evaluate(ctx) {
             worklist.push(crate::pm::CargoPm::id_for(&edge.name, None));
@@ -1522,10 +1232,10 @@ fn record_active(
 /// set, but custom predicate *definitions* are still resolved only from
 /// configured registries, so a crate that vends its own predicate cannot yet
 /// have it evaluated.
-fn warn_undispatched_crate_features(parsed: &ParsedPlugin) {
-    if !parsed.plugin.custom_predicates.is_empty() {
+fn warn_undispatched_crate_features(parsed: &Plugin) {
+    if !parsed.manifest.custom_predicates.is_empty() {
         tracing::warn!(
-            plugin = %parsed.plugin.name,
+            plugin = %parsed.manifest.name,
             "crate-embedded plugin declares custom predicates, which are not yet \
              registered (its skills, hooks, MCP servers, and subcommands are dispatched)"
         );
@@ -1552,7 +1262,7 @@ pub fn workspace_plugins(
     root: &Path,
     members: &[PathBuf],
     agents_skills: bool,
-) -> (Vec<ParsedPlugin>, Vec<LoadWarning>) {
+) -> (Vec<Plugin>, Vec<LoadWarning>) {
     let mut seen = std::collections::HashSet::new();
     let mut plugins = Vec::new();
     let mut warnings = Vec::new();
@@ -1582,7 +1292,7 @@ fn workspace_plugin_for_dir(
     workspace_root: &Path,
     dir: &Path,
     agents_skills: bool,
-) -> Result<Option<ParsedPlugin>> {
+) -> Result<Option<Plugin>> {
     let manifest_path = dir.join("SYMPOSIUM.toml");
     let bare_convention = dir.join(CRATE_DEFAULT_SKILLS_PATH).is_dir()
         || (agents_skills && dir.join(AGENTS_SKILLS_PATH).is_dir());
@@ -1610,9 +1320,9 @@ fn workspace_plugin_for_dir(
     .with_context(|| format!("validating `{}`", manifest_path.display()))?;
     resolve_group_sources(&mut plugin, dir, workspace_root);
 
-    Ok(Some(ParsedPlugin {
+    Ok(Some(Plugin {
         canonical: PackageId::new("local", &plugin.name, ANY_VERSION),
-        plugin,
+        manifest: plugin,
         workspace_member: true,
     }))
 }
@@ -1628,28 +1338,19 @@ fn workspace_plugin_for_dir(
 /// This is the *offline* form used by the `plugin validate` CLI, which
 /// points at an arbitrary directory rather than a configured registry.
 /// Registry loading goes through the package-manager instances instead
-/// ([`load_registry`]). `source_name` becomes each `ParsedPlugin`'s
+/// ([`load_registry`]). `source_name` becomes each `Plugin`'s
 /// canonical `pm` tag; callers that don't care pass `""`.
 fn scan_source_dir<P: AsRef<Path>>(dir: P, source_name: &str) -> Result<SourceDirContents> {
     let dir = dir.as_ref();
     let mut plugins = Vec::new();
 
     for entry in crate::pm::layout::enumerate(dir)? {
-        match crate::pm::layout::classify(&dir.join(&entry.subpath)) {
-            Some(crate::pm::layout::EntryKind::Plugin(toml_path)) => {
-                let plugin = load_plugin(&toml_path, source_name, dir)
-                    .with_context(|| format!("loading plugin from `{}`", toml_path.display()));
-                tracing::debug!(path = %toml_path.display(), plugin = ?plugin, "loaded plugin");
-                plugins.push(plugin);
-            }
-            Some(crate::pm::layout::EntryKind::Skill(skill_md_path)) => {
-                let plugin = load_standalone_skill_plugin(&skill_md_path, source_name, dir)
-                    .with_context(|| format!("loading skill from `{}`", skill_md_path.display()));
-                tracing::debug!(path = %skill_md_path.display(), "loaded bare skill as plugin");
-                plugins.push(plugin);
-            }
-            None => {}
-        }
+        let Some(plugin) = entry_plugin(dir, &entry.subpath, source_name) else {
+            continue;
+        };
+        let plugin = plugin.and_then(|p| validate_plugin(p, PluginKind::Registry));
+        tracing::debug!(subpath = %entry.subpath.display(), ok = plugin.is_ok(), "loaded entry");
+        plugins.push(plugin);
     }
 
     Ok(SourceDirContents { plugins })
@@ -1697,8 +1398,8 @@ pub fn validate_source_dir(dir: &Path) -> Result<Vec<ValidationResult>> {
 
     for plugin_result in contents.plugins {
         let (id, plugin, result) = match plugin_result {
-            // The plugin's own name is its id; the load error already names the
-            // file it came from.
+            // The plugin's own name is its id; the error names the directory it
+            // came from.
             Ok(parsed) => (parsed.canonical.name.clone(), Some(parsed), Ok(())),
             Err(e) => ("<unknown>".to_string(), None, Err(e)),
         };
@@ -1707,7 +1408,7 @@ pub fn validate_source_dir(dir: &Path) -> Result<Vec<ValidationResult>> {
 
         // Validate that local skill groups contain discoverable skills.
         if let Some(parsed) = &plugin {
-            for group in &parsed.plugin.skills {
+            for group in &parsed.manifest.skills {
                 if let PluginSource::Path(ref skills_dir) = group.source {
                     let skills_dir = skills_dir.clone();
                     let found = crate::skills::discover_skills(
@@ -1749,11 +1450,11 @@ pub fn validate_source_dir(dir: &Path) -> Result<Vec<ValidationResult>> {
         }
 
         let warning = plugin.as_ref().and_then(|parsed| {
-            parsed.plugin.requires_use.then(|| {
+            parsed.manifest.requires_use.then(|| {
                 format!(
                     "plugin `{name}` references no dependency; it stays dormant until enabled \
                      with `cargo agents use {name}`",
-                    name = parsed.plugin.name,
+                    name = parsed.manifest.name,
                 )
             })
         });
@@ -1780,13 +1481,13 @@ pub fn collect_crate_names_in_source_dir(dir: &Path) -> Result<Vec<String>> {
 
     for plugin_result in contents.plugins.into_iter().flatten() {
         plugin_result
-            .plugin
+            .manifest
             .predicates
             .collect_dep_names(&mut names);
-        for group in &plugin_result.plugin.skills {
+        for group in &plugin_result.manifest.skills {
             group.predicates.collect_dep_names(&mut names);
         }
-        for mcp in &plugin_result.plugin.mcp_servers {
+        for mcp in &plugin_result.manifest.mcp_servers {
             mcp.predicates.collect_dep_names(&mut names);
         }
     }
@@ -1813,11 +1514,7 @@ pub async fn check_crate_exists(crate_name: &str) -> bool {
 /// `source_dir` is the base for its `source.path` groups. Standalone callers —
 /// like the `plugin validate` CLI — that need neither can pass an empty string
 /// and the manifest's parent directory.
-pub fn load_plugin(
-    manifest_path: &Path,
-    source_name: &str,
-    source_dir: &Path,
-) -> Result<ParsedPlugin> {
+pub fn load_plugin(manifest_path: &Path, source_name: &str, source_dir: &Path) -> Result<Plugin> {
     load_plugin_as(
         manifest_path,
         source_name,
@@ -1834,16 +1531,16 @@ fn load_plugin_as(
     source_name: &str,
     source_dir: &Path,
     origin: ManifestOrigin<'_>,
-) -> Result<ParsedPlugin> {
+) -> Result<Plugin> {
     let content = fs::read_to_string(manifest_path)?;
     let manifest: RawPluginManifest = toml::from_str(&content)?;
     let mut plugin = validate_manifest(manifest, origin)
         .with_context(|| format!("validating `{}`", manifest_path.display()))?;
     let base = manifest_path.parent().unwrap_or(source_dir);
     resolve_group_sources(&mut plugin, base, source_dir);
-    Ok(ParsedPlugin {
+    Ok(Plugin {
         canonical: PackageId::new(source_name, &plugin.name, ANY_VERSION),
-        plugin,
+        manifest: plugin,
         // Registry sources are never workspace members; the workspace-plugin
         // loader is the only place that stamps true.
         workspace_member: false,
@@ -1854,27 +1551,27 @@ fn raw_crate_manifest(content: &str) -> Result<RawPluginManifest> {
     Ok(toml::from_str(content)?)
 }
 
-/// Build a crate's plugin definition by layering its manifest sources.
+/// Merge a crate's two manifest sources into one, for the cargo PM to offer.
 ///
 /// A crate can describe its plugin two ways, and this combines them (later
-/// layers win / append, matching the merge order defaults → Cargo.toml →
-/// `SYMPOSIUM.toml`):
-/// 1. the crate defaults (the default `skills/` group, appended by
-///    [`validate_manifest`] under [`ManifestOrigin::Crate`]) — the base;
-/// 2. `[package.metadata.symposium]` from `Cargo.toml` (`metadata`);
-/// 3. a `SYMPOSIUM.toml` file at the crate root (`file`).
+/// layers win / append):
+/// 1. `[package.metadata.symposium]` from `Cargo.toml` (`metadata`);
+/// 2. a `SYMPOSIUM.toml` file at the crate root (`file`).
 ///
-/// Both `metadata` and `file` use the same schema as any plugin manifest. Each
-/// is parsed independently and **leniently**: a malformed layer is logged and
-/// dropped so the crate still resolves through the remaining layers (and, at
-/// minimum, the default `skills/` group). A crate with neither still becomes a
-/// plugin whose only content is that default group — so `load_plugin` always
-/// yields a plugin for a fetchable crate.
-pub(crate) fn load_crate_manifest(
+/// Both use the same schema as any plugin manifest. Each is parsed
+/// independently and **leniently**: a malformed layer is logged and dropped so
+/// the crate still resolves through the remaining layers. A crate with neither
+/// yields an empty manifest, which validation still turns into a plugin
+/// carrying the default `skills/` group, so any fetchable crate is offerable.
+///
+/// The default group itself is appended by [`validate_manifest`] under
+/// [`ManifestOrigin::Crate`], not here: defaults are policy, and policy is
+/// Symposium's.
+pub(crate) fn merge_crate_manifest(
     metadata: Option<toml::Table>,
     file: Option<&str>,
     crate_name: &str,
-) -> Result<Plugin> {
+) -> RawPluginManifest {
     let meta = metadata.and_then(
         |t| match toml::Value::Table(t).try_into::<RawPluginManifest>() {
             Ok(m) => Some(m),
@@ -1899,15 +1596,14 @@ pub(crate) fn load_crate_manifest(
             None
         }
     });
-    let merged = match (meta, file) {
+    match (meta, file) {
         (Some(a), Some(b)) => a.merge(b),
         (Some(m), None) | (None, Some(m)) => m,
-        (None, None) => raw_crate_manifest("")?,
-    };
-    validate_manifest(merged, ManifestOrigin::Crate { crate_name })
+        (None, None) => RawPluginManifest::default(),
+    }
 }
 
-/// Convert a raw manifest into a validated `Plugin`.
+/// Convert a raw manifest into a validated `PluginManifest`.
 ///
 /// User-declared `[[installations]]` come first in the resulting list, in
 /// declaration order. Inline references on installations and hooks are
@@ -1916,7 +1612,7 @@ pub(crate) fn load_crate_manifest(
 fn validate_manifest(
     mut manifest: RawPluginManifest,
     origin: ManifestOrigin<'_>,
-) -> Result<Plugin> {
+) -> Result<PluginManifest> {
     let name = match (manifest.name.take(), &origin) {
         (Some(n), _) => n,
         (None, ManifestOrigin::WorkspaceMember { dir_name, .. }) => dir_name.to_string(),
@@ -2037,7 +1733,7 @@ fn validate_manifest(
     let mut skills = manifest
         .skills
         .into_iter()
-        .map(RawSkillGroup::validate)
+        .map(validate_skill_group)
         .collect::<Result<Vec<_>>>()?;
     if matches!(origin, ManifestOrigin::WorkspaceMember { .. }) {
         for group in &mut skills {
@@ -2047,13 +1743,13 @@ fn validate_manifest(
     let mcp_servers = manifest
         .mcp_servers
         .into_iter()
-        .map(RawPluginMcpServer::validate)
+        .map(validate_mcp_server)
         .collect::<Result<Vec<_>>>()?;
 
     let chained = manifest
         .plugins
         .into_iter()
-        .map(RawChainedPlugin::validate)
+        .map(validate_chained_plugin)
         .collect::<Result<Vec<_>>>()?;
 
     // A registry plugin that references no dependency anywhere — at the
@@ -2076,7 +1772,7 @@ fn validate_manifest(
             || chained.iter().any(|c| c.predicates.mentions_dep()))
     };
 
-    Ok(Plugin {
+    Ok(PluginManifest {
         name,
         predicates,
         installations,
@@ -2187,25 +1883,25 @@ fn validate_custom_predicate(
 
 /// Collect custom predicates from all plugins, detecting collisions.
 fn build_custom_predicate_registry(
-    plugins: &[ParsedPlugin],
+    plugins: &[Plugin],
     warnings: &mut Vec<LoadWarning>,
 ) -> CustomPredicateRegistry {
     let mut entries = std::collections::HashMap::new();
     let mut collisions: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (plugin_idx, parsed) in plugins.iter().enumerate() {
-        for cp in &parsed.plugin.custom_predicates {
+        for cp in &parsed.manifest.custom_predicates {
             if collisions.contains(&cp.name) {
                 continue;
             }
             if let Some(existing) = entries.get(&cp.name) {
                 let existing: &ResolvedCustomPredicate = existing;
-                let existing_plugin_name = &plugins[existing.plugin_index].plugin.name;
+                let existing_plugin_name = &plugins[existing.plugin_index].manifest.name;
                 warnings.push(LoadWarning {
-                    path: PathBuf::from(&parsed.plugin.name),
+                    path: PathBuf::from(&parsed.manifest.name),
                     message: format!(
                         "custom predicate `{}` defined by both `{}` and `{}` — skipping both",
-                        cp.name, existing_plugin_name, parsed.plugin.name
+                        cp.name, existing_plugin_name, parsed.manifest.name
                     ),
                 });
                 entries.remove(&cp.name);
@@ -2242,12 +1938,12 @@ mod tests {
         crate::predicate::PredicateContext::new(deps)
     }
 
-    fn from_str(s: &str) -> Result<Plugin> {
+    fn from_str(s: &str) -> Result<PluginManifest> {
         let manifest: RawPluginManifest = toml::from_str(s)?;
         validate_manifest(manifest, ManifestOrigin::Registry)
     }
 
-    fn from_str_as(s: &str, origin: ManifestOrigin<'_>) -> Result<Plugin> {
+    fn from_str_as(s: &str, origin: ManifestOrigin<'_>) -> Result<PluginManifest> {
         let manifest: RawPluginManifest = toml::from_str(s)?;
         validate_manifest(manifest, origin)
     }
@@ -2337,7 +2033,20 @@ mod tests {
         assert!(!msg.contains(r#""widget1""#), "{msg}");
     }
 
-    // --- Crate-embedded manifests (`load_crate_manifest`) ---
+    // --- Crate-embedded manifests (`merge_crate_manifest` + validation) ---
+
+    /// What the cargo PM returns, put through the validation a package plugin
+    /// gets: the pair the PM boundary splits between the two sides.
+    fn load_crate_manifest(
+        metadata: Option<toml::Table>,
+        file: Option<&str>,
+        crate_name: &str,
+    ) -> Result<PluginManifest> {
+        validate_manifest(
+            merge_crate_manifest(metadata, file, crate_name),
+            ManifestOrigin::Crate { crate_name },
+        )
+    }
 
     #[test]
     fn crate_manifest_name_defaults_to_crate_and_depends_on_waived() {
@@ -2746,7 +2455,7 @@ mod tests {
         let mut names: Vec<&str> = contents
             .plugins
             .iter()
-            .map(|p| p.as_ref().unwrap().plugin.name.as_str())
+            .map(|p| p.as_ref().unwrap().manifest.name.as_str())
             .collect();
         names.sort();
         assert_eq!(names, vec!["assert-struct", "my-plugin"]);
@@ -2756,10 +2465,10 @@ mod tests {
             .plugins
             .iter()
             .map(|p| p.as_ref().unwrap())
-            .find(|p| p.plugin.name == "assert-struct")
+            .find(|p| p.manifest.name == "assert-struct")
             .unwrap();
-        assert!(!bare.plugin.requires_use);
-        assert!(bare.plugin.predicates.references_dep("serde"));
+        assert!(!bare.manifest.requires_use);
+        assert!(bare.manifest.predicates.references_dep("serde"));
     }
 
     #[test]
@@ -2778,22 +2487,24 @@ mod tests {
 
         // A skill that names a dependency: the frontmatter gate is hoisted to
         // the plugin, which takes the skill's declared name and is not dormant.
-        let gated =
-            load_standalone_skill_plugin(&tmp.path().join("gated/SKILL.md"), "recs", tmp.path())
-                .unwrap();
-        assert_eq!(gated.plugin.name, "gated-skill");
-        assert!(!gated.plugin.requires_use);
-        assert!(gated.plugin.predicates.references_dep("serde"));
-        assert_eq!(gated.plugin.skills.len(), 1);
+        let gated = entry_plugin(tmp.path(), Path::new("gated"), "recs")
+            .expect("the entry is a bare skill")
+            .and_then(|o| validate_plugin(o, PluginKind::Registry))
+            .unwrap();
+        assert_eq!(gated.manifest.name, "gated-skill");
+        assert!(!gated.manifest.requires_use);
+        assert!(gated.manifest.predicates.references_dep("serde"));
+        assert_eq!(gated.manifest.skills.len(), 1);
         assert_eq!(gated.canonical.pm, "recs");
 
         // A bare skill names no dependency anywhere, so the ordinary dormancy
         // rule leaves it dormant until `use`d.
-        let bare =
-            load_standalone_skill_plugin(&tmp.path().join("bare/SKILL.md"), "recs", tmp.path())
-                .unwrap();
-        assert_eq!(bare.plugin.name, "bare-skill");
-        assert!(bare.plugin.requires_use);
+        let bare = entry_plugin(tmp.path(), Path::new("bare"), "recs")
+            .expect("the entry is a bare skill")
+            .and_then(|o| validate_plugin(o, PluginKind::Registry))
+            .unwrap();
+        assert_eq!(bare.manifest.name, "bare-skill");
+        assert!(bare.manifest.requires_use);
     }
 
     #[test]
@@ -2880,7 +2591,7 @@ mod tests {
         let contents = scan_source_dir(tmp.path(), "").unwrap();
         assert_eq!(contents.plugins.len(), 1);
         expect_test::expect![[r#"mixed-plugin"#]]
-            .assert_eq(&contents.plugins[0].as_ref().unwrap().plugin.name);
+            .assert_eq(&contents.plugins[0].as_ref().unwrap().manifest.name);
     }
 
     #[test]
@@ -2905,7 +2616,7 @@ mod tests {
         let contents = scan_source_dir(tmp.path(), "").unwrap();
         assert_eq!(contents.plugins.len(), 1);
         expect_test::expect![[r#"preferred-plugin"#]]
-            .assert_eq(&contents.plugins[0].as_ref().unwrap().plugin.name);
+            .assert_eq(&contents.plugins[0].as_ref().unwrap().manifest.name);
     }
 
     #[test]
@@ -2968,7 +2679,7 @@ mod tests {
         let mut names: Vec<&str> = contents
             .plugins
             .iter()
-            .map(|p| p.as_ref().unwrap().plugin.name.as_str())
+            .map(|p| p.as_ref().unwrap().manifest.name.as_str())
             .collect();
         names.sort();
         assert_eq!(names, vec!["baz-skill", "foo-plugin"]);
@@ -3050,6 +2761,22 @@ mod tests {
             results[0].result.is_err(),
             "standalone skill with non-string YAML value should fail validation"
         );
+    }
+
+    #[test]
+    fn validate_source_dir_names_the_entry_that_failed_validation() {
+        use crate::test_utils::{File, instantiate_fixture};
+        let tmp = instantiate_fixture(&[File(
+            "unnamed/SYMPOSIUM.toml",
+            indoc! {r#"
+                depends-on = ["*"]
+            "#},
+        )]);
+
+        let results = validate_source_dir(tmp.path()).unwrap();
+        assert_eq!(results.len(), 1);
+        let err = format!("{:#}", results[0].result.as_ref().unwrap_err());
+        assert!(err.contains("unnamed"), "{err}");
     }
 
     #[test]
@@ -3171,7 +2898,7 @@ mod tests {
         ];
 
         // Plugin with wildcard - should apply to all
-        let plugin_wildcard = Plugin {
+        let plugin_wildcard = PluginManifest {
             name: "wildcard".to_string(),
             predicates: pred_set("*"),
             hooks: vec![],
@@ -3186,7 +2913,7 @@ mod tests {
         assert!(plugin_wildcard.applies(&mut ctx(&workspace_crates)));
 
         // Plugin targeting serde - should apply
-        let plugin_serde = Plugin {
+        let plugin_serde = PluginManifest {
             name: "serde-plugin".to_string(),
             predicates: pred_set("serde"),
             hooks: vec![],
@@ -3201,7 +2928,7 @@ mod tests {
         assert!(plugin_serde.applies(&mut ctx(&workspace_crates)));
 
         // Plugin targeting non-existent crate - should not apply
-        let plugin_other = Plugin {
+        let plugin_other = PluginManifest {
             name: "other-plugin".to_string(),
             predicates: pred_set("other-crate"),
             hooks: vec![],
@@ -3216,7 +2943,7 @@ mod tests {
         assert!(!plugin_other.applies(&mut ctx(&workspace_crates)));
 
         // Plugin with version predicate - should reject wrong version
-        let plugin_version = Plugin {
+        let plugin_version = PluginManifest {
             name: "version-plugin".to_string(),
             predicates: pred_set("tokio>=2.0"),
             hooks: vec![],
@@ -3266,7 +2993,7 @@ mod tests {
         let (plugins, warnings) = workspace_plugins(root, &members, true);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
 
-        let names: Vec<&str> = plugins.iter().map(|p| p.plugin.name.as_str()).collect();
+        let names: Vec<&str> = plugins.iter().map(|p| p.manifest.name.as_str()).collect();
         let root_name = root.file_name().unwrap().to_str().unwrap();
         assert_eq!(names, vec![root_name, "member-bare", "explicit-name"]);
 
@@ -3274,24 +3001,29 @@ mod tests {
             assert!(parsed.workspace_member);
             // Groups carry the provenance too: workspace skills load with
             // lenient frontmatter rules.
-            assert!(parsed.plugin.skills.iter().all(|g| g.workspace_member));
+            assert!(parsed.manifest.skills.iter().all(|g| g.workspace_member));
         }
 
         // Root and bare member each get the two default groups: `skills/`
         // and the `workspace-member()`-gated `.agents/skills`.
-        assert_eq!(plugins[0].plugin.skills.len(), 2);
+        assert_eq!(plugins[0].manifest.skills.len(), 2);
         // The PM resolved both default groups to absolute directories.
         assert!(matches!(
-            &plugins[1].plugin.skills[0].source,
+            &plugins[1].manifest.skills[0].source,
             PluginSource::Path(p) if p.is_absolute() && p.ends_with("skills")
         ));
         assert!(matches!(
-            &plugins[1].plugin.skills[1].source,
+            &plugins[1].manifest.skills[1].source,
             PluginSource::Path(p) if p.is_absolute() && p.ends_with(".agents/skills")
         ));
-        assert!(!plugins[1].plugin.skills[1].predicates.predicates.is_empty());
+        assert!(
+            !plugins[1].manifest.skills[1]
+                .predicates
+                .predicates
+                .is_empty()
+        );
         // The opt-out member has no groups.
-        assert!(plugins[2].plugin.skills.is_empty());
+        assert!(plugins[2].manifest.skills.is_empty());
     }
 
     #[test]
@@ -3305,13 +3037,13 @@ mod tests {
         let members = vec![member.clone()];
 
         let (plugins, _) = workspace_plugins(root, &members, true);
-        let names: Vec<&str> = plugins.iter().map(|p| p.plugin.name.as_str()).collect();
+        let names: Vec<&str> = plugins.iter().map(|p| p.manifest.name.as_str()).collect();
         assert!(names.contains(&"member"), "{names:?}");
 
         let (plugins, _) = workspace_plugins(root, &members, false);
-        let names: Vec<&str> = plugins.iter().map(|p| p.plugin.name.as_str()).collect();
+        let names: Vec<&str> = plugins.iter().map(|p| p.manifest.name.as_str()).collect();
         assert!(!names.contains(&"member"), "{names:?}");
-        assert_eq!(plugins[0].plugin.skills.len(), 1);
+        assert_eq!(plugins[0].manifest.skills.len(), 1);
     }
 
     #[test]
@@ -3411,7 +3143,7 @@ mod tests {
 
     #[test]
     fn parsed_plugin_applies_stamps_workspace_member() {
-        let plugin = Plugin {
+        let plugin = PluginManifest {
             name: "ws-plugin".to_string(),
             predicates: PredicateSet {
                 predicates: vec![crate::predicate::Predicate::WorkspaceMember],
@@ -3425,8 +3157,8 @@ mod tests {
             chained: vec![],
             requires_use: false,
         };
-        let mut parsed = ParsedPlugin {
-            plugin,
+        let mut parsed = Plugin {
+            manifest: plugin,
             workspace_member: false,
             canonical: PackageId::new("test", "test", ANY_VERSION),
         };
@@ -4546,7 +4278,7 @@ mod tests {
 
     // --- TOML serialization round-trip tests ---
 
-    fn roundtrip(plugin: &Plugin) -> Plugin {
+    fn roundtrip(plugin: &PluginManifest) -> PluginManifest {
         let toml_str = toml::to_string_pretty(plugin).expect("serialize");
         from_str(&toml_str).unwrap_or_else(|e| panic!("round-trip parse failed:\n{toml_str}\n{e}"))
     }
@@ -4812,13 +4544,13 @@ mod tests {
         let contents = scan_source_dir(tmp.path(), "").unwrap();
         assert_eq!(contents.plugins.len(), 1);
         let parsed = contents.plugins[0].as_ref().unwrap();
-        let sub = &parsed.plugin.subcommands["demo"];
+        let sub = &parsed.manifest.subcommands["demo"];
         assert_eq!(sub.description, "Run the demo tool");
         assert_eq!(sub.audience, Audience::Agents);
         assert_eq!(sub.command, "example-tool");
 
         let install = parsed
-            .plugin
+            .manifest
             .installations
             .iter()
             .find(|i| i.name == "example-tool")
@@ -4850,9 +4582,9 @@ mod tests {
 
     // --- custom predicate collision tests ---
 
-    fn make_plugin_with_predicate(plugin_name: &str, predicate_name: &str) -> ParsedPlugin {
-        ParsedPlugin {
-            plugin: Plugin {
+    fn make_plugin_with_predicate(plugin_name: &str, predicate_name: &str) -> Plugin {
+        Plugin {
+            manifest: PluginManifest {
                 name: plugin_name.to_string(),
                 predicates: pred_set("*"),
                 installations: vec![Installation {

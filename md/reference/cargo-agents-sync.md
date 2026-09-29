@@ -43,9 +43,11 @@ Only explicit answers are recorded, so hitting Enter through the prompt never
 permanently declines anything. Escape leaves the remaining questions undecided.
 
 The prompt only runs in a real terminal session. The automatic sync below —
-and anything else an agent triggers — never prompts; there, pending candidates
-are named in the `SessionStart` context instead, and
-[`cargo agents status`](./cargo-agents-status.md) lists them as `candidate`.
+and anything else an agent triggers — never prompts. Instead, your agent is told
+so it can point you here: pending candidates are named when a session starts,
+and when your dependencies change mid-session the agent hears that there may be
+new ones. [`cargo agents status`](./cargo-agents-status.md) lists them as
+`candidate`.
 
 ## Automatic sync
 

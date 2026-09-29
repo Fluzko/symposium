@@ -14,11 +14,15 @@ use symposium_install::{Runnable, acquire_source, make_executable};
 
 /// Run a list of post-install shell commands sequentially. Stops at the first
 /// failure.
+///
+/// Their stdout goes to stderr: these commands also run while dispatching a
+/// hook, where stdout carries the agent's protocol.
 pub async fn run_install_commands(commands: &[String]) -> Result<()> {
     for cmd in commands {
         let status = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(cmd)
+            .stdout(std::io::stderr())
             .status()
             .await?;
         if !status.success() {

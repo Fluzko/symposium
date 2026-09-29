@@ -8,6 +8,10 @@ The following issues were identified by auditing our hook implementations agains
 
 `CopilotPreToolUseOutput::from_hook_output()` never maps `permissionDecision` or `permissionDecisionReason` from the builtin hook output. If a builtin handler wants to deny a tool call, the decision is silently lost in Copilot output.
 
+## Hook stdout belongs to the agent
+
+An agent parses everything `cargo agents hook` writes to stdout. One line ahead of the JSON and Claude Code falls back to treating it all as plain text (which reaches the model only on `SessionStart` and `UserPromptSubmit`), while Copilot drops the output entirely. The in-process test pipeline cannot see this, because the leaks come from around it: the report layer, which the binary installs (and leaves out for hooks), and child processes that inherit stdout (plugin `install_commands` send theirs to stderr). Anything new that prints during a hook, or spawns a child that might, needs the same care; `tests/hook_stdout.rs` runs the real binary to catch it.
+
 ## Antigravity footguns
 
 Two Antigravity behaviours fail silently rather than loudly, so they are worth

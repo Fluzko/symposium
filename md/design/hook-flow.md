@@ -28,7 +28,7 @@ The payload is parsed first, and the agent's parser can declare it not an occurr
      - Pass the event JSON (in the selected format) on stdin to the plugin's hook.
      - Collect output from each handler.
      - Convert output back to the agent's wire format.
-     - Merge results (e.g., allow/block decisions, output text) across all handlers.
+     - Merge results (e.g., allow/block decisions, output text) across all handlers. `merge` lets a later value replace an earlier one, so on `SessionStart`, `UserPromptSubmit` and `PostToolUse` a `JoinedContext` keeps every source's context (the builtin fragments first, then each hook) and writes the joined text back after each merge. `PreToolUse` and `Stop` are left out: there some agents keep context in the field that holds the decision.
      - Return the merged result to the agent.
 
 Plugin hooks can respond to agent-specific events (e.g., `pre-tool-use`, `post-tool-use`, `user-prompt-submit` for Claude Code). The available events depend on which agent is in use.

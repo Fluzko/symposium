@@ -1,0 +1,17 @@
+name = "zz-silent"
+depends-on = ["*"]
+
+# Runs last and answers with no context at all, which must not erase what
+# came before it.
+
+[[hooks]]
+name = "session"
+event = "SessionStart"
+format = "symposium"
+command = { script = "$TEST_DIR/dot-symposium/plugins/zz-silent/scripts/session.sh" }
+
+[[hooks]]
+name = "post"
+event = "PostToolUse"
+format = "symposium"
+command = { script = "$TEST_DIR/dot-symposium/plugins/zz-silent/scripts/post.sh" }

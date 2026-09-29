@@ -290,6 +290,7 @@ pub async fn execute_hook(
             &sym_input,
             payload.as_ref(),
             prior_output,
+            builtin_sym_output.additional_context().map(String::from),
             &deps,
         )
         .await
@@ -650,8 +651,11 @@ pub enum PluginHookOutput {
 /// Accumulates output as `serde_json::Value` in the host agent's wire format.
 /// When a plugin's format matches the host agent, input/output pass through directly.
 /// When formats differ, conversion goes through symposium canonical types.
+/// `prior_context` is the context already in `prior_output`; every hook's
+/// context is added to it (see [`JoinedContext`]).
 ///
 /// Returns `Ok(json)` on success, `Err(stderr)` on exit code 2.
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch_plugin_hooks(
     sym: &Symposium,
     host_agent: HookAgent,
@@ -659,6 +663,7 @@ pub async fn dispatch_plugin_hooks(
     sym_input: &symposium::InputEvent,
     original_input: &dyn AgentHookInput,
     prior_output: serde_json::Value,
+    prior_context: Option<String>,
     deps: &Arc<WorkspaceDeps>,
 ) -> Result<serde_json::Value, Vec<u8>> {
     let workspace = deps.load().cloned();
@@ -693,6 +698,7 @@ pub async fn dispatch_plugin_hooks(
     let hooks = dispatched_hooks_for_payload(&plugins, sym_input, host_agent, &mut ctx);
 
     let mut output = prior_output;
+    let mut context = JoinedContext::new(event, prior_context);
 
     for hook in hooks {
         tracing::info!(
@@ -762,10 +768,10 @@ pub async fn dispatch_plugin_hooks(
                         let host_handler = crate::hook_schema::agent_event(host_agent, event);
                         let Some(host_h) = host_handler else { continue };
 
-                        let host_json = if hook_agent == Some(host_agent) {
+                        let (host_json, hook_output) = if hook_agent == Some(host_agent) {
                             // Native format — parse as host agent output
                             match host_h.parse_output(&child_out.stdout) {
-                                Ok(o) => o.to_hook_output(),
+                                Ok(o) => (o.to_hook_output(), Some(o.to_symposium())),
                                 Err(e) => {
                                     tracing::warn!(error = %e, "failed to parse hook output");
                                     continue;
@@ -779,9 +785,9 @@ pub async fn dispatch_plugin_hooks(
                                         serde_json::from_value::<symposium::OutputEvent>(v.clone())
                                     {
                                         let host_out = host_h.translate_output(&sym_out);
-                                        host_out.to_hook_output()
+                                        (host_out.to_hook_output(), Some(sym_out))
                                     } else {
-                                        v
+                                        (v, None)
                                     }
                                 }
                                 Err(e) => {
@@ -792,6 +798,7 @@ pub async fn dispatch_plugin_hooks(
                         };
 
                         merge(&mut output, host_json);
+                        context.add(hook_output.as_ref(), &mut output, host_h.as_ref());
                     }
                     Some(code) => {
                         tracing::warn!(
@@ -816,6 +823,52 @@ pub async fn dispatch_plugin_hooks(
     }
 
     Ok(output)
+}
+
+/// The context every source contributed to one hook invocation (the builtin
+/// output first, then each plugin hook in dispatch order), kept whole across
+/// [`merge`], which would let each hook's context replace the one before it.
+/// Agents do the same when several hooks answer one event.
+///
+/// Only for events whose context is pure context. On `PreToolUse` and `Stop`
+/// some agents carry it in the field that also holds the decision (a denial's
+/// reason, a `continue` reason), so joining there could change the decision.
+struct JoinedContext {
+    event: HookEvent,
+    text: Option<String>,
+}
+
+impl JoinedContext {
+    fn new(event: HookEvent, prior: Option<String>) -> Self {
+        Self { event, text: prior }
+    }
+
+    /// Add `hook_output`'s context and write the joined text back into
+    /// `output`, whose context the hook's own output has just replaced (or,
+    /// for Antigravity's `injectSteps` list, emptied).
+    fn add(
+        &mut self,
+        hook_output: Option<&symposium::OutputEvent>,
+        output: &mut serde_json::Value,
+        handler: &dyn crate::hook_schema::ErasedAgentHookEvent,
+    ) {
+        if !matches!(
+            self.event,
+            HookEvent::SessionStart | HookEvent::UserPromptSubmit | HookEvent::PostToolUse
+        ) {
+            return;
+        }
+        if let Some(more) = hook_output.and_then(|o| o.additional_context()) {
+            self.text = Some(match self.text.take() {
+                Some(text) => format!("{text}\n\n{more}"),
+                None => more.to_string(),
+            });
+        }
+        if let Some(text) = &self.text {
+            let joined = OutputEvent::with_context(self.event, text.clone());
+            merge(output, handler.translate_output(&joined).to_hook_output());
+        }
+    }
 }
 
 /// Recursively merge two JSON objects, with `b` taking precedence over `a`.

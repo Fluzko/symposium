@@ -405,7 +405,7 @@ Global cargo installs (`global = true`) don't set `$SYMPOSIUM_DIR_<name>` or aug
 	- `2` (or no reported exit code) — treated as a failure: dispatch stops immediately and the hook's stderr is returned to the caller.
 	- any other non-zero code — treated as success for dispatching purposes; stdout is still parsed and merged when possible.
 
-- **Stdout handling**: Hooks should write a JSON object to stdout to contribute structured data back to the caller. Valid JSON objects are merged together across successful hooks; keys from later hooks overwrite earlier keys.
+- **Stdout handling**: Hooks should write a JSON object to stdout to contribute structured data back to the caller. Valid JSON objects are merged together across successful hooks; keys from later hooks overwrite earlier keys. The exception is `additionalContext` on `SessionStart`, `UserPromptSubmit` and `PostToolUse`: symposium's own context and every hook's are joined, in order, so none replaces another.
 
 - **Stderr handling**: If a hook exits with code `2` (or no exit code), dispatch returns immediately with the hook's stderr as the error message. Otherwise stderr is captured but not returned on success.
 

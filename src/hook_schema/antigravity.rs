@@ -244,8 +244,8 @@ impl AgentHookOutput for AntigravityPreToolUseOutput {
             } else {
                 "allow".into()
             },
-            // A denial's explanation is the reason; otherwise context is
-            // dropped, since PreToolUse has nowhere to put it.
+            // Sent with either decision, but Antigravity shows the model the
+            // reason only for a denial: on an allowed call, context goes unread.
             reason: o.additional_context.clone(),
             overwrite: o.updated_input.clone(),
         }

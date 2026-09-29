@@ -22,16 +22,12 @@ Events registered: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStar
 
 Output format: JSON. Exit code 2 blocks tool use.
 
-**Caveat:** Codex hooks are experimental and disabled by default. To enable, add to `~/.codex/config.toml`:
-
-```toml
-[features]
-codex_hooks = true
-```
+**Caveat:** Codex runs a hook only after you trust it. Until then it skips the hook, warning at startup; open `/hooks` in Codex to review and trust symposium's entries. A changed entry needs trusting again. Project hooks also require the project itself to be trusted.
 
 ## MCP servers
 
 | Scope | File | Key |
 |-------|------|-----|
-| Project | `.codex/config.toml` | `[mcp_servers.<name>]` |
 | Global | `~/.codex/config.toml` | `[mcp_servers.<name>]` |
+
+Codex reads no project-level MCP file, so a project-scoped registration goes to the global file.

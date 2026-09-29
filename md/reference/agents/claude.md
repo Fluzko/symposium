@@ -20,7 +20,7 @@ Symposium merges hook entries into Claude Code's `settings.json`.
 | Project | `.claude/settings.json` |
 | Global | `~/.claude/settings.json` |
 
-Events registered: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart` (PascalCase).
+Events registered: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop` (PascalCase).
 
 Output format: JSON with `hookSpecificOutput` wrapper. Exit code 2 blocks tool use.
 
@@ -28,5 +28,7 @@ Output format: JSON with `hookSpecificOutput` wrapper. Exit code 2 blocks tool u
 
 | Scope | File | Key |
 |-------|------|-----|
-| Project | `.claude/settings.json` | `mcpServers.<name>` |
-| Global | `~/.claude/settings.json` | `mcpServers.<name>` |
+| Project | `.mcp.json` | `mcpServers.<name>` |
+| Global | `~/.claude.json` | `mcpServers.<name>` |
+
+MCP servers do not go in `settings.json`, which holds only the hooks. The global file honors `CLAUDE_CONFIG_DIR`.

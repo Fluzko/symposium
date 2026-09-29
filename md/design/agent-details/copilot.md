@@ -32,13 +32,15 @@ Only `type: "command"` is supported.
 
 `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `SubagentStart`, `SubagentStop`, `Stop`.
 
-Only **`preToolUse`/`PreToolUse`** can make access-control decisions. All other events are observational.
+Only **`preToolUse`/`PreToolUse`** can make access-control decisions. All other events are observational, though they can still add context (see [what the CLI actually reads](#what-the-cli-actually-reads)).
 
 ## Configuration
 
 ### Cloud Agent and CLI
 
 Hooks defined in **`.github/hooks/*.json`**. For the Cloud Agent, files must be on the repository's **default branch**.
+
+The CLI combines hooks from several places: repository `.github/hooks/*.json`, user-level `~/.copilot/hooks/*.json` or a `hooks` key in `~/.copilot/settings.json` (where symposium registers globally; `config.json` is managed by the CLI), and also `.claude/settings.json`. It loads a repository's hooks only once the folder is trusted: it asks interactively, or `COPILOT_ALLOW_ALL=true` trusts the working directory. Because it reads Claude's settings too, a project with both agents configured runs symposium's hook twice per Copilot event.
 
 ```json
 {
@@ -117,6 +119,15 @@ Also reads hooks from `.claude/settings.json`, `.claude/settings.local.json`, an
 | `"ask"` | Prompt user for confirmation |
 
 Exit code 0 = allow (if no JSON output), non-zero = deny.
+
+### What the CLI actually reads
+
+Observed on Copilot CLI 1.0.80 (2026-09-29), with a hook per event returning a different marker and the model asked which markers it saw:
+
+- A top-level `additionalContext` reached the model from `sessionStart`, `userPromptSubmitted`, `preToolUse` and `postToolUse`. GitHub's hooks reference says otherwise for two of them: that `userPromptSubmitted` output from config-file hooks is dropped, and that `preToolUse` takes no context.
+- Output that is not pure JSON (for example, a progress line ahead of the object) is logged and dropped, on every event. Nothing reaches the model, not even at session start.
+- `preToolUse` honors `permissionDecision` and `permissionDecisionReason`, and `modifiedArgs` rewrites the call.
+- The shell tool is named `bash` (lowercase) in the hook input.
 
 ### VS Code output (preview, extended fields)
 

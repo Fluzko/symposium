@@ -9,10 +9,12 @@ matcher = "Bash"
 format = "claude"
 command = { script = "$TEST_DIR/dot-symposium/plugins/format-plugin/scripts/claude-hook.sh" }
 
-# Symposium fallback — should fire on non-Claude agents.
+# Symposium fallback — should fire on non-Claude agents. Tool names are each
+# agent's own, so it names the shell tool as both Claude (`Bash`) and Copilot
+# (`bash`) do.
 [[hooks]]
 name = "symposium-fallback"
 event = "PreToolUse"
-matcher = "Bash"
+matcher = "^(Bash|bash)$"
 format = "symposium"
 command = { script = "$TEST_DIR/dot-symposium/plugins/format-plugin/scripts/symposium-hook.sh" }

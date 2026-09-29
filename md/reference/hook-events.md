@@ -183,7 +183,7 @@ Your hook writes a JSON object to stdout. The object is wrapped in an enum tag m
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `additionalContext` | string or null | Text injected into the agent's context when the session/turn ends. |
+| `additionalContext` | string or null | Text for the agent when the turn ends. Only Antigravity and Claude Code run `Stop` hooks, and neither treats this as plain context: Claude Code ignores it, while Antigravity takes it as a reason to keep going and starts another turn. |
 
 ## Exit codes
 
@@ -196,6 +196,8 @@ Your hook writes a JSON object to stdout. The object is wrapped in an enum tag m
 ## Matcher
 
 The `matcher` field on a hook entry is a regex matched against `tool_name` for `PreToolUse` and `PostToolUse` events. For `UserPromptSubmit`, `SessionStart`, and `Stop`, the matcher is ignored (all hooks fire). Use `"*"` to match all tools.
+
+`tool_name` and `tool_input` are passed through exactly as the agent sends them, and agents name the same tool differently: the shell tool is `Bash` in Claude Code and Codex, `bash` in Copilot, and `run_command` in Antigravity, whose input carries `CommandLine` rather than `command`. A symposium-format hook meant to fire on several agents must match each name, for example `matcher = "^(Bash|bash|run_command)$"`, and read the input in each shape.
 
 ## Testing
 

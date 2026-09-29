@@ -19,5 +19,6 @@ Skill files are installed but `cargo agents hook` will never be called by this a
 
 | Scope | File | Key |
 |-------|------|-----|
-| Project | `.goose/config.yaml` | `extensions.<name>` |
 | Global | `~/.config/goose/config.yaml` | `extensions.<name>` |
+
+Goose reads no project-level MCP file, so a project-scoped registration goes to the global file.

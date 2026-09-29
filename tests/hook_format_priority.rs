@@ -46,6 +46,7 @@ async fn native_hook_takes_priority_over_symposium() {
 
 /// When running on Copilot and the plugin has both `format = "claude"` and
 /// `format = "symposium"` hooks, the symposium hook fires (no native match).
+/// Copilot names its shell tool `bash`, not Claude's `Bash`.
 #[tokio::test(flavor = "multi_thread")]
 async fn symposium_hook_fires_when_no_native_match() {
     with_fixture(
@@ -56,7 +57,7 @@ async fn symposium_hook_fires_when_no_native_match() {
                 .prompt_or_hook(
                     "ignored",
                     &[HookStep::PreToolUse {
-                        tool_name: "Bash".to_string(),
+                        tool_name: "bash".to_string(),
                         tool_input: json!({"command": "ls"}),
                     }],
                     HookAgent::Copilot,

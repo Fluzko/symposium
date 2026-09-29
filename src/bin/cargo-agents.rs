@@ -52,7 +52,9 @@ async fn main() -> ExitCode {
         Err(err) => err.exit(),
     };
 
-    // Always install the report layer. Mode determines output format:
+    let is_hook = matches!(cli.command, Some(Commands::Hook { .. }));
+
+    // Install the report layer. Mode determines output format:
     // --json → accumulate JSON array; -v → stderr trace; default → stdout.
     let (mode, level) = if cli.json {
         let level = if cli.verbose {
@@ -67,7 +69,11 @@ async fn main() -> ExitCode {
         (report::ReportMode::Normal, tracing::Level::INFO)
     };
     let (report_layer, report_handle) = report::ReportLayer::new(mode, level);
-    sym.init_logging(Some(report_layer));
+    // A hook's stdout is the agent's protocol: any report line ahead of the
+    // JSON makes the agent discard the whole output. The events still reach
+    // the log file; `-v` prints them to stderr when debugging a hook by hand.
+    let report_layer = (!is_hook || cli.verbose).then_some(report_layer);
+    sym.init_logging(report_layer);
 
     // Log the command being invoked
     match &cli.command {
@@ -104,7 +110,6 @@ async fn main() -> ExitCode {
 
     // Hook commands are quiet by default (they're invoked by the agent, not the user).
     // JSON mode also suppresses human output (only JSON goes to stdout).
-    let is_hook = matches!(cli.command, Some(Commands::Hook { .. }));
     let out = if cli.quiet || is_hook || cli.json {
         Output::quiet()
     } else {

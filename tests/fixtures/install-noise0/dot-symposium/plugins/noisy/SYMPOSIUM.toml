@@ -1,0 +1,15 @@
+name = "noisy"
+depends-on = ["*"]
+
+# An install command that prints, as real ones do (npm, pip, cargo...). It runs
+# on every dispatch of the hook that requires it.
+[[installations]]
+name = "setup"
+install_commands = ["echo installing noisy tool"]
+
+[[hooks]]
+name = "context"
+event = "SessionStart"
+format = "symposium"
+requirements = ["setup"]
+command = { script = "$TEST_DIR/dot-symposium/plugins/noisy/scripts/context.sh" }

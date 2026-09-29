@@ -16,6 +16,10 @@ When your agent triggers a hook event, it calls `cargo agents hook` with the age
 
 2. **Dispatches to plugin hooks** — runs any hook handlers defined by [plugins](./plugin-definition.md#hooks) for the given event.
 
+## Output
+
+Stdout carries only the response for your agent, in its own format. Sync progress goes to the log file, and whatever a plugin's `install_commands` print goes to stderr. To see the progress when running a hook by hand, pass `-v`: `cargo agents -v hook <AGENT> <EVENT>` prints it to stderr.
+
 ## Events
 
 The specific events depend on which agent you are using. `cargo agents init` configures the hook registration appropriate for your agents.

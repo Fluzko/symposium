@@ -1,0 +1,14 @@
+name = "first"
+depends-on = ["*"]
+
+[[hooks]]
+name = "session"
+event = "SessionStart"
+format = "symposium"
+command = { script = "$TEST_DIR/dot-symposium/plugins/first/scripts/session.sh" }
+
+[[hooks]]
+name = "post"
+event = "PostToolUse"
+format = "symposium"
+command = { script = "$TEST_DIR/dot-symposium/plugins/first/scripts/post.sh" }

@@ -28,7 +28,10 @@ Events registered: `PreToolUse`, `PostToolUse`, `PreInvocation`, `SessionStart`,
 `Stop`.
 
 Output format: JSON. Timeouts are in **seconds** (30 by default). Exit codes are
-ignored — only what a hook writes to stdout affects the agent.
+ignored — only what a hook writes to stdout affects the agent. Context reaches the
+model at session start and on the first `PreInvocation` of a turn; after a tool
+call it does not (`PostToolUse` output carries nothing back), and on `PreToolUse`
+only a denial's reason is shown.
 
 **Caveat:** `PreInvocation` stands in for symposium's `user-prompt-submit`
 because Antigravity has no prompt event. It fires before *every* model call, so

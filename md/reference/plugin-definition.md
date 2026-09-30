@@ -222,7 +222,7 @@ Each `[[hooks]]` entry declares a hook that responds to agent events. For the JS
 |-------|------|-------------|
 | `name` | string | Descriptive name for the hook (used in logs). |
 | `event` | string | Event type to match (e.g., `PreToolUse`). |
-| `matcher` | string (optional) | Which tool invocations to match (e.g., `Bash`). Omit to match all. |
+| `matcher` | string (optional) | Regex over the tool name, as the agent names it (e.g., `Bash` in Claude Code, `bash` in Copilot; see [Matcher](./hook-events.md#matcher)). Omit to match all. |
 | `command` | string or table | What to run. A string names a `[[installations]]` entry; a table is an inline installation (promoted to a synthetic entry named after the hook). |
 | `executable` | string (optional) | Path to a binary inside (or relative to) the installation. At most one of `executable`/`script` set across hook + installation. |
 | `script` | string (optional) | Path to a shell script to run via `sh`. Same exclusivity rule as `executable`. |
@@ -539,7 +539,7 @@ headers = []
 
 ### How registration works
 
-During `cargo agents sync --agent`, each MCP server entry is written into the agent's config file in the format that agent expects. Registration is idempotent — existing entries with correct values are left untouched, stale entries are updated in place.
+During `cargo agents sync`, each MCP server entry is written into each configured agent's config file in the format that agent expects. Registration is idempotent — existing entries with correct values are left untouched, stale entries are updated in place.
 
 When a user runs `cargo agents sync` (or the hook triggers it automatically), Symposium:
 
@@ -548,14 +548,17 @@ When a user runs `cargo agents sync` (or the hook triggers it automatically), Sy
 
 All supported agents have MCP server configuration. Symposium handles the format differences — you declare the server once and it works across agents.
 
-| Agent | Config location | Key |
+| Agent | Config location (project scope) | Key |
 |-------|----------------|-----|
-| Claude Code | `.claude/settings.json` | `mcpServers.<name>` |
-| GitHub Copilot | `.vscode/mcp.json` | `<name>` (top-level) |
-| Codex CLI | `.codex/config.toml` | `[mcp_servers.<name>]` |
+| Antigravity | `.agents/mcp_config.json` | `mcpServers.<name>` |
+| Claude Code | `.mcp.json` | `mcpServers.<name>` |
+| GitHub Copilot | `~/.copilot/mcp-config.json` (no project file) | `mcpServers.<name>` |
+| Codex CLI | `~/.codex/config.toml` (no project file) | `[mcp_servers.<name>]` |
 | Kiro | `.kiro/settings/mcp.json` | `mcpServers.<name>` |
 | OpenCode | `opencode.json` | `mcp.<name>` |
-| Goose | `~/.config/goose/config.yaml` | `extensions.<name>` |
+| Goose | `~/.config/goose/config.yaml` (no project file) | `extensions.<name>` |
+
+See each agent's page under [Supported agents](./supported-agents.md) for the global locations.
 
 ## Example: full manifest
 
@@ -575,8 +578,8 @@ source.git = "https://github.com/org/widgetlib/tree/main/symposium/serde-skills"
 [[hooks]]
 name = "check-widget-usage"
 event = "PreToolUse"
-matcher = "Bash"
-command = { source = "local", command = "./scripts/check-widget.sh" }
+matcher = "^(Bash|bash|run_command)$"
+command = { script = "scripts/check-widget.sh" }
 
 [[mcp_servers]]
 name = "widgetlib-mcp"

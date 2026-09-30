@@ -5,19 +5,14 @@
 > Details may be outdated or incomplete — always consult the primary sources.
 >
 > **Primary sources:**
-> [Hooks](https://developers.openai.com/codex/hooks)
+> [Hooks](https://learn.chatgpt.com/docs/hooks)
 > · [GitHub repo](https://github.com/openai/codex)
 
-OpenAI's Codex CLI implements a shell-command hook system configured in `hooks.json`. It is **experimental** (disabled by default, not available on Windows) and first shipped in v0.114 (March 2026).
+OpenAI's Codex CLI implements a shell-command hook system configured in `hooks.json`. It first shipped in v0.114 (March 2026), behind an opt-in `codex_hooks` flag; hooks are now on by default, and `[features] hooks = false` in `~/.codex/config.toml` turns them off.
 
-## Enabling
+## Trust
 
-Add to `~/.codex/config.toml`:
-
-```toml
-[features]
-codex_hooks = true
-```
+Codex runs a non-managed hook only after the user trusts that exact definition. Trust is recorded against the hook's hash, so a new or changed hook is skipped until reviewed: Codex prints a startup warning pointing at `/hooks`, where hooks are reviewed, trusted or disabled. Project hooks additionally load only when the project's `.codex/` layer is trusted. For automation that vets hooks itself, `codex exec --dangerously-bypass-hook-trust` runs enabled hooks for one invocation. Observed on Codex 0.147: until trusted, symposium's hooks simply do not run.
 
 ## Configuration
 
@@ -53,8 +48,8 @@ Only handler type is `"command"`. `matcher` is a regex string; omit or use `""` 
 | Event | Trigger | Matcher filters on | Can block? |
 |---|---|---|---|
 | `SessionStart` | Session starts or resumes | `source` (`"startup"` or `"resume"`) | Yes (`continue: false`) |
-| `PreToolUse` | Before tool execution | `tool_name` (currently only `"Bash"`) | Yes |
-| `PostToolUse` | After tool execution | `tool_name` (currently only `"Bash"`) | Yes (`continue: false`) |
+| `PreToolUse` | Before tool execution | `tool_name` (`"Bash"`, `"apply_patch"`, MCP tools) | Yes |
+| `PostToolUse` | After tool execution | `tool_name` (`"Bash"`, `"apply_patch"`, MCP tools) | Yes (`continue: false`) |
 | `UserPromptSubmit` | User submits a prompt | N/A | Yes (`continue: false`) |
 | `Stop` | Agent turn completes | N/A | Yes (deny → continuation prompt) |
 
@@ -160,14 +155,12 @@ For the Stop event, `{ "decision": "block", "reason": "Run tests again" }` tells
 - Commands run with session `cwd` as working directory.
 - Shell expansion works.
 
-## Parsed but Not Yet Implemented
+## Rewriting tool input
 
-These fields are accepted but **fail open** (no effect): `suppressOutput`, `updatedInput`, `updatedMCPToolOutput`, `permissionDecision: "allow"`, `permissionDecision: "ask"`.
+Per the current docs, `PreToolUse` can rewrite a call with `hookSpecificOutput.updatedInput`, but only together with `permissionDecision: "allow"`, which also approves the call: for `Bash` and `apply_patch` it is a string `command`, for MCP and other tools the replacement arguments object. There is no `"ask"` to leave the rewritten call to the user. Earlier releases accepted `updatedInput` without applying it.
 
 ## Current Limitations
 
-- Only **Bash** tool events fire PreToolUse/PostToolUse — no file-write or MCP tool hooks.
-- PreToolUse can only deny, **not modify** tool input.
 - No async hook mode.
 - Stop event requires JSON output (plain text is invalid).
 

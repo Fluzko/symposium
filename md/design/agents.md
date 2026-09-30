@@ -87,15 +87,17 @@ Example hook registration:
 
 ### Supported events
 
-Claude Code supports many hook events. The ones relevant to Symposium are:
+Claude Code supports many hook events. Symposium registers these:
 
 | Event | Description |
 |-------|-------------|
 | `PreToolUse` | Before a tool is invoked. Can allow, block, or modify the tool call. |
-| `PostToolUse` | After a tool completes. Used to track skill activations. |
-| `UserPromptSubmit` | When the user submits a prompt. Used for skill nudges. |
+| `PostToolUse` | After a tool completes. |
+| `UserPromptSubmit` | When the user submits a prompt. |
+| `SessionStart` | Session starts, resumes, or is cleared or compacted. Where symposium adds its own context. |
+| `Stop` | Agent turn completes. Claude Code reads no context from it. |
 
-Other events include `SessionStart`, `Stop`, `Notification`, `SubagentStart`, and more.
+Other events include `Notification`, `SubagentStart`, and more.
 
 ### Hook payload/output
 
@@ -395,7 +397,7 @@ Goose is supported as a **skills-only** agent — `cargo agents sync` will insta
 
 ## Cross-agent event mapping
 
-The following table maps symposium's internal event names to each agent's wire-format event name. `—` means the agent does not support shell-command hooks.
+The following table maps symposium's internal event names to each agent's wire-format event name. `—` means the agent does not support shell-command hooks; *not registered* means symposium does not hook that event there.
 
 | Symposium event | Antigravity | Claude | Copilot | Codex | Kiro | OpenCode | Goose |
 |---|---|---|---|---|---|---|---|
@@ -403,6 +405,9 @@ The following table maps symposium's internal event names to each agent's wire-f
 | `post-tool-use` | `PostToolUse` | `PostToolUse` | `postToolUse` | `PostToolUse` | `postToolUse` | — | — |
 | `user-prompt-submit` | `PreInvocation` | `UserPromptSubmit` | `userPromptSubmitted` | `UserPromptSubmit` | `userPromptSubmit` | — | — |
 | `session-start` | `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `agentSpawn` | — | — |
+| `stop` | `Stop` | `Stop` | *not registered* | *not registered* | *not registered* | — | — |
+
+Tool names are each agent's own, and symposium passes them to plugin hooks unchanged: the same shell tool is `Bash` in Claude Code and Codex, `bash` in Copilot and `run_command` in Antigravity. A `matcher` that should fire on several agents has to name each of them.
 
 ---
 

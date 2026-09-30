@@ -17,10 +17,10 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::telemetry) enum SupportedAgent {
+    Antigravity,
     Claude,
     Codex,
     Copilot,
-    Gemini,
     Kiro,
     #[serde(rename = "opencode")]
     OpenCode,
@@ -30,10 +30,10 @@ pub(in crate::telemetry) enum SupportedAgent {
 impl From<Agent> for SupportedAgent {
     fn from(agent: Agent) -> Self {
         match agent {
+            Agent::Antigravity => Self::Antigravity,
             Agent::Claude => Self::Claude,
             Agent::Codex => Self::Codex,
             Agent::Copilot => Self::Copilot,
-            Agent::Gemini => Self::Gemini,
             Agent::Kiro => Self::Kiro,
             Agent::OpenCode => Self::OpenCode,
             Agent::Goose => Self::Goose,
@@ -48,20 +48,20 @@ impl From<Agent> for SupportedAgent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::telemetry) enum HookAgent {
+    Antigravity,
     Claude,
     Codex,
     Copilot,
-    Gemini,
     Kiro,
 }
 
 impl From<HookAgent> for SupportedAgent {
     fn from(agent: HookAgent) -> Self {
         match agent {
+            HookAgent::Antigravity => Self::Antigravity,
             HookAgent::Claude => Self::Claude,
             HookAgent::Codex => Self::Codex,
             HookAgent::Copilot => Self::Copilot,
-            HookAgent::Gemini => Self::Gemini,
             HookAgent::Kiro => Self::Kiro,
         }
     }
@@ -336,10 +336,10 @@ mod tests {
     #[test]
     fn hook_agents_round_trip_with_contract_names() {
         let cases = [
+            (HookAgent::Antigravity, "antigravity"),
             (HookAgent::Claude, "claude"),
             (HookAgent::Codex, "codex"),
             (HookAgent::Copilot, "copilot"),
-            (HookAgent::Gemini, "gemini"),
             (HookAgent::Kiro, "kiro"),
         ];
 
@@ -355,10 +355,10 @@ mod tests {
     #[test]
     fn hook_agent_names_match_supported_agent_names() {
         let agents = [
+            HookAgent::Antigravity,
             HookAgent::Claude,
             HookAgent::Codex,
             HookAgent::Copilot,
-            HookAgent::Gemini,
             HookAgent::Kiro,
         ];
 
@@ -373,10 +373,10 @@ mod tests {
     #[test]
     fn supported_agents_round_trip_with_contract_names() {
         let cases = [
+            (SupportedAgent::Antigravity, "antigravity"),
             (SupportedAgent::Claude, "claude"),
             (SupportedAgent::Codex, "codex"),
             (SupportedAgent::Copilot, "copilot"),
-            (SupportedAgent::Gemini, "gemini"),
             (SupportedAgent::Kiro, "kiro"),
             (SupportedAgent::OpenCode, "opencode"),
             (SupportedAgent::Goose, "goose"),

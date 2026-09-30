@@ -260,7 +260,7 @@ This matrix defines which agent signals version 1 records. It is part of the pro
 | Claude Code    | yes           | yes            | yes        | yes          | yes    | attempted/completed/failed |
 | Codex CLI      | yes           | yes            | yes        | yes          | no     | unsupported                |
 | GitHub Copilot | yes           | yes            | no         | no           | no     | unsupported                |
-| Gemini CLI     | yes           | yes            | yes        | no           | no     | unsupported                |
+| Antigravity    | yes           | yes            | yes        | no           | no     | unsupported                |
 | Kiro           | yes           | yes            | yes        | no           | no     | unsupported                |
 | OpenCode       | yes           | no             | n/a        | n/a          | no     | unsupported                |
 | Goose          | yes           | no             | n/a        | n/a          | no     | unsupported                |

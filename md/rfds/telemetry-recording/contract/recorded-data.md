@@ -126,7 +126,7 @@ This row records a completed registered Symposium session-start hook.
 | Field               | Values                                         | Meaning                                                 |
 | ------------------- | ---------------------------------------------- | ------------------------------------------------------- |
 | `at`                | UTC second                                     | When Symposium completed the session-start handling.    |
-| `agent`             | `claude`, `codex`, `copilot`, `gemini`, `kiro` | Agent that invoked the registered hook.                 |
+| `agent`             | `antigravity`, `claude`, `codex`, `copilot`, `kiro` | Agent that invoked the registered hook.                 |
 | `os`                | `linux`, `macos`, `windows`, `other`           | OS class for the running Symposium build.               |
 | `arch`              | `x86_64`, `aarch64`, `other`                   | Architecture class for the running build.               |
 | `start`             | `fresh`, `resumed`, `unknown`                  | Agent-supplied lifecycle classification when available. |
@@ -146,7 +146,7 @@ This row records whether a supported agent is configured for Symposium that day.
 
 | Field           | Values                                                              | Meaning                                                  |
 | --------------- | ------------------------------------------------------------------- | -------------------------------------------------------- |
-| `agent`         | `claude`, `codex`, `copilot`, `gemini`, `kiro`, `opencode`, `goose` | Agent being checked.                                     |
+| `agent`         | `antigravity`, `claude`, `codex`, `copilot`, `kiro`, `opencode`, `goose` | Agent being checked.                                     |
 | `configured`    | boolean                                                             | Whether the agent is listed in per-user Symposium configuration. |
 | `os`            | `linux`, `macos`, `windows`, `other`                                | OS class for the running Symposium build.                |
 | `arch`          | `x86_64`, `aarch64`, `other`                                        | Architecture class for the running build.                |
@@ -238,7 +238,7 @@ This cumulative row combines completed hook observations for one UTC day, agent,
 
 | Field                             | Values                                                                         | Meaning                                                                                     |
 | --------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| `agent`                           | `claude`, `codex`, `copilot`, `gemini`, `kiro`                                | Invoking agent.                                                                             |
+| `agent`                           | `antigravity`, `claude`, `codex`, `copilot`, `kiro`                           | Invoking agent.                                                                             |
 | `hook`                            | `pre_tool_use`, `post_tool_use`, `user_prompt_submit`, `session_start`, `stop` | Symposium hook surface.                                                                     |
 | `invocations`                     | integer                                                                        | Completed hook observations merged into the row.                                            |
 | `outcomes`                        | hook outcome counters                                                          | Exact counters named `ok`, `blocked`, `plugin_error`, and `internal_error`.                  |
@@ -260,7 +260,7 @@ This cumulative row combines plugin-hook observations for one UTC day, agent, ho
 
 | Field                         | Values                                                                         | Meaning                                                                                     |
 | ----------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| `agent`                       | `claude`, `codex`, `copilot`, `gemini`, `kiro`                                | Invoking agent.                                                                             |
+| `agent`                       | `antigravity`, `claude`, `codex`, `copilot`, `kiro`                           | Invoking agent.                                                                             |
 | `hook`                        | `pre_tool_use`, `post_tool_use`, `user_prompt_submit`, `session_start`, `stop` | Symposium hook surface.                                                                     |
 | `plugin_scope`                | `public`, `unnamed`, `overflow`                                                | Whether the bucket names an eligible public plugin.                                         |
 | `plugin.source`               | `symposium-recommendations`, `crates-io`, conditional                         | Present only when `plugin_scope=public`.                                                     |

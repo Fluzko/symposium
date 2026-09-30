@@ -183,6 +183,11 @@ This row records the result of a full sync after session start, manual sync, `us
 
 `unnamed_package_reasons` has exactly `private_registry`, `git`, `path`, `workspace`, `unknown_source`, and `invalid_coordinate` counters. Each unnamed package increments exactly one. Source provenance takes precedence; `invalid_coordinate` is used only for an allowlisted public source with a malformed name or a missing, wildcard, or invalid exact version. The counters sum to `unnamed_packages`.
 
+When a resolution runs inside an identified agent session, the producer derives
+`session_id` from that agent and its raw vendor session identifier using the
+same bound recording context that supplies the row's day. Producers never pass
+an already-derived session identifier into the row constructor.
+
 Read-only extension lookup on ordinary hook calls does not produce this event.
 
 ### `package_resolution`

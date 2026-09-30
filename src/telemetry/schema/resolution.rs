@@ -8,7 +8,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    DroppedOperation, EventId, RowKind, SchemaVersion, SymposiumVersion,
+    DroppedOperation, EventId, RowKind, SchemaVersion, SymposiumVersion, agent::IdentifiedSession,
     macros::strict_versioned_row,
 };
 use crate::telemetry::{identity::SessionId, state::BoundRecordingObservation};
@@ -116,8 +116,8 @@ impl UnnamedPackageReasons {
 ///
 /// These fields are repeated on [`ResolutionSummaryV1`] because flattening
 /// this constructor input would weaken strict unknown-field rejection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::telemetry) struct ResolutionSummaryFields {
+#[derive(Clone, Copy)]
+pub(in crate::telemetry) struct ResolutionSummaryFields<'a> {
     pub(in crate::telemetry) trigger: ResolutionTrigger,
     pub(in crate::telemetry) outcome: ResolutionOutcome,
     pub(in crate::telemetry) duration_ms: u64,
@@ -128,7 +128,7 @@ pub(in crate::telemetry) struct ResolutionSummaryFields {
     pub(in crate::telemetry) installed: u64,
     pub(in crate::telemetry) updated: u64,
     pub(in crate::telemetry) reaped: u64,
-    pub(in crate::telemetry) session_id: Option<SessionId>,
+    pub(in crate::telemetry) identified_session: Option<IdentifiedSession<'a>>,
 }
 
 strict_versioned_row! {
@@ -165,7 +165,7 @@ impl ResolutionSummaryV1 {
     /// the unnamed-package reason counters cannot be represented by `u64`.
     pub(in crate::telemetry) fn new(
         observation: &BoundRecordingObservation<'_>,
-        fields: ResolutionSummaryFields,
+        fields: ResolutionSummaryFields<'_>,
     ) -> Result<Self, ResolutionSummaryError> {
         let unnamed_packages = fields
             .unnamed_package_reasons
@@ -189,7 +189,9 @@ impl ResolutionSummaryV1 {
             installed: fields.installed,
             updated: fields.updated,
             reaped: fields.reaped,
-            session_id: fields.session_id,
+            session_id: fields
+                .identified_session
+                .map(|session| session.derive_id(observation.identifier_window_scope())),
         })
     }
 }
@@ -238,7 +240,9 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::super::{
-        IDENTIFIER_WINDOW_TEST_STATE, UtcDay, assert_contract_names, recording_observation,
+        IDENTIFIER_WINDOW_TEST_STATE, UtcDay,
+        agent::{HookAgent, VendorSessionId},
+        assert_contract_names, recording_observation,
     };
     use super::*;
     use crate::telemetry::state::TelemetryStateV1;
@@ -259,7 +263,7 @@ mod tests {
     }
 
     fn resolution_summary(
-        fields: ResolutionSummaryFields,
+        fields: ResolutionSummaryFields<'_>,
     ) -> Result<ResolutionSummaryV1, ResolutionSummaryError> {
         let mut state: TelemetryStateV1 = toml::from_str(IDENTIFIER_WINDOW_TEST_STATE).unwrap();
         let observation = recording_observation(&mut state);
@@ -267,7 +271,9 @@ mod tests {
         ResolutionSummaryV1::new(&observation, fields)
     }
 
-    fn summary_fields(session_id: Option<SessionId>) -> ResolutionSummaryFields {
+    fn summary_fields(
+        identified_session: Option<IdentifiedSession<'_>>,
+    ) -> ResolutionSummaryFields<'_> {
         ResolutionSummaryFields {
             trigger: ResolutionTrigger::SessionStart,
             outcome: ResolutionOutcome::Ok,
@@ -282,7 +288,7 @@ mod tests {
             installed: 2,
             updated: 0,
             reaped: 0,
-            session_id,
+            identified_session,
         }
     }
 
@@ -313,8 +319,11 @@ mod tests {
 
     #[test]
     fn new_resolution_summary_derives_fixed_fields_and_unnamed_total() {
-        let session_id = "sess_31d8b1916028f65a0c0521dc1f4c86fb".parse().unwrap();
-        let fields = summary_fields(Some(session_id));
+        let vendor_session_id = VendorSessionId::new("vendor-session-123".to_owned());
+        let fields = summary_fields(Some(IdentifiedSession::new(
+            HookAgent::Claude,
+            &vendor_session_id,
+        )));
 
         let row = resolution_summary(fields).unwrap();
 
@@ -334,7 +343,10 @@ mod tests {
         assert_eq!(row.installed, fields.installed);
         assert_eq!(row.updated, fields.updated);
         assert_eq!(row.reaped, fields.reaped);
-        assert_eq!(row.session_id, fields.session_id);
+        assert_eq!(
+            row.session_id,
+            Some("sess_2f77ea40740f4be8e85ba05e7924e1ad".parse().unwrap())
+        );
     }
 
     #[test]

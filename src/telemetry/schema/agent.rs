@@ -159,6 +159,38 @@ impl IdentityDimension for SessionDimension<'_> {
     }
 }
 
+/// Raw inputs that identify one agent session.
+///
+/// This value keeps the agent paired with the vendor session identifier from
+/// which telemetry derives a scoped [`SessionId`]. It deliberately implements
+/// neither formatting nor serialization traits so the vendor identifier cannot
+/// accidentally reach a row or diagnostic.
+#[derive(Clone, Copy)]
+pub(in crate::telemetry) struct IdentifiedSession<'a> {
+    agent: HookAgent,
+    vendor_session_id: &'a VendorSessionId,
+}
+
+impl<'a> IdentifiedSession<'a> {
+    /// Pair an agent with the vendor session identifier it supplied.
+    #[must_use]
+    pub(in crate::telemetry) const fn new(
+        agent: HookAgent,
+        vendor_session_id: &'a VendorSessionId,
+    ) -> Self {
+        Self {
+            agent,
+            vendor_session_id,
+        }
+    }
+
+    /// Derive this session's identifier in one identifier window.
+    #[must_use]
+    pub(super) fn derive_id(self, identity: &IdentifierWindowScope<'_>) -> SessionId {
+        identity.derive(&SessionDimension::new(self.agent, self.vendor_session_id))
+    }
+}
+
 /// An agent session paired with its optional scoped identifier.
 ///
 /// The identifier is derived from the same agent stored here, so callers
@@ -179,9 +211,9 @@ impl AgentSessionIdentity {
         agent: HookAgent,
         vendor_session_id: Option<&VendorSessionId>,
     ) -> Self {
-        let session_id = vendor_session_id.map(|vendor_session_id| {
-            identity.derive(&SessionDimension::new(agent, vendor_session_id))
-        });
+        let session_id = vendor_session_id
+            .map(|vendor_session_id| IdentifiedSession::new(agent, vendor_session_id))
+            .map(|session| session.derive_id(identity));
 
         Self { agent, session_id }
     }

@@ -16,6 +16,10 @@ use super::{
     schema::UtcDay,
 };
 
+/// The only private-state schema version understood by this binary.
+pub(super) const STATE_VERSION: u64 = 1;
+
+mod codec;
 mod extension_invocation;
 mod hook;
 mod lifecycle;

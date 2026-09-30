@@ -46,9 +46,9 @@ impl TryFrom<Agent> for ExtensionInvocationAgent {
     fn try_from(agent: Agent) -> Result<Self, Self::Error> {
         match agent {
             Agent::Claude => Ok(Self::Claude),
-            Agent::Codex
+            Agent::Antigravity
+            | Agent::Codex
             | Agent::Copilot
-            | Agent::Gemini
             | Agent::Goose
             | Agent::Kiro
             | Agent::OpenCode => Err(UnsupportedExtensionInvocationAgent { found: agent }),

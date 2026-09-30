@@ -41,7 +41,7 @@ impl SupportedAgent {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Copilot => "copilot",
-            Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
             Self::Kiro => "kiro",
             Self::OpenCode => "opencode",
             Self::Goose => "goose",
@@ -94,7 +94,7 @@ impl HookAgent {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Copilot => "copilot",
-            Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
             Self::Kiro => "kiro",
         }
     }

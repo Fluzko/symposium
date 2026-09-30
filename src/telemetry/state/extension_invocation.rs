@@ -179,8 +179,9 @@ impl<K> ExtensionSessionCountTracker<K> {
     /// Missing identifiers and a 257th distinct identifier make both session
     /// sets incomplete but do not reject attempted or completed observations.
     /// A baseline mismatch has the same all-or-nothing result. Failed
-    /// observations feed neither set and leave this tracker unchanged,
-    /// including when they do not carry a session identifier.
+    /// observations feed neither set, but still reconcile the tracker with the
+    /// stored row's contribution baseline. A missing identifier on a failed
+    /// observation does not make the sets incomplete.
     ///
     /// # Errors
     ///
@@ -194,15 +195,21 @@ impl<K> ExtensionSessionCountTracker<K> {
         session_id: Option<SessionId>,
         phase: ExtensionInvocationPhase,
     ) -> Result<(), ExtensionSessionCountUpdateError> {
-        let Ok(tracked_phase) = TrackedPhase::try_from(phase) else {
-            return Ok(());
+        let tracked_update = match TrackedPhase::try_from(phase) {
+            Ok(tracked_phase) => {
+                let next_contributions = baseline
+                    .counter(tracked_phase)
+                    .checked_add(1)
+                    .ok_or(ExtensionSessionCountUpdateError::ContributionCountOverflow { phase })?;
+                Some((tracked_phase, next_contributions))
+            }
+            Err(()) => None,
         };
-        let next_contributions = baseline
-            .counter(tracked_phase)
-            .checked_add(1)
-            .ok_or(ExtensionSessionCountUpdateError::ContributionCountOverflow { phase })?;
 
         self.reconcile(baseline);
+        let Some((tracked_phase, next_contributions)) = tracked_update else {
+            return Ok(());
+        };
         self.sessions.record(tracked_phase, session_id);
         *self.counter_mut(tracked_phase) = next_contributions;
 
@@ -341,7 +348,26 @@ mod tests {
     }
 
     #[test]
-    fn failed_observations_leave_private_session_state_unchanged() {
+    fn failed_observations_reconcile_a_stale_contribution_baseline() {
+        let mut tracker = tracker();
+        tracker
+            .checked_record(
+                baseline(0, 0),
+                Some(session_id(1)),
+                ExtensionInvocationPhase::Attempted,
+            )
+            .unwrap();
+        let result = tracker.checked_record(baseline(0, 0), None, ExtensionInvocationPhase::Failed);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            tracker.snapshot(),
+            ExtensionSessionCountSnapshot::Incomplete
+        );
+    }
+
+    #[test]
+    fn failed_observations_leave_matching_private_session_state_unchanged() {
         let mut tracker = tracker();
         tracker
             .checked_record(
@@ -352,11 +378,7 @@ mod tests {
             .unwrap();
         let before = tracker.clone();
 
-        let result = tracker.checked_record(
-            baseline(u64::MAX, u64::MAX),
-            None,
-            ExtensionInvocationPhase::Failed,
-        );
+        let result = tracker.checked_record(baseline(1, 0), None, ExtensionInvocationPhase::Failed);
 
         assert_eq!(result, Ok(()));
         assert_eq!(tracker, before);

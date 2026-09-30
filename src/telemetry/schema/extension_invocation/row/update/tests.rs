@@ -161,6 +161,51 @@ fn missing_snapshot_row_recovers_existing_private_state_with_incomplete_counts()
 }
 
 #[test]
+fn failed_observation_reconciles_private_state_after_a_lost_snapshot_row() {
+    let mut state = state();
+    let recording = recording_observation(&mut state);
+    let mut store = ExtensionInvocationAggregateStore::new(recording.day());
+    let vendor_session_id = VendorSessionId::new("vendor-session-123".to_owned());
+    let dropped_row = new_row(
+        &mut store,
+        &recording,
+        public("example-debugging"),
+        metric_observation(
+            ExtensionInvocationPhase::Attempted,
+            Some(&vendor_session_id),
+        ),
+    );
+    let selected = store
+        .select(
+            &recording,
+            ExtensionInvocationAgent::Claude,
+            public("example-debugging"),
+        )
+        .unwrap();
+
+    let recovered = ExtensionInvocationMetricsV1::new(
+        &recording,
+        metric_observation(ExtensionInvocationPhase::Failed, None),
+        selected,
+    )
+    .unwrap();
+    let json = serde_json::to_string(&recovered).unwrap();
+
+    assert_eq!(recovered.event_id, dropped_row.event_id);
+    assert_eq!(
+        (recovered.attempted, recovered.completed, recovered.failed),
+        (0, 0, 1)
+    );
+    assert!(!recovered.session_counts_complete);
+    assert_eq!(recovered.identified_sessions, None);
+    assert_eq!(recovered.identified_sessions_completed, None);
+    assert!(matches!(
+        classify_row(&json),
+        RowClassification::Supported(TelemetryRow::ExtensionInvocationMetrics(_))
+    ));
+}
+
+#[test]
 fn first_completed_and_failed_observations_keep_phase_counts_independent() {
     let mut state = state();
     let recording = recording_observation(&mut state);

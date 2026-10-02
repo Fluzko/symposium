@@ -6,11 +6,14 @@ title = "Symposium"
 
 [preprocessor.mermaid]
 command = "mdbook-mermaid"
+renderers = ["html"]
 
 [output]
 
+[output.markdown]
+
 [output.html]
-additional-js = ["mermaid.min.js", "mermaid-init.js"]
+additional-js = ["mermaid.min.js", "mermaid-init.js", "theme/markdown-link.js"]
 additional-css = ["theme/custom.css"]
 fold.enable = true
 fold.level = 0

@@ -30,10 +30,30 @@ jobs:
       - name: Build book
         run: mdbook build
 
+      - name: Publish markdown sources
+        run: |
+          cp -R book/markdown/. book/html/
+          cd book/markdown
+          for page in \
+            crate-authors/supporting-your-crate.md \
+            crate-authors/authoring-a-plugin.md \
+            crate-authors/writing-a-hook-handler.md \
+            reference/plugin-definition.md \
+            reference/skill-definition.md \
+            reference/hook-events.md \
+            reference/depends-on.md \
+            reference/predicates.md \
+            reference/plugin-source.md
+          do
+            printf '<!-- Source: https://symposium.dev/%s -->\n\n' "$page"
+            cat "$page"
+            printf '\n\n'
+          done > ../html/llms-full.txt
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: book
+          path: book/html
 
   deploy:
     needs: build

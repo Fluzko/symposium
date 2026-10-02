@@ -2,6 +2,8 @@
 
 If you maintain a Rust crate, you can extend Symposium with skills, MCP servers, or other extensions that will teach agents the best way to use your crate.
 
+> **Working with an agent?** Point it at [`llms-full.txt`](https://symposium.dev/llms-full.txt), a single Markdown file with the crate author guides and the plugin, skill, and hook references. Any page of this book is also available as Markdown by replacing `.html` with `.md` in its URL.
+
 ## Embed skills in your crate
 
 The recommended approach is to ship skills directly in your crate's source tree. Add a `skills/` directory with `SKILL.md` files, then add a small plugin manifest to our [central recommendations repository](https://github.com/symposium-dev/recommendations). Users will get guidance that matches the exact version of your crate they're using.

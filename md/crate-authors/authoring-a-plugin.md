@@ -2,6 +2,8 @@
 
 Symposium lets you ship skills, hooks, and MCP servers that are automatically loaded when a user's project depends on your crate. This page walks through how to create a plugin and configure each extension type.
 
+> **Working with an agent?** Point it at [`llms-full.txt`](https://symposium.dev/llms-full.txt), a single Markdown file with the crate author guides and the plugin, skill, and hook references. Any page of this book is also available as Markdown by replacing `.html` with `.md` in its URL.
+
 ## Step 1. Create a `SYMPOSIUM.toml` manifest
 
 Every plugin starts with a `SYMPOSIUM.toml` manifest uploaded to the [central recommendations repository][rr]. The manifest declares your plugin's name, which crates it applies to, and what extensions it provides.

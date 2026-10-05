@@ -16,7 +16,7 @@ cargo install symposium
 
 ## Initialization
 
-Once you have installed Symposium, you need to run the [`init` command](./references/cargo-agents-init.md):
+Once you have installed Symposium, you need to run the [`init` command](./reference/cargo-agents-init.md):
 
 ```bash
 cargo agents init
@@ -48,7 +48,7 @@ We recommend **global** registration for maximum convenience.
 
 ### Tweaking other settings
 
-You may wish to browse the [configuration](./references/configuration.md) page to learn about other settings, such as how to disable `auto-sync`.
+You may wish to browse the [configuration](./reference/configuration.md) page to learn about other settings, such as how to disable `auto-sync`.
 
 ## After setup
 

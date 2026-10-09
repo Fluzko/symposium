@@ -62,6 +62,17 @@ Settings merge with precedence (highest first): **Managed → Command line → L
 | `.claude/settings.json` | Single project, committable |
 | `~/.claude/settings.json` | All projects (user) |
 
+`CLAUDE_CONFIG_DIR` moves the user level as a whole: when it is set, Claude Code
+reads `$CLAUDE_CONFIG_DIR/settings.json`, `$CLAUDE_CONFIG_DIR/.claude.json` and
+`$CLAUDE_CONFIG_DIR/skills/`, and ignores `~/.claude/settings.json`,
+`~/.claude.json` and `~/.claude/skills/`. Symposium writes its global hooks,
+user-level MCP servers and plugins there too. Verified against Claude Code
+2.1.284 with the variable set: a hook and an MCP server left in the `~/` files
+were ignored, while symposium's hooks under `$CLAUDE_CONFIG_DIR` fired
+(`hook_started`/`hook_response` for `SessionStart` in
+`claude -p --output-format stream-json --verbose`) and `claude mcp list` showed
+its server.
+
 ### Configuration structure
 
 ```json

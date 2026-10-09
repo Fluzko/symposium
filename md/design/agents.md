@@ -65,7 +65,7 @@ Claude Code hooks live under the `"hooks"` key in settings JSON files. Each even
 
 | Scope | File |
 |-------|------|
-| Global | `~/.claude/settings.json` |
+| Global | `~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json` when set) |
 | Project (shared) | `.claude/settings.json` |
 | Project (personal) | `.claude/settings.local.json` |
 

@@ -615,7 +615,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             );
         }
         agent
-            .register_mcp_servers(mcp_scope, &project_root, sym.home_dir(), &mcp_servers, out)
+            .register_mcp_servers(mcp_scope, &project_root, sym, &mcp_servers, out)
             .context("failed to register MCP servers")?;
 
         let delivered = agent
@@ -745,13 +745,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                 crate::agents::McpScope::Project,
                 crate::agents::McpScope::User,
             ] {
-                let _ = agent.unregister_mcp_servers(
-                    scope,
-                    &project_root,
-                    sym.home_dir(),
-                    &server_names,
-                    out,
-                );
+                let _ = agent.unregister_mcp_servers(scope, &project_root, sym, &server_names, out);
             }
         }
     }
@@ -811,7 +805,7 @@ pub async fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
     for agent_name in &agent_names {
         let agent = Agent::from_config_name(agent_name)?;
         agent.register_hooks(home, sym, out)?;
-        agent.register_mcp_servers(crate::agents::McpScope::User, home, home, &mcp_servers, out)?;
+        agent.register_mcp_servers(crate::agents::McpScope::User, home, sym, &mcp_servers, out)?;
     }
 
     // Unregister hooks for agents no longer configured
@@ -821,7 +815,7 @@ pub async fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
             let _ = agent.unregister_mcp_servers(
                 crate::agents::McpScope::User,
                 home,
-                home,
+                sym,
                 &server_names,
                 out,
             );

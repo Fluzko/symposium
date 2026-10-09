@@ -23,9 +23,7 @@ pub(crate) fn sync_user_plugins(
 /// When set, `CLAUDE_CONFIG_DIR` replaces `~/.claude` and Claude Code ignores
 /// `~/.claude/skills`.
 fn user_skills_dir(sym: &Symposium) -> PathBuf {
-    sym.env_dir("CLAUDE_CONFIG_DIR")
-        .unwrap_or_else(|| sym.home_dir().join(".claude"))
-        .join("skills")
+    crate::agents::claude_config_dir(sym).join("skills")
 }
 
 fn sync_skills_dir_plugins(skills_dir: &Path, plugins: &[CompiledPlugin], debounce: Duration) {

@@ -55,7 +55,7 @@ async fn a_global_plugin_reaches_claude_once_and_other_agents_keep_per_skill_cop
             "--add-agent",
             "claude",
             "--add-agent",
-            "codex",
+            "opencode",
             "--add-agent",
             "kiro",
         ])

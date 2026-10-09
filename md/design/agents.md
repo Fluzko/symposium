@@ -45,13 +45,13 @@ Symposium never writes per-skill directories at user scope.
 |-------|-------------------------------|
 | Antigravity CLI | not yet: per-skill copies in the project |
 | Claude Code | copied to `~/.claude/skills/<plugin>/` (`$CLAUDE_CONFIG_DIR/skills/` when set), loaded as `<plugin>@skills-dir` |
-| Codex CLI | not yet: per-skill copies in the project |
+| Codex CLI | registered as the local marketplace `symposium` and enabled as `<plugin>@symposium` in `~/.codex/config.toml`, copied into `~/.codex/plugins/cache/symposium/<plugin>/<version>/` (both under `$CODEX_HOME` when set) |
 | GitHub Copilot | not yet: per-skill copies in the project |
 | Goose | not yet: per-skill copies in the project |
 | Kiro | no plugin unit: per-skill copies in the project |
 | OpenCode | no plugin unit: per-skill copies in the project |
 
-Symposium writes these files itself and never runs an agent's own plugin command: delivery also runs inside the `SessionStart` hook, where nothing can answer a prompt. See [Claude Code plugin delivery](./agent-details/claude-code.md#plugin-delivery) for what was verified.
+Symposium writes these files itself and never runs an agent's own plugin command: delivery also runs inside the `SessionStart` hook, where nothing can answer a prompt. See [Claude Code plugin delivery](./agent-details/claude-code.md#plugin-delivery) and [Codex CLI plugin delivery](./agent-details/codex-cli.md#plugin-delivery) for what was verified.
 
 ---
 

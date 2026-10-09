@@ -23,9 +23,18 @@ Scans workspace dependencies, installs applicable skills into agent directories,
 
 7. **Reap stale skills** — across every known agent's skills parent directory, remove any subdirectory that contains the `.symposium` marker but wasn't installed this sync. Directories without the marker (user-managed) are left untouched.
 
-   While a registry cannot be read, this step is skipped and a warning names the registry: it offered nothing this time, so everything it installed would look stale.
+   While a registry cannot be read, this step and the plugin removals below are skipped, and a warning names the registry: it offered nothing this time, so everything it installed would look stale.
 
 8. **Register hooks** — ensure symposium's global hook handler and MCP servers are registered for all configured agents. Unregister hooks for agents no longer in the config. Only symposium's own handler is registered (e.g., `cargo-agents hook claude pre-tool-use`) — individual plugin hooks are never written into agent configs. See [Hooks](./hooks.md) for the dispatch model.
+
+## Plugins enabled for every workspace
+
+Between matching skills (step 4) and installing them (step 5), the plugins a `use --global` entry names are compiled for the user, whatever `hook-scope` says.
+
+1. **Select**: `compile::installs_globally` takes the plugins a `[plugins] use` entry without a workspace names, by manifest or package name, that are not workspace members. Their skills are collected again with every `depends-on` treated as satisfied and other predicates evaluated as usual, so the workspace that syncs no longer decides which of their dependency-gated skills install; a skill gated on another predicate, such as a relative `path_exists(...)`, still follows the workspace that synced last. A skill two of them reach goes to the first.
+2. **Compile**: each becomes `~/.symposium/installed/<plugin>/`: `plugin.json` and `.claude-plugin/plugin.json` (`$schema`, `name`, `version` `0.0.0`), the `.symposium` marker and each skill's directory, symlinks followed, under `skills/<skill>/`. The name is normalized to lowercase `[a-z0-9-]`, at most 64 characters, with a hash suffix when two plugins normalize alike. A directory is rewritten in place only when its content differs, one without the marker is never written, and marked directories not compiled this run are removed; while a registry cannot be read they stay and are delivered again.
+3. **Deliver**: before any per-skill copy, each configured agent's `Agent::deliver_user_plugins` reconciles its user-level copy with the compiled set. An agent that takes delivery gets no per-skill copies of those plugins' skills, so the stale-skill cleanup removes copies an earlier sync left; the others keep their per-skill copies. Whether a per-skill copy needs a hash suffix is then decided per destination directory, from the skills every agent writing there copies, so agents that share `.agents/skills/` agree on each name.
+4. **Unregister**: every agent no longer configured is called with an empty set, by `sync` and by `init`, so it loses the plugins symposium installed for it.
 
 ## Marker file
 

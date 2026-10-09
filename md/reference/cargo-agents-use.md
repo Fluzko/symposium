@@ -33,7 +33,7 @@ use = [
 Then it runs a sync, so the plugin's skills install right away rather than
 waiting for the next one. A workspace entry installs them into the project. A
 `--global` entry installs the plugin once for you, as a plugin directory, on
-every agent that supports that (Claude Code today), and per project on the
+every agent that supports that (Claude Code and Codex CLI today), and per project on the
 others; see [`cargo agents sync`](./cargo-agents-sync.md#plugins-enabled-for-every-workspace).
 Outside a Rust workspace, `--global` records the entry and the next sync in a
 workspace installs it.

@@ -283,7 +283,7 @@ This is the evidence for [Scope of an installation](#scope-of-an-installation). 
 | Agent | Result |
 |---|---|
 | Claude Code | `plugin install -s project` |
-| Codex CLI | a project `.codex/config.toml` marketplace entry is ignored, and there is no folder discovery at `.codex/plugins/` or `$CODEX_HOME/plugins/` |
+| Codex CLI | a project `.codex/config.toml` marketplace entry is ignored by 0.147.0; 0.159.3 honors it in a trusted project, but copies into the user-level cache keyed by marketplace name, so repositories using the same name share one copy. There is no folder discovery at `.codex/plugins/` or `$CODEX_HOME/plugins/` |
 | Copilot CLI | a project `.copilot/settings.json` is ignored, a working-directory marketplace manifest is not discovered, and `plugin install` has no scope flag |
 | Gemini CLI | a project `.gemini/extensions/` is ignored |
 | VS Code | `chat.pluginLocations` is machine-scoped and workspace-trust restricted, so it cannot be set per workspace |
@@ -320,11 +320,21 @@ Claude Code gets a copy of the compiled directory in its user skills directory, 
 
 Neither copies into `~/.claude/plugins/cache/`, and with either a plugin written during the `SessionStart` hook loads in the next session or after `/reload-plugins`. At user scope neither form is picked up by the Copilot CLI (1.0.89), and Goose (1.53.0) does not load the skills inside the copied directory.
 
+### How Codex CLI receives a global plugin
+
+Codex CLI gets what its own `codex plugin marketplace add` and `codex plugin add` write, written by Symposium: the staging root registered as the local marketplace `symposium` and the plugin enabled as `<name>@symposium`, both in `~/.codex/config.toml`, and a copy of the compiled directory in `~/.codex/plugins/cache/symposium/<name>/<version>/`, all under `$CODEX_HOME` when it is set. Verified against Codex CLI 0.159.3 by asking the agent (`codex debug prompt-input`, the model request a session sends, `codex plugin list`, and the TUI's `/skills` and `/plugins`):
+
+- A session loads a plugin only from that cache, whatever the marketplace source holds. Codex's own refresh at TUI startup fills a missing cache, but in the background, and copies again only when the version directory differs from the manifest version, while `codex exec` never refreshes. Writing the cache itself is what makes a sync, or a same-version edit, reach the next session of either.
+- Codex loads the highest-sorting directory under `<name>/`, so a leftover version keeps loading stale content, and a temporary directory there would be loaded too. Symposium owns the whole `<name>/` directory and swaps it.
+- A registered local marketplace whose root lacks its manifest makes `codex plugin list` fail, so the entry exists only while the staging root carries `.claude-plugin/marketplace.json`.
+- The compiled directory loads with no warning. With the 1.1.0 `$schema` it is listed as installed, but none of its skills load.
+- A plugin written during the `SessionStart` hook loads in the next session: Codex runs that hook when the first prompt is submitted, after the session's skills are listed.
+
 ## Implementation status
 
 In progress.
 
 - Step 2: plugins enabled with `use --global` are compiled into `~/.symposium/installed/<name>/`, carrying `plugin.json`, `.claude-plugin/plugin.json`, the ownership marker and name disambiguation; no `gemini-extension.json` is emitted, since Gemini CLI support was replaced by Antigravity CLI. Project-scoped compilation is not implemented.
-- Step 3: done for Claude Code ([How Claude Code receives a global plugin](#how-claude-code-receives-a-global-plugin)) under the eligibility rule in [Which plugins install for the user](#which-plugins-install-for-the-user). The other agents keep per-skill delivery until their delivery lands.
+- Step 3: done for Claude Code ([How Claude Code receives a global plugin](#how-claude-code-receives-a-global-plugin)) and Codex CLI ([How Codex CLI receives a global plugin](#how-codex-cli-receives-a-global-plugin)) under the eligibility rule in [Which plugins install for the user](#which-plugins-install-for-the-user). The other agents keep per-skill delivery until their delivery lands.
 
 See [Proposed: Agent Plugins packages](./proposed-reference.md) for the intended authoring reference and [Proposed: How extensions are installed](./proposed-install.md) for the resulting install locations.

@@ -320,11 +320,26 @@ Claude Code gets a copy of the compiled directory in its user skills directory, 
 
 Neither copies into `~/.claude/plugins/cache/`, and with either a plugin written during the `SessionStart` hook loads in the next session or after `/reload-plugins`. At user scope neither form is picked up by the Copilot CLI (1.0.89), and Goose (1.53.0) does not load the skills inside the copied directory.
 
+### How the Copilot CLI receives a global plugin
+
+The Copilot CLI is pointed at the staging root rather than given a copy. Its user settings, `~/.copilot/settings.json` (`$COPILOT_HOME/settings.json` when set), register the root as the directory marketplace `symposium` and enable each plugin from it: the two entries Copilot's own `plugin marketplace add` and `plugin install` write for a directory marketplace, written by Symposium itself. This replaces the copy [Installation](#installation) describes for it. Probed against the Copilot CLI 1.0.79 and 1.0.89 by asking the agent (`copilot plugin list --json`, `copilot skill list --json`, the `/skills` dashboard, and the skills a `-p` session offers its model, captured through a local model endpoint so that no login was needed):
+
+| | 1.0.79 | 1.0.89 |
+|---|---|---|
+| First session after a sync | interactive: Copilot installs a copy and an `installedPlugins` record of its own, then loads it; `-p`: not loaded | loaded in place, interactive and `-p` |
+| Same-version edit | not picked up, unless the marketplace entry sets `autoUpdate` and the session is interactive and trusted | picked up by the next session |
+| Writes Copilot makes | the copy and the record | none |
+| After removal | the copy keeps loading | nothing listed, no error |
+
+Path-sourced plugins of a directory marketplace load in place since 1.0.81, so that is the version the delivery needs. Copilot updates itself by default: an npm install reporting 1.0.79 was running 1.0.89. A plugin written during the `sessionStart` hook loads after `/restart` or in the next session. Copilot reads neither of Claude Code's user-level forms, but it does read Claude Code's project settings and a project's `.claude/skills/`.
+
+A project registration works as well, contrary to the Copilot row in [Only Claude Code can scope a plugin to a project](#only-claude-code-can-scope-a-plugin-to-a-project), which probed `.copilot/settings.json`: the same two entries in the repository's `.github/copilot/settings.local.json` load only in that repository, under a marketplace name other than the user-level one, which wins a clash. It is not implemented.
+
 ## Implementation status
 
 In progress.
 
 - Step 2: plugins enabled with `use --global` are compiled into `~/.symposium/installed/<name>/`, carrying `plugin.json`, `.claude-plugin/plugin.json`, the ownership marker and name disambiguation; no `gemini-extension.json` is emitted, since Gemini CLI support was replaced by Antigravity CLI. Project-scoped compilation is not implemented.
-- Step 3: done for Claude Code ([How Claude Code receives a global plugin](#how-claude-code-receives-a-global-plugin)) under the eligibility rule in [Which plugins install for the user](#which-plugins-install-for-the-user). The other agents keep per-skill delivery until their delivery lands.
+- Step 3: done for Claude Code ([How Claude Code receives a global plugin](#how-claude-code-receives-a-global-plugin)) and the Copilot CLI ([How the Copilot CLI receives a global plugin](#how-the-copilot-cli-receives-a-global-plugin)) under the eligibility rule in [Which plugins install for the user](#which-plugins-install-for-the-user). The other agents keep per-skill delivery until their delivery lands.
 
 See [Proposed: Agent Plugins packages](./proposed-reference.md) for the intended authoring reference and [Proposed: How extensions are installed](./proposed-install.md) for the resulting install locations.

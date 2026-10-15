@@ -46,12 +46,12 @@ Symposium never writes per-skill directories at user scope.
 | Antigravity CLI | not yet: per-skill copies in the project |
 | Claude Code | copied to `~/.claude/skills/<plugin>/` (`$CLAUDE_CONFIG_DIR/skills/` when set), loaded as `<plugin>@skills-dir` |
 | Codex CLI | not yet: per-skill copies in the project |
-| GitHub Copilot | not yet: per-skill copies in the project |
+| GitHub Copilot | registered in `~/.copilot/settings.json` (`$COPILOT_HOME/settings.json` when set): the staging root as the directory marketplace `symposium`, and `enabledPlugins["<plugin>@symposium"]`; loaded in place by the Copilot CLI 1.0.81 and later |
 | Goose | not yet: per-skill copies in the project |
 | Kiro | no plugin unit: per-skill copies in the project |
 | OpenCode | no plugin unit: per-skill copies in the project |
 
-Symposium writes these files itself and never runs an agent's own plugin command: delivery also runs inside the `SessionStart` hook, where nothing can answer a prompt. See [Claude Code plugin delivery](./agent-details/claude-code.md#plugin-delivery) for what was verified.
+Symposium writes these files itself and never runs an agent's own plugin command: delivery also runs inside the `SessionStart` hook, where nothing can answer a prompt. See the plugin delivery notes for [Claude Code](./agent-details/claude-code.md#plugin-delivery) and [GitHub Copilot](./agent-details/copilot.md#plugin-delivery) for what was verified.
 
 ---
 
@@ -131,7 +131,7 @@ Copilot hooks are defined in JSON files with a `version` field. Hook entries use
 
 | Scope | File |
 |-------|------|
-| Global | `~/.copilot/config.json` (under `hooks` key) |
+| Global | `~/.copilot/settings.json` (under `hooks` key) |
 | Project | `.github/hooks/*.json` |
 
 Example hook registration:

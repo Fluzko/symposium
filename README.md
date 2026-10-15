@@ -136,7 +136,7 @@ Every agent receives skill installation. Hook registration is available for a su
 
 ## For crate authors
 
-If you maintain a Rust crate, you can ship skills, hooks, and MCP servers so AI-assisted users of your library get guidance matched to the exact version they depend on. Add a `skills/` directory to your crate (and a `Symposium.toml` for hooks and MCP servers): users who depend on it enable it with one confirmation, and an optional entry in the [recommendations repository][rr] makes it load without asking.
+If you maintain a Rust crate, you can ship skills, hooks, and MCP servers so AI-assisted users of your library get guidance matched to the exact version they depend on. Add a `skills/` directory to your crate (and a `Symposium.toml` for hooks and MCP servers), and users who depend on it enable it with one confirmation.
 
 See [Supporting your crate](https://symposium.dev/crate-authors/supporting-your-crate.html) and [Authoring a plugin](https://symposium.dev/crate-authors/authoring-a-plugin.html).
 

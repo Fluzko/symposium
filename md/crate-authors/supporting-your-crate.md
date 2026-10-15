@@ -4,7 +4,7 @@ If you maintain a Rust crate, you can extend Symposium with skills, MCP servers,
 
 ## Embed skills in your crate
 
-The recommended approach is to ship skills directly in your crate's source tree. Add a `skills/` directory with `SKILL.md` files and publish your crate. Users who depend on it directly are asked whether to enable its plugin when they run `cargo agents sync`, and then get guidance that matches the exact version of your crate they're using. An optional entry in our [central recommendations repository](https://github.com/symposium-dev/recommendations) makes it load without asking.
+The recommended approach is to ship skills directly in your crate's source tree. Add a `skills/` directory with `SKILL.md` files and publish your crate. Users who depend on it directly are asked whether to enable its plugin when they run `cargo agents sync`, and then get guidance that matches the exact version of your crate they're using.
 
 See [Authoring a plugin](./authoring-a-plugin.md) for the full walkthrough.
 
@@ -65,6 +65,6 @@ Beyond skills, there are three more extension types you can publish through a pl
 
 - **Hooks**: checks and transformations that run when the AI performs certain actions, like writing code or running commands.
 - **MCP servers**: tools and resources exposed to agents via the Model Context Protocol.
-- **Subcommands**: commands that users and agents run as `cargo agents <name>`.
+- **Subcommands**: your crate's own command-line tool, which agents run as `cargo agents my-crate <command>`.
 
 See [Authoring a plugin](./authoring-a-plugin.md) for how to set one up.

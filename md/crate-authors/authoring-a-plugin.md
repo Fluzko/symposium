@@ -7,7 +7,7 @@ Symposium lets you ship skills, hooks, and MCP servers to the AI agents of peopl
 A plugin can live in one of two places:
 
 - **In your crate.** If you maintain the crate, ship the plugin in its source tree: a `skills/` directory is enough, and a `Symposium.toml` adds hooks, MCP servers, and more. See [Embedding skills in your crate](#embedding-skills-in-your-crate-recommended).
-- **In the [central recommendations repository][rr].** This is the place for plugins for crates you don't maintain, and for plugins that should load without asking the user first.
+- **In the [central recommendations repository][rr].** This is the place for plugins for crates you don't maintain.
 
 A recommendations entry is a `Symposium.toml` manifest declaring your plugin's name, which crates it applies to, and what extensions it provides:
 
@@ -68,21 +68,6 @@ my-crate/
 That is all Symposium needs. When a project depends directly on `my-crate`, an interactive `cargo agents sync` offers to enable its plugin, and [`cargo agents status`](../reference/cargo-agents-status.md) lists it as a candidate until the user decides. `cargo agents use my-crate` enables it directly, even for a project that doesn't depend on the crate.
 
 Symposium reads your plugin from the published package, so make sure `skills/` (and `Symposium.toml`, if you have one) are part of it: check with `cargo package --list` (add `--allow-dirty` if you have uncommitted changes), and add them to `include` if your `Cargo.toml` uses that field.
-
-##### Optional: load without asking
-
-To have the plugin load for every user who depends on your crate, without the consent step, add an entry to the recommendations repository that references your crate with a chained plugin:
-
-```toml
-# `my-crate/Symposium.toml` on the symposium-dev/recommendations repository
-name = "my-crate"
-depends-on = ["my-crate"]
-
-[[plugins]]
-source.cargo = "my-crate"
-```
-
-When `my-crate` is a dependency, this loads its plugin: Symposium fetches the crate source (from the local cargo cache or crates.io) and discovers skills in the `skills/` directory.
 
 ##### Prefer a directory other than `skills/`?
 
@@ -247,7 +232,21 @@ See the [plugin definition reference](../reference/plugin-definition.md#mcp_serv
 
 ### Subcommands
 
-A plugin can also add commands that users and agents run as `cargo agents <name>`, backed by an installation like a hook. See the [plugin definition reference](../reference/plugin-definition.md) for the `[subcommand.<name>]` syntax.
+A subcommand lets agents run your crate's own command-line tool through `cargo agents`, so they can find crate-aware tooling before they work on the code. By convention a crate adds one subcommand named after itself, and its tool handles everything typed after that name: `cargo agents my-crate --help` prints your tool's help, and `cargo agents my-crate check` runs its `check` command.
+
+```toml
+[[installations]]
+name = "my-crate-cli"
+source = "cargo"
+crate = "my-crate-cli"
+executable = "my-crate-cli"
+
+[subcommand.my-crate]
+description = "Check and inspect the widgets in this workspace"
+command = "my-crate-cli"
+```
+
+`cargo agents --help` lists the subcommand under "Commands for agents" with its `description`, and on agents that run hooks, Symposium suggests running `cargo agents --help` at the start of each session in a project that has one. Your tool's output and exit code are passed through. See the [plugin definition reference](../reference/plugin-definition.md) for the other `[subcommand.<name>]` fields.
 
 ## Step 3. Validate your plugin
 
@@ -286,7 +285,7 @@ name = "my-crate-hooks"
 executable = "/path/to/my-crate-hooks/target/debug/my-crate-hooks"
 ```
 
-Then, from the scratch project, send Symposium the payload an agent would send, using a tool call your hook reacts to (this one runs `ls`). This runs the same dispatch the agent triggers, so it prints what the agent would receive:
+Then, from the scratch project, run a subcommand as an agent would, for example `cargo agents my-crate --help`. To try a hook, send Symposium the payload an agent would send, using a tool call your hook reacts to (this one runs `ls`). This runs the same dispatch the agent triggers, so it prints what the agent would receive:
 
 ```bash
 echo '{"session_id":"test","cwd":"'"$PWD"'","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}' \
@@ -295,7 +294,7 @@ echo '{"session_id":"test","cwd":"'"$PWD"'","hook_event_name":"PreToolUse","tool
 
 Each agent has its own payload format; see [Agent details](../design/agent-details/index.html) for the others. If nothing happens, rerun the command with `--verbose` to see which plugins and hooks Symposium considered, and check the logs in `~/.symposium/logs/`.
 
-When you are done, remove the test enablement with `cargo agents use my-crate --remove`. Before you publish, restore the `source = "cargo"` installation and publish the hook crate first: your users' agents install it from crates.io.
+When you are done, remove the test enablement with `cargo agents use my-crate --remove`. Before you publish, restore the `source = "cargo"` installation and publish the hook or subcommand crate first: your users' agents install it from crates.io.
 
 A path dependency reads your source tree, so it doesn't catch files missing from the published package; check those with `cargo package --list` (see step 2 of [Embedding skills in your crate](#embedding-skills-in-your-crate-recommended)).
 

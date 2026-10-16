@@ -320,7 +320,7 @@ Codex CLI hooks live in `hooks.json` files. The structure is similar to Claude C
 
 | Scope | File |
 |-------|------|
-| Global | `~/.codex/hooks.json` |
+| Global | `~/.codex/hooks.json` (`$CODEX_HOME/hooks.json` when set) |
 | Project | `.codex/hooks.json` |
 
 Example hook registration:

@@ -23,6 +23,14 @@ Codex runs a non-managed hook only after the user trusts that exact definition. 
 
 Both are **additive** — all matching hooks from all files run. Project hooks follow the untrusted-project trust model.
 
+`CODEX_HOME` moves the user level as a whole: when it is set, Codex reads
+`$CODEX_HOME/hooks.json` and `$CODEX_HOME/config.toml`, and ignores
+`~/.codex/hooks.json` and `~/.codex/config.toml`. Symposium writes its global
+hooks, MCP servers and plugins there too. Verified against Codex CLI 0.159.3
+with the variable set: the TUI's hook review listed symposium's four hooks with
+`$CODEX_HOME/hooks.json` as their source, and `codex mcp list` showed its
+server.
+
 ### Configuration structure
 
 ```json
@@ -290,8 +298,6 @@ TUI's `/skills` and `/plugins`) after `cargo agents sync`:
 
 Known limitations:
 
-- `CODEX_HOME` relocates plugins only: symposium's hooks and MCP server are
-  still registered under `~/.codex/`.
 - `.agents/skills/` is shared with Antigravity, Copilot, OpenCode and Goose. A
   per-skill copy one of them still needs stays in the project, and Codex then
   lists that skill twice, as `<skill>` and as `<plugin>:<skill>`.

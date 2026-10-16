@@ -43,15 +43,17 @@ Symposium never writes per-skill directories at user scope.
 
 | Agent | Delivery of a compiled plugin |
 |-------|-------------------------------|
-| Antigravity CLI | not yet: per-skill copies in the project |
+| Antigravity CLI | copied to `~/.gemini/config/plugins/<plugin>/`, loaded as the plugin `<plugin>`, its skills as `<plugin>:<skill>` |
 | Claude Code | copied to `~/.claude/skills/<plugin>/` (`$CLAUDE_CONFIG_DIR/skills/` when set), loaded as `<plugin>@skills-dir` |
 | Codex CLI | not yet: per-skill copies in the project |
 | GitHub Copilot | not yet: per-skill copies in the project |
-| Goose | not yet: per-skill copies in the project |
-| Kiro | no plugin unit: per-skill copies in the project |
+| Goose | copied to `~/.agents/plugins/<plugin>/` (`$GOOSE_PATH_ROOT/.agents/plugins/` when set), its skills under their own names |
+| Kiro | per-skill copies in the project: its powers install only through Kiro's own commands (not probed) |
 | OpenCode | no plugin unit: per-skill copies in the project |
 
-Symposium writes these files itself and never runs an agent's own plugin command: delivery also runs inside the `SessionStart` hook, where nothing can answer a prompt. See [Claude Code plugin delivery](./agent-details/claude-code.md#plugin-delivery) for what was verified.
+Symposium writes these files itself and never runs an agent's own plugin command: delivery also runs inside the `SessionStart` hook, where nothing can answer a prompt. See [Claude Code](./agent-details/claude-code.md#plugin-delivery), [Antigravity CLI](./agent-details/antigravity-cli.md#plugin-delivery) and [Goose](./agent-details/goose.md#plugin-delivery) plugin delivery for what was verified.
+
+An agent that took delivery stops writing per-skill copies of those skills, but `.agents/skills/` is shared by Antigravity, Codex, Copilot, Goose and OpenCode, so a copy stays while any configured agent among them still receives per-skill copies. Antigravity then lists that skill twice, once from the copy and once from the plugin, and Goose shows the copy instead of the plugin's skill.
 
 ---
 
@@ -393,9 +395,9 @@ OpenCode's plugin system supports these events, but Symposium does not currently
 
 ### Hook registration
 
-**Goose does not implement lifecycle hooks.** It uses MCP extensions for extensibility. `symposium` cannot register hooks for Goose.
+**Symposium registers no hooks for Goose.** Goose has lifecycle hooks (a `hooks/hooks.json`, which a plugin can carry), but symposium does not use them yet.
 
-Goose is supported as a **skills-only** agent — `cargo agents sync` will install skill files in the vendor-neutral `.agents/skills/` path.
+`cargo agents sync` installs skill files in the vendor-neutral `.agents/skills/` path, and plugins enabled with `use --global` as plugin directories in `~/.agents/plugins/` (see [Extension locations](#extension-locations)).
 
 ---
 

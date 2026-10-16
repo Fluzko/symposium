@@ -34,15 +34,15 @@ A plugin you enabled with [`cargo agents use --global`](./cargo-agents-use.md) i
 
 | Agent | Where the plugin goes |
 |-------|-----------------------|
-| Antigravity CLI | its skills, per project, as above |
+| Antigravity CLI | `~/.gemini/config/plugins/<plugin>/`, loaded as the plugin `<plugin>` in every project |
 | Claude Code | `~/.claude/skills/<plugin>/` (or `$CLAUDE_CONFIG_DIR/skills/<plugin>/`), loaded as the plugin `<plugin>` in every project |
 | Codex CLI | its skills, per project, as above |
 | GitHub Copilot | its skills, per project, as above |
-| Goose | its skills, per project, as above |
+| Goose | `~/.agents/plugins/<plugin>/` (or `$GOOSE_PATH_ROOT/.agents/plugins/<plugin>/`), loaded in every project |
 | Kiro | its skills, per project, as above |
 | OpenCode | its skills, per project, as above |
 
-An agent that received the plugin gets no per-project copy of its skills, and copies an earlier sync left are cleaned up. Agents load plugins when a session starts, so a plugin installed by the automatic sync at session start appears in the next session (in Claude Code, `/reload-plugins` loads it right away).
+An agent that received the plugin gets no per-project copy of its skills, and copies an earlier sync left are cleaned up, unless another configured agent reads the same `.agents/skills/` directory and still receives per-project copies. Most agents load plugins when a session starts, so a plugin installed by the automatic sync at session start appears in the next session (in Claude Code `/reload-plugins` loads it right away, in Antigravity CLI `/skills reload`); Goose picks it up with the next message.
 
 The plugin's skills are still selected in the workspace being synced, so a skill that does not apply there is left out until a workspace where it applies syncs. Dropping the `--global` entry, or removing the agent with `cargo agents init --remove-agent`, removes what symposium installed.
 

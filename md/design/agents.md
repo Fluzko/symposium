@@ -14,14 +14,14 @@
 | `opencode` | OpenCode |
 | `goose` | Goose |
 
-The agent name is stored in `[agent] name` in either the user or project config.
+The agent name is stored in an `[[agent]]` entry's `name` in the user config.
 
 ## Agent responsibilities
 
 For each agent, `cargo agents` needs to know how to:
 
 1. **Register hooks** — write the hook configuration so the agent calls `cargo-agents hook` on the right events.
-2. **Install extensions**: place skills where the agent loads them, as per-skill directories in the project or as a compiled plugin directory for the user.
+2. **Install extensions**: place skills where the agent loads them, as per-skill directories in the project or as a compiled plugin directory for the user or the project.
 
 Hooks and MCP servers follow `hook-scope`. Skills follow the scope of whatever enabled them (see [`sync`](./sync-agent-flow.md)).
 
@@ -29,12 +29,12 @@ Hooks and MCP servers follow `hook-scope`. Skills follow the scope of whatever e
 
 Skills reach an agent in one of two units.
 
-**Per-skill directories in the project.** Everything that applies to the workspace (registry plugins active by their own gate, workspace members, dependencies, workspace-scoped `use` entries) installs one directory per skill, preferring the vendor-neutral path:
+**Per-skill directories in the project.** Everything that applies to the workspace (registry plugins active by their own gate, workspace members, dependencies, workspace-scoped `use` entries) installs one directory per skill, preferring the vendor-neutral path, on every agent that cannot take it as a project plugin:
 
 | Path | Agents |
 |------|--------|
 | `.agents/skills/<skill-name>/SKILL.md` | Antigravity, Copilot, Codex, OpenCode, Goose |
-| `.claude/skills/<skill-name>/SKILL.md` | Claude Code (does not read `.agents/skills/`) |
+| `.claude/skills/<skill-name>/SKILL.md` | Claude Code (does not read `.agents/skills/`), only for a skill no compiled plugin carries |
 | `.kiro/skills/<skill-name>/SKILL.md` | Kiro |
 
 Symposium never writes per-skill directories at user scope.
@@ -50,6 +50,8 @@ Symposium never writes per-skill directories at user scope.
 | Goose | not yet: per-skill copies in the project |
 | Kiro | no plugin unit: per-skill copies in the project |
 | OpenCode | no plugin unit: per-skill copies in the project |
+
+**Compiled plugin directories for the project.** Every other plugin that applies to the workspace is compiled the same way into the project staging root, `<project>/.symposium/plugins/<plugin>/`, under one `.gitignore` containing `*` at `<project>/.symposium/` (written only when absent). An agent that can scope a plugin to a project receives it through `Agent::sync_project_plugins` and then gets no per-skill copies of that plugin's skills. Only Claude Code does: each directory is copied to `<project>/.claude/skills/<plugin>/`, with a `.gitignore` containing `*` added inside, and loads there as `<plugin>@skills-dir` once the user trusts the folder. Every other agent keeps the per-skill directories above for these plugins.
 
 Symposium writes these files itself and never runs an agent's own plugin command: delivery also runs inside the `SessionStart` hook, where nothing can answer a prompt. See [Claude Code plugin delivery](./agent-details/claude-code.md#plugin-delivery) for what was verified.
 

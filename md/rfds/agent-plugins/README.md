@@ -300,7 +300,7 @@ Gemini CLI needs no configuration write at all: a package present at `~/.gemini/
 
 ### Which plugins install for the user
 
-A plugin installs for the user when a `[plugins] use` entry without a workspace names it, by manifest name or by package name, and it is not a workspace member, whatever `hook-scope` says: `hook-scope` decides only where Symposium registers its own hook and MCP servers. No predicate analysis is done. Everything else (registry plugins active by their own gate, workspace members, dependencies, workspace-scoped `use` entries) keeps the per-skill path.
+A plugin installs for the user when a `[plugins] use` entry without a workspace names it, by manifest name or by package name, and it is not a workspace member, whatever `hook-scope` says: `hook-scope` decides only where Symposium registers its own hook and MCP servers. No predicate analysis is done. Everything else (registry plugins active by their own gate, workspace members, dependencies, workspace-scoped `use` entries) installs for the project: Claude Code receives it as a project plugin ([How Claude Code receives a project plugin](#how-claude-code-receives-a-project-plugin)), and every other agent keeps the per-skill path.
 
 Predicates are still evaluated in the workspace being synced, so what a global plugin carries reflects the workspace that synced last, and a plugin that does not apply in that workspace leaves user scope until a workspace where it applies syncs. The plugin is compiled from the skills that survive the usual deduplication, the first plugin to reach a skill keeping it.
 
@@ -320,11 +320,28 @@ Claude Code gets a copy of the compiled directory in its user skills directory, 
 
 Neither copies into `~/.claude/plugins/cache/`, and with either a plugin written during the `SessionStart` hook loads in the next session or after `/reload-plugins`. At user scope neither form is picked up by the Copilot CLI (1.0.89), and Goose (1.53.0) does not load the skills inside the copied directory.
 
+### How Claude Code receives a project plugin
+
+A plugin that applies to the project only is compiled into the project staging root, `<project>/.symposium/plugins/<name>/`, under one `.symposium/.gitignore` containing `*`. Claude Code gets a copy in `<project>/.claude/skills/<name>/`, with a `.gitignore` containing `*` inside since that directory is not Symposium's own, and loads it as a project-scoped `<name>@skills-dir`. No settings are written. Tried against Claude Code 2.1.284 in the same way as the global form:
+
+| | Result |
+|---|---|
+| Untrusted folder | not loaded (`claude plugin list` shows `(suppressed)@skills-dir`), while plain project skills load; in the TUI session that accepts the trust prompt, loaded after `/reload-plugins` |
+| Another repository, same profile | not visible there |
+| Two repositories, same plugin name, different content, open together | each loads its own |
+| Same-version edit | picked up by the next session |
+| Removal | nothing listed, no error |
+| Written during the `SessionStart` hook | next session, or `/reload-plugins` |
+| Session started in a subdirectory of the project | not loaded: Claude Code reads skills-directory plugins only from its working directory, whereas it finds plain skills, and so the per-skill copies, in parent directories |
+
+A user-level plugin of the same name shadows the project one. The Copilot CLI (1.0.89) and Goose (1.54.0) read the skills inside `<project>/.claude/skills/<name>/skills/` as plain project skills, as they read the per-skill copies before; configured in the same project, each lists every skill once, from its own `.agents/skills/` copy.
+
 ## Implementation status
 
 In progress.
 
-- Step 2: plugins enabled with `use --global` are compiled into `~/.symposium/installed/<name>/`, carrying `plugin.json`, `.claude-plugin/plugin.json`, the ownership marker and name disambiguation; no `gemini-extension.json` is emitted, since Gemini CLI support was replaced by Antigravity CLI. Project-scoped compilation is not implemented.
+- Step 2: plugins enabled with `use --global` are compiled into `~/.symposium/installed/<name>/`, carrying `plugin.json`, `.claude-plugin/plugin.json`, the ownership marker and name disambiguation; no `gemini-extension.json` is emitted, since Gemini CLI support was replaced by Antigravity CLI. The plugins that apply to the project only are compiled the same way into `<project>/.symposium/plugins/<name>/`.
 - Step 3: done for Claude Code ([How Claude Code receives a global plugin](#how-claude-code-receives-a-global-plugin)) under the eligibility rule in [Which plugins install for the user](#which-plugins-install-for-the-user). The other agents keep per-skill delivery until their delivery lands.
+- Step 4: done for Claude Code ([How Claude Code receives a project plugin](#how-claude-code-receives-a-project-plugin)), whose per-skill copies are removed by the next sync. The other agents keep per-skill delivery for project plugins.
 
 See [Proposed: Agent Plugins packages](./proposed-reference.md) for the intended authoring reference and [Proposed: How extensions are installed](./proposed-install.md) for the resulting install locations.

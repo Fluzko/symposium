@@ -15,7 +15,7 @@ Scans workspace dependencies, installs applicable skills into agent directories,
 4. **Match skills to dependencies** — for each plugin, parse `SKILL.md` YAML frontmatter, reject malformed or non-string metadata, warn about skipped invalid skills, then evaluate skill group dependency predicates and individual skill `depends-on` frontmatter against the workspace dependencies.
 
 5. **Install skills per agent** — for each configured agent:
-   - Copy applicable `SKILL.md` files into the agent's expected skill directory.
+   - Copy applicable `SKILL.md` files into the agent's expected skill directory, except the skills the agent received inside a compiled plugin (see below).
    - Drop a `.symposium` marker file into each installed skill directory so future syncs (and other tools) can recognize it as symposium-managed.
    - For every skill directory symposium creates along the way (the skill directory itself or its `skills/` parent), write a `.gitignore` containing a single `*` so symposium-managed files stay out of version control.
 
@@ -36,13 +36,24 @@ Between matching skills (step 4) and installing them (step 5), the plugins a `us
 
 The selection is user-level state, so every workspace compiles the same plugins, but their content is resolved in the workspace being synced: a plugin or skill that does not apply there is removed from user scope by that sync, and comes back when a workspace where it applies syncs.
 
+## Plugins for this project
+
+Every other applicable plugin (registry plugins active by their own gate, workspace members, dependencies, workspace-scoped `use` entries) is compiled for the project in the same pass, by the same code.
+
+1. **Split**: `compile::plugins_by_scope` puts each plugin that kept a skill after dedup in exactly one of two sets, the user set above or the project set.
+2. **Compile**: `compile::compile_project` writes the project set into the staging root `<project>/.symposium/plugins/`, with the same layout, names, index and reaping as the user set. It first makes sure `<project>/.symposium/.gitignore` exists (containing `*`, written only when absent); when that fails, nothing is compiled for the project and every agent gets per-skill copies.
+3. **Deliver**: after the user-level delivery, each configured agent's `Agent::sync_project_plugins` reconciles its project installation with that set. Claude Code copies each directory into `<project>/.claude/skills/<plugin>/`, adds a `.gitignore` containing `*` inside, and removes the marked plugin directories there that are not in the set. It reports that it took delivery, so the per-skill loop skips those skills for Claude Code and the stale-skill cleanup removes the per-skill copies an earlier sync left. Every other agent reports no delivery and keeps its per-skill copies.
+4. **Unregister**: every agent that is no longer configured is called with an empty set, so a removed agent loses its project plugins on the project's next sync.
+
 ## Marker file
 
-Each skill directory symposium installs contains an empty `.symposium` file. Cleanup walks every agent's skills parent directory (`.claude/skills/`, `.agents/skills/`, `.kiro/skills/`) and reaps any subdirectory whose marker is present but which wasn't installed this sync. This lets symposium reclaim stale skills (including those left behind by agents removed from the config) without touching user-managed skills, which are identified by the absence of the marker.
+Each skill directory symposium installs contains an empty `.symposium` file. Cleanup walks every agent's skills parent directory (`.claude/skills/`, `.agents/skills/`, `.kiro/skills/`) and reaps any subdirectory whose marker is present but which wasn't installed this sync. This lets symposium reclaim stale skills (including those left behind by agents removed from the config) without touching user-managed skills, which are identified by the absence of the marker. Compiled plugin directories there carry the marker too, and are reconciled by their agent's delivery instead of this walk.
+
+Only a `.symposium` file is a marker. The project staging root makes `<project>/.symposium/` a directory, which must not mark the project itself as symposium's.
 
 ## Gitignore
 
-Each skill directory symposium creates (and its `skills/` parent if new) receives a `.gitignore` containing just `*`. Pre-existing directories are left alone. The wildcard also hides the marker file and the gitignore itself, so `git status` stays clean.
+Each skill directory symposium creates (and its `skills/` parent if new) receives a `.gitignore` containing just `*`. Pre-existing directories are left alone. The wildcard also hides the marker file and the gitignore itself, so `git status` stays clean. A project plugin directory in `.claude/skills/` gets the same file, and one `.gitignore` at `<project>/.symposium/` covers the whole staging root.
 
 ## Auto-sync
 

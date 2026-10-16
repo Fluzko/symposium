@@ -22,6 +22,8 @@ const MARKETPLACE_FILE: &str = "marketplace.json";
 const MARKETPLACE_NAME: &str = "symposium";
 const SKILLS_DIR: &str = "skills";
 const MAX_NAME_LEN: usize = 64;
+const PROJECT_DIR: &str = ".symposium";
+const PROJECT_PLUGINS_SUBDIR: &str = "plugins";
 
 fn installs_globally(config: &PluginsConfig, plugin: &Plugin) -> bool {
     !plugin.workspace_member
@@ -34,33 +36,38 @@ pub(crate) fn is_plugin_dir(dir: &Path) -> bool {
     dir.join(CLAUDE_MANIFEST_DIR).join(MANIFEST_FILE).is_file()
 }
 
-pub(crate) struct GlobalPlugin<'a> {
+pub(crate) fn project_plugins_root(project_root: &Path) -> PathBuf {
+    project_root.join(PROJECT_DIR).join(PROJECT_PLUGINS_SUBDIR)
+}
+
+pub(crate) struct PluginSkills<'a> {
     name: &'a str,
     skills: Vec<&'a SkillWithGroupContext>,
 }
 
-pub(crate) fn global_plugins<'a>(
+pub(crate) fn plugins_by_scope<'a>(
     config: &PluginsConfig,
     active: &'a [Plugin],
     skills: &[&'a SkillWithGroupContext],
-) -> Vec<GlobalPlugin<'a>> {
-    let global: Vec<bool> = active
-        .iter()
-        .map(|plugin| installs_globally(config, plugin))
-        .collect();
+) -> (Vec<PluginSkills<'a>>, Vec<PluginSkills<'a>>) {
     let mut grouped: BTreeMap<usize, Vec<&SkillWithGroupContext>> = BTreeMap::new();
     for skill in skills {
-        if global[skill.plugin_index] {
-            grouped.entry(skill.plugin_index).or_default().push(skill);
-        }
+        grouped.entry(skill.plugin_index).or_default().push(skill);
     }
-    grouped
-        .into_iter()
-        .map(|(index, skills)| GlobalPlugin {
-            name: &active[index].manifest.name,
+    let (mut global, mut project) = (Vec::new(), Vec::new());
+    for (index, skills) in grouped {
+        let plugin = &active[index];
+        let scope = if installs_globally(config, plugin) {
+            &mut global
+        } else {
+            &mut project
+        };
+        scope.push(PluginSkills {
+            name: &plugin.manifest.name,
             skills,
-        })
-        .collect()
+        });
+    }
+    (global, project)
 }
 
 #[derive(Default)]
@@ -69,7 +76,22 @@ pub(crate) struct Compiled {
     pub skill_origins: BTreeSet<String>,
 }
 
-pub(crate) fn compile(root: &Path, plugins: &[GlobalPlugin], debounce: Duration) -> Compiled {
+pub(crate) fn compile_project(
+    project_root: &Path,
+    plugins: &[PluginSkills],
+    debounce: Duration,
+) -> Compiled {
+    let dir = project_root.join(PROJECT_DIR);
+    if !plugins.is_empty()
+        && let Err(e) = sync::ignore_in_git(&dir)
+    {
+        warn(format!("skipping project plugins: {e:#}"));
+        return Compiled::default();
+    }
+    compile(&project_plugins_root(project_root), plugins, debounce)
+}
+
+pub(crate) fn compile(root: &Path, plugins: &[PluginSkills], debounce: Duration) -> Compiled {
     let mut compiled = Compiled::default();
     for (plugin, name) in plugins.iter().zip(plugin_dir_names(root, plugins)) {
         let Some(name) = name else {
@@ -124,7 +146,7 @@ fn normalize_name(name: &str) -> Option<String> {
     (!out.is_empty()).then(|| out.to_string())
 }
 
-fn plugin_dir_names(root: &Path, plugins: &[GlobalPlugin]) -> Vec<Option<String>> {
+fn plugin_dir_names(root: &Path, plugins: &[PluginSkills]) -> Vec<Option<String>> {
     let names: Vec<Option<String>> = plugins.iter().map(|p| normalize_name(p.name)).collect();
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for name in names.iter().flatten() {
@@ -156,7 +178,7 @@ fn suffixed(name: &str, hash: &str) -> String {
     format!("{}-{hash}", base.trim_end_matches('-'))
 }
 
-fn skill_dirs<'a>(plugin: &GlobalPlugin<'a>) -> Vec<(String, &'a SkillWithGroupContext)> {
+fn skill_dirs<'a>(plugin: &PluginSkills<'a>) -> Vec<(String, &'a SkillWithGroupContext)> {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for skill in &plugin.skills {
         *counts.entry(skill.skill.name()).or_default() += 1;

@@ -20,6 +20,23 @@ pub(crate) fn sync_user_plugins(
     Ok(true)
 }
 
+pub(crate) fn sync_project_plugins(
+    sym: &Symposium,
+    project_root: &Path,
+    _root: &Path,
+    plugins: &[CompiledPlugin],
+    _out: &Output,
+) -> Result<bool> {
+    let debounce = Duration::from_secs(sym.config.sync_debounce_secs);
+    let skills_dir = project_root.join(".claude").join("skills");
+    for dir in sync_skills_dir_plugins(&skills_dir, plugins, debounce) {
+        if let Err(e) = crate::sync::ignore_in_git(&dir) {
+            warn(format!("{e:#}"));
+        }
+    }
+    Ok(true)
+}
+
 /// When set, `CLAUDE_CONFIG_DIR` replaces `~/.claude` and Claude Code ignores
 /// `~/.claude/skills`.
 fn user_skills_dir(sym: &Symposium) -> PathBuf {
@@ -28,7 +45,11 @@ fn user_skills_dir(sym: &Symposium) -> PathBuf {
         .join("skills")
 }
 
-fn sync_skills_dir_plugins(skills_dir: &Path, plugins: &[CompiledPlugin], debounce: Duration) {
+fn sync_skills_dir_plugins(
+    skills_dir: &Path,
+    plugins: &[CompiledPlugin],
+    debounce: Duration,
+) -> BTreeSet<PathBuf> {
     let mut installed = BTreeSet::new();
     for plugin in plugins {
         let Some(dest) = destination(skills_dir, &plugin.name) else {
@@ -63,6 +84,7 @@ fn sync_skills_dir_plugins(skills_dir: &Path, plugins: &[CompiledPlugin], deboun
     crate::sync::reap_unlisted(skills_dir, |dir| {
         installed.contains(dir) || !crate::compile::is_plugin_dir(dir)
     });
+    installed
 }
 
 fn destination(skills_dir: &Path, name: &str) -> Option<PathBuf> {

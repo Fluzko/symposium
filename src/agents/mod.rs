@@ -388,6 +388,31 @@ impl Agent {
         }
     }
 
+    pub(crate) fn sync_project_plugins(
+        &self,
+        sym: &Symposium,
+        project_root: &Path,
+        root: &Path,
+        plugins: &[CompiledPlugin],
+        out: &Output,
+    ) -> Result<bool> {
+        match self {
+            Agent::Antigravity => Ok(false),
+            Agent::Claude => plugin_registration::claude::sync_project_plugins(
+                sym,
+                project_root,
+                root,
+                plugins,
+                out,
+            ),
+            Agent::Codex => Ok(false),
+            Agent::Copilot => Ok(false),
+            Agent::Goose => Ok(false),
+            Agent::Kiro => Ok(false),
+            Agent::OpenCode => Ok(false),
+        }
+    }
+
     /// Remove hooks from the project-level agent config.
     pub fn unregister_project_hooks(&self, project_root: &Path, _sym: &Symposium, out: &Output) {
         match self {

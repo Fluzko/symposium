@@ -387,7 +387,7 @@ fn find_skill_files_in(
     ancestors: &mut crate::dir_walk::Ancestors,
     out: &mut Vec<PathBuf>,
 ) {
-    if dir.join(crate::sync::MARKER_FILE).exists() {
+    if crate::sync::has_symposium_marker(dir) {
         return;
     }
     let entries = match std::fs::read_dir(dir) {

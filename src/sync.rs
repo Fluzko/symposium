@@ -76,7 +76,16 @@ fn mark_generated_skill_directory(dir: &Path) -> Result<()> {
 /// skill directory? Returns `false` for user-authored skills and for any
 /// directory symposium did not create.
 pub(crate) fn has_symposium_marker(dir: &Path) -> bool {
-    dir.join(MARKER_FILE).exists()
+    dir.join(MARKER_FILE).is_file()
+}
+
+pub(crate) fn ignore_in_git(dir: &Path) -> Result<()> {
+    let path = dir.join(".gitignore");
+    if path.is_file() {
+        return Ok(());
+    }
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::write(&path, "*\n").with_context(|| format!("write {}", path.display()))
 }
 
 /// One entry of a source tree as the installer sees it: a path relative to the
@@ -573,8 +582,10 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     let mut installed_dirs: BTreeSet<PathBuf> = BTreeSet::new();
 
     let plugins_root = sym.config_dir().join(INSTALLED_PLUGINS_SUBDIR);
-    let global = compile::global_plugins(&sym.config.plugins, &active, &to_install);
+    let project_plugins_root = compile::project_plugins_root(&project_root);
+    let (global, project) = compile::plugins_by_scope(&sym.config.plugins, &active, &to_install);
     let compiled = compile::compile(&plugins_root, &global, debounce);
+    let project_compiled = compile::compile_project(&project_root, &project, debounce);
 
     for agent_name in &agent_names {
         let agent = Agent::from_config_name(agent_name)?;
@@ -628,9 +639,28 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                 );
                 false
             });
+        let delivered_to_project = agent
+            .sync_project_plugins(
+                sym,
+                &project_root,
+                &project_plugins_root,
+                &project_compiled.plugins,
+                out,
+            )
+            .unwrap_or_else(|e| {
+                tracing::info!(
+                    report = %crate::report::ReportEvent::Warning {
+                        message: format!("failed to install project plugins for {agent_name}: {e:#}"),
+                    },
+                );
+                false
+            });
 
         for entry in &to_install {
-            if delivered && compiled.skill_origins.contains(&entry.origin_hash) {
+            if delivered && compiled.skill_origins.contains(&entry.origin_hash)
+                || delivered_to_project
+                    && project_compiled.skill_origins.contains(&entry.origin_hash)
+            {
                 continue;
             }
             let skill_name = entry.skill.name();
@@ -753,6 +783,7 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                     out,
                 );
             }
+            let _ = agent.sync_project_plugins(sym, &project_root, &project_plugins_root, &[], out);
         }
     }
     unregister_user_plugins(sym, out);
@@ -963,6 +994,27 @@ mod tests {
 
         assert_eq!(fs::read_to_string(dst.join("sub/a.txt")).unwrap(), "a");
         assert!(!dir_contents_differ(&src, &dst).unwrap());
+    }
+
+    #[test]
+    fn only_a_marker_file_marks_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marked = tmp.path().join("marked");
+        let project = tmp.path().join("project");
+        let plain = tmp.path().join("plain");
+        for dir in [&marked, &project, &plain] {
+            fs::create_dir_all(dir.join("guide")).unwrap();
+            fs::write(dir.join("guide/SKILL.md"), "").unwrap();
+        }
+        fs::write(marked.join(MARKER_FILE), "").unwrap();
+        fs::create_dir(project.join(MARKER_FILE)).unwrap();
+
+        for (dir, is_marked) in [(&marked, true), (&project, false), (&plain, false)] {
+            assert_eq!(has_symposium_marker(dir), is_marked, "{}", dir.display());
+            let mut found = Vec::new();
+            skills::find_skill_files_recursive(dir, &mut found);
+            assert_eq!(found.is_empty(), is_marked, "{}", dir.display());
+        }
     }
 
     /// Managed metadata is excluded from the comparison, so writing the marker

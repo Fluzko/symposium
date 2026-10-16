@@ -121,6 +121,41 @@ fn delivery_copies_plugins_and_reaps_only_what_symposium_installed() {
 }
 
 #[test]
+fn project_delivery_lands_in_the_project_and_stays_out_of_git() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut sym = Symposium::from_dir(&tmp.path().join("home"));
+    sym.config.sync_debounce_secs = 0;
+    let project = tmp.path().join("project");
+    let staging = project.join(".symposium/plugins");
+    let delivered = project.join(".claude/skills/fresh");
+    let deliver = |plugins: &[CompiledPlugin]| {
+        sync_project_plugins(&sym, &project, &staging, plugins, &Output::quiet()).unwrap()
+    };
+
+    assert!(deliver(&[compiled(&staging, "fresh", "v1")]));
+    assert!(delivered.join(".claude-plugin/plugin.json").is_file());
+    assert_eq!(
+        fs::read_to_string(delivered.join(".gitignore")).unwrap(),
+        "*\n"
+    );
+    assert!(!sym.home_dir().join(".claude").exists());
+
+    deliver(&[compiled(&staging, "fresh", "v2")]);
+    assert_eq!(
+        fs::read_to_string(delivered.join("skills/guide/SKILL.md")).unwrap(),
+        "v2"
+    );
+    assert_eq!(
+        fs::read_to_string(delivered.join(".gitignore")).unwrap(),
+        "*\n",
+        "replacing the content keeps the directory out of git"
+    );
+
+    deliver(&[]);
+    assert!(!delivered.exists());
+}
+
+#[test]
 fn delivery_never_writes_claude_settings() {
     let tmp = tempfile::tempdir().unwrap();
     let sym = Symposium::from_dir(tmp.path());

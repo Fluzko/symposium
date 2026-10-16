@@ -88,60 +88,87 @@ fn is_valid_plugin_name(name: &str) -> bool {
 }
 
 #[test]
-fn only_a_global_use_entry_naming_the_plugin_installs_it_for_the_user() {
+fn a_global_use_entry_installs_a_plugin_for_the_user_and_anything_else_for_the_project() {
     let mut crate_plugin = validated(PluginKind::Package, "cargo", "crate_a", "");
     crate_plugin.manifest.name = "a-tools".into();
     let mut member = registry("house-style", "");
     member.workspace_member = true;
+    let uses = |used: Vec<UseEntry>| PluginsConfig {
+        used,
+        ..Default::default()
+    };
     let workspace_use = UseEntry::Workspace {
         name: "dormant-guide".into(),
         workspace: "/ws".into(),
     };
+    let consented = PluginsConfig {
+        auto_enable: vec!["lopdf".into()],
+        ..Default::default()
+    };
+    let skill_md = Path::new("/nonexistent/SKILL.md");
+    let skills = [skill("guide", "11111111", skill_md, 0)];
+    let skills: Vec<&SkillWithGroupContext> = skills.iter().collect();
 
     let cases = [
         (
             "global use on a dormant registry plugin",
             registry("dormant-guide", ""),
-            vec![global("dormant-guide")],
+            uses(vec![global("dormant-guide")]),
             true,
         ),
         (
             "global use on a crate, by its crate name",
             crate_plugin,
-            vec![global("crate-a")],
+            uses(vec![global("crate-a")]),
             true,
         ),
         (
             "workspace use",
             registry("dormant-guide", ""),
-            vec![workspace_use],
+            uses(vec![workspace_use]),
             false,
         ),
         (
             "registry plugin active by depends-on(*), no use",
             registry("always-guide", "depends-on = [\"*\"]"),
-            vec![],
+            uses(vec![]),
             false,
         ),
         (
             "dependency-gated registry plugin, no use",
             registry("serde-guide", "depends-on = [\"serde\"]"),
-            vec![],
+            uses(vec![]),
             false,
         ),
         (
             "workspace member named by a global use",
             member,
-            vec![global("house-style")],
+            uses(vec![global("house-style")]),
+            false,
+        ),
+        (
+            "consented dependency",
+            validated(PluginKind::Package, "cargo", "lopdf", ""),
+            consented,
             false,
         ),
     ];
-    for (label, plugin, used, expected) in cases {
-        let config = PluginsConfig {
-            used,
-            ..Default::default()
+    for (label, plugin, config, global) in cases {
+        let active = [plugin];
+        let (user, project) = plugins_by_scope(&config, &active, &skills);
+        let names = |plugins: Vec<PluginSkills>| {
+            plugins
+                .into_iter()
+                .map(|p| p.name.to_string())
+                .collect::<Vec<_>>()
         };
-        assert_eq!(installs_globally(&config, &plugin), expected, "{label}");
+        let name = active[0].manifest.name.clone();
+        let expected = if global {
+            (vec![name], vec![])
+        } else {
+            (vec![], vec![name])
+        };
+        assert_eq!((names(user), names(project)), expected, "{label}");
     }
 }
 
@@ -202,10 +229,10 @@ fn colliding_names_are_all_suffixed_and_unsluggable_ones_skipped() {
         long_lower.as_str(),
         long_upper.as_str(),
     ];
-    let plugins: Vec<GlobalPlugin> = names
+    let plugins: Vec<PluginSkills> = names
         .iter()
         .zip(&skills)
-        .map(|(name, skill)| GlobalPlugin {
+        .map(|(name, skill)| PluginSkills {
             name,
             skills: vec![skill],
         })
@@ -255,7 +282,7 @@ fn compile_writes_one_self_contained_directory_per_plugin() {
         skill("dup", "22222222", &dup_two, 0),
         skill("../escape", "eeeeeeee", &escaping, 0),
     ];
-    let plugins = [GlobalPlugin {
+    let plugins = [PluginSkills {
         name: "Guide_Tools",
         skills: skills.iter().collect(),
     }];
@@ -316,7 +343,7 @@ fn compile_follows_symlinks_in_skill_content() {
 
     compile(
         &root,
-        &[GlobalPlugin {
+        &[PluginSkills {
             name: "links",
             skills: skills.iter().collect(),
         }],
@@ -338,11 +365,11 @@ fn recompiling_writes_only_what_changed_and_reaps_what_left() {
         skill("keep", "11111111", &keep_md, 0),
         skill("gone", "22222222", &gone_md, 1),
     ];
-    let keep = GlobalPlugin {
+    let keep = PluginSkills {
         name: "keep",
         skills: vec![&skills[0]],
     };
-    let gone = GlobalPlugin {
+    let gone = PluginSkills {
         name: "gone",
         skills: vec![&skills[1]],
     };
@@ -358,7 +385,7 @@ fn recompiling_writes_only_what_changed_and_reaps_what_left() {
         .set_modified(an_hour_ago)
         .unwrap();
 
-    let keep = GlobalPlugin {
+    let keep = PluginSkills {
         name: "keep",
         skills: vec![&skills[0]],
     };
@@ -384,7 +411,7 @@ fn recompiling_writes_only_what_changed_and_reaps_what_left() {
     );
 
     fs::write(&keep_md, "---\nname: keep\ndescription: edited\n---\n").unwrap();
-    let keep = GlobalPlugin {
+    let keep = PluginSkills {
         name: "keep",
         skills: vec![&skills[0]],
     };
@@ -415,10 +442,64 @@ fn a_skill_reached_by_two_global_plugins_compiles_into_the_first() {
         ..Default::default()
     };
 
-    let grouped = global_plugins(&config, &active, &deduplicated.iter().collect::<Vec<_>>());
+    let (grouped, project) =
+        plugins_by_scope(&config, &active, &deduplicated.iter().collect::<Vec<_>>());
 
     assert_eq!(grouped.len(), 1, "the plugin dedup emptied is dropped");
     assert_eq!(grouped[0].name, "first");
+    assert!(project.is_empty(), "a plugin with no skills is in no scope");
+}
+
+#[test]
+fn project_plugins_compile_under_the_projects_gitignored_symposium_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("project");
+    let skill_md = write_skill(&tmp.path().join("src/guide"), "guide");
+    let skills = [skill("guide", "11111111", &skill_md, 0)];
+    let plugins = || {
+        [PluginSkills {
+            name: "guide",
+            skills: skills.iter().collect(),
+        }]
+    };
+
+    compile_project(&project, &[], Duration::ZERO);
+    assert!(
+        !project.join(".symposium").exists(),
+        "nothing to compile writes nothing"
+    );
+
+    let compiled = compile_project(&project, &plugins(), Duration::ZERO);
+    assert_eq!(
+        compiled.plugins[0].dir,
+        project_plugins_root(&project).join("guide")
+    );
+    assert!(
+        project
+            .join(".symposium/plugins/guide/plugin.json")
+            .is_file()
+    );
+    assert_eq!(
+        fs::read_to_string(project.join(".symposium/.gitignore")).unwrap(),
+        "*\n"
+    );
+
+    fs::write(project.join(".symposium/.gitignore"), "edited\n").unwrap();
+    compile_project(&project, &plugins(), Duration::ZERO);
+    assert_eq!(
+        fs::read_to_string(project.join(".symposium/.gitignore")).unwrap(),
+        "edited\n",
+        "an existing .gitignore is left alone"
+    );
+
+    let blocked = tmp.path().join("blocked");
+    fs::create_dir_all(&blocked).unwrap();
+    fs::write(blocked.join(".symposium"), "").unwrap();
+    let compiled = compile_project(&blocked, &plugins(), Duration::ZERO);
+    assert!(
+        compiled.plugins.is_empty(),
+        "no project plugins when they cannot be kept out of git"
+    );
 }
 
 #[test]

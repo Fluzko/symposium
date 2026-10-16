@@ -79,23 +79,46 @@ async fn a_global_plugin_reaches_goose_and_antigravity_without_per_skill_copies(
     .unwrap();
 }
 
+const MCP_SERVER_PLUGIN: &str = r#"name = "mcp-server"
+depends-on = ["*"]
+
+[[mcp_servers]]
+name = "probe-server"
+command = "/usr/bin/true"
+args = ["--stdio"]
+env = []
+"#;
+
 #[tokio::test]
-async fn goose_path_root_relocates_the_delivery() {
+async fn goose_path_root_relocates_mcp_servers_and_plugins() {
     with_fixture(TestMode::SimulationOnly, SCOPES, async |mut ctx| {
         let relocated = ctx.tempdir.join("goose-root");
         let value = relocated.clone().into_os_string();
         ctx.sym
             .set_env(move |name| (name == "GOOSE_PATH_ROOT").then(|| value.clone()));
+        let plugin = ctx.sym.config_dir().join("plugins/mcp-server");
+        std::fs::create_dir_all(&plugin)?;
+        std::fs::write(
+            plugin.join(symposium::pm::layout::MANIFEST_FILE),
+            MCP_SERVER_PLUGIN,
+        )?;
 
         ctx.symposium(&["init", "--add-agent", "goose"]).await?;
         ctx.symposium(&["sync"]).await?;
 
-        assert!(
-            relocated
-                .join(".agents/plugins/global-guide/plugin.json")
-                .is_file()
-        );
-        assert!(!user_plugins(&ctx).exists());
+        let config = relocated.join("config/config.yaml");
+        let copy = relocated.join(".agents/plugins/global-guide");
+        assert!(std::fs::read_to_string(&config)?.contains("probe-server:"));
+        assert!(copy.join("plugin.json").is_file());
+        for default in [".config/goose", ".agents"] {
+            assert!(!ctx.sym.home_dir().join(default).exists(), "{default}");
+        }
+
+        ctx.symposium(&["init", "--remove-agent", "goose"]).await?;
+
+        let unregistered = std::fs::read_to_string(&config)?;
+        assert!(!unregistered.contains("probe-server"), "{unregistered}");
+        assert!(!copy.exists());
         Ok(())
     })
     .await

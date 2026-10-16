@@ -285,7 +285,10 @@ impl Agent {
             // to a file nobody reads.
             (Agent::Codex, _) => home.join(".codex").join("config.toml"),
             (Agent::Copilot, _) => home.join(".copilot").join("mcp-config.json"),
-            (Agent::Goose, _) => xdg_config().join("goose").join("config.yaml"),
+            (Agent::Goose, _) => goose_path_root(sym)
+                .map(|root| root.join("config"))
+                .unwrap_or_else(|| xdg_config().join("goose"))
+                .join("config.yaml"),
         }
     }
 
@@ -1050,6 +1053,10 @@ fn unregister_flat_hooks(config_path: &Path, command_key: &str, out: &Output) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn goose_path_root(sym: &Symposium) -> Option<PathBuf> {
+    sym.env_dir("GOOSE_PATH_ROOT")
+}
+
 fn event_to_cli_arg(event: &str) -> &str {
     match event {
         "PreToolUse" | "preToolUse" => "pre-tool-use",
@@ -1189,6 +1196,74 @@ mod tests {
                 .unwrap()
                 .contains("cargo-agents hook")
         );
+    }
+
+    #[test]
+    fn goose_user_files_follow_goose_path_root() {
+        use sacp::schema::{McpServer, McpServerStdio};
+        use std::ffi::OsString;
+
+        let servers = [McpServer::Stdio(McpServerStdio::new(
+            "symposium",
+            "/usr/local/bin/cargo-agents",
+        ))];
+        let out = Output::quiet();
+        for (case, path_root, xdg_config_home, config_dir, plugins_root) in [
+            ("unset", None, None, "home/.config/goose", "home"),
+            ("empty", Some(""), None, "home/.config/goose", "home"),
+            ("relocated", Some("root"), None, "root/config", "root"),
+            ("xdg", None, Some("xdg"), "xdg/goose", "home"),
+            ("both", Some("root"), Some("xdg"), "root/config", "root"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let at = |dir: &str| match dir {
+                "" => OsString::new(),
+                dir => tmp.path().join(dir).into_os_string(),
+            };
+            let path_root = path_root.map(at);
+            let xdg_config_home = xdg_config_home.map(at);
+            let mut sym = Symposium::from_dir(&tmp.path().join("home"));
+            sym.set_env(move |name| match name {
+                "GOOSE_PATH_ROOT" => path_root.clone(),
+                "XDG_CONFIG_HOME" => xdg_config_home.clone(),
+                _ => None,
+            });
+            let staging = sym.config_dir().join("installed");
+            let plugin = CompiledPlugin {
+                name: "probe".into(),
+                version: "0.0.0".into(),
+                dir: staging.join("probe"),
+            };
+            fs::create_dir_all(&plugin.dir).unwrap();
+            fs::write(plugin.dir.join("plugin.json"), r#"{"name": "probe"}"#).unwrap();
+
+            Agent::Goose
+                .register_mcp_servers(McpScope::User, Path::new("/project"), &sym, &servers, &out)
+                .unwrap();
+            assert!(
+                Agent::Goose
+                    .sync_user_plugins(&sym, &staging, &[plugin], &out)
+                    .unwrap()
+            );
+
+            for candidate in ["home/.config/goose", "root/config", "xdg/goose"] {
+                assert_eq!(
+                    tmp.path().join(candidate).join("config.yaml").is_file(),
+                    candidate == config_dir,
+                    "{case}: {candidate}"
+                );
+            }
+            for candidate in ["home", "root"] {
+                assert_eq!(
+                    tmp.path()
+                        .join(candidate)
+                        .join(".agents/plugins/probe/plugin.json")
+                        .is_file(),
+                    candidate == plugins_root,
+                    "{case}: {candidate}"
+                );
+            }
+        }
     }
 
     /// These CLIs read only their user-level file, so project scope resolves

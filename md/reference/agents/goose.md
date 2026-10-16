@@ -26,6 +26,6 @@ Goose loads it in every project. Its skills keep their own names, since Goose ad
 
 | Scope | File | Key |
 |-------|------|-----|
-| Global | `~/.config/goose/config.yaml` | `extensions.<name>` |
+| Global | `~/.config/goose/config.yaml` (`$GOOSE_PATH_ROOT/config/config.yaml` when set) | `extensions.<name>` |
 
 Goose reads no project-level MCP file, so a project-scoped registration goes to the global file.

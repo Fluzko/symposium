@@ -94,9 +94,23 @@ extensions:
       Authorization: Bearer t
 ```
 
-- **User-level**: `~/.config/goose/config.yaml`
+- **User-level**: `~/.config/goose/config.yaml` (`$GOOSE_PATH_ROOT/config/config.yaml`
+  when that variable is set, else `$XDG_CONFIG_HOME/goose/config.yaml` when
+  that one is)
 - **Project-level**: none - Goose reads only the user-level file, so
   project-scoped registration resolves there.
+
+`GOOSE_PATH_ROOT` moves both places symposium writes: when it is set, Goose
+reads `$GOOSE_PATH_ROOT/config/config.yaml`, whatever `XDG_CONFIG_HOME` says,
+and its user plugins from `$GOOSE_PATH_ROOT/.agents/plugins/`; an empty value
+counts as unset. Symposium writes its MCP servers and
+[plugins](#plugin-delivery) there too. Verified against Goose 1.54.0 with a
+different MCP server in each candidate file, by which one `goose run --text hi`
+started: the one under `$GOOSE_PATH_ROOT` when both variables were set, and the
+`XDG_CONFIG_HOME` one when `GOOSE_PATH_ROOT` was empty. Through `cargo agents
+sync` with the variable set, a server left in `~/.config/goose/config.yaml`
+never started, while the one symposium wrote under `$GOOSE_PATH_ROOT` started
+and was offered to the model as a tool.
 
 Two ways to check a change without a configured LLM provider: `goose recipe
 validate` on a recipe holding the entry (it deserializes the same

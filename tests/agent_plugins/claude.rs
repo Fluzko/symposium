@@ -24,8 +24,23 @@ fn project_skills(ctx: &TestContext, agent_dir: &str) -> PathBuf {
         .join("skills")
 }
 
+fn project_symposium_dir(ctx: &TestContext) -> PathBuf {
+    ctx.workspace_root.as_ref().unwrap().join(".symposium")
+}
+
+fn project_staging(ctx: &TestContext) -> PathBuf {
+    project_symposium_dir(ctx).join("plugins")
+}
+
 fn claude_skill_dirs(ctx: &TestContext) -> Vec<PathBuf> {
     vec![project_skills(ctx, ".claude"), user_skills(ctx)]
+}
+
+fn project_plugin_skill(ctx: &TestContext, plugin: &str, skill: &str) -> PathBuf {
+    project_skills(ctx, ".claude")
+        .join(plugin)
+        .join("skills")
+        .join(skill)
 }
 
 fn drop_use(ctx: &mut TestContext, name: &str) -> anyhow::Result<()> {
@@ -119,7 +134,7 @@ async fn a_global_plugin_reaches_claude_once_and_other_agents_keep_per_skill_cop
         for skill in ["workspace-guide", "always-guide"] {
             assert_eq!(
                 find_installed_skill(&claude_skill_dirs(&ctx), skill),
-                project_skills(&ctx, ".claude").join(skill)
+                project_plugin_skill(&ctx, skill, skill)
             );
         }
         for agent_dir in [".agents", ".kiro"] {
@@ -129,6 +144,89 @@ async fn a_global_plugin_reaches_claude_once_and_other_agents_keep_per_skill_cop
         }
         Ok(())
     })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn project_plugins_reach_claude_as_plugins_in_the_project() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["agent-plugin-scopes0", "member-agents-skills0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            expect![[r#"
+                always-guide/
+                always-guide/.claude-plugin/
+                always-guide/.claude-plugin/plugin.json
+                always-guide/.gitignore
+                always-guide/.symposium
+                always-guide/plugin.json
+                always-guide/skills/
+                always-guide/skills/always-guide/
+                always-guide/skills/always-guide/SKILL.md
+                tool/
+                tool/.claude-plugin/
+                tool/.claude-plugin/plugin.json
+                tool/.gitignore
+                tool/.symposium
+                tool/plugin.json
+                tool/skills/
+                tool/skills/plain-notes/
+                tool/skills/plain-notes/SKILL.md
+                tool/skills/tool-maintainer/
+                tool/skills/tool-maintainer/SKILL.md
+                workspace-guide/
+                workspace-guide/.claude-plugin/
+                workspace-guide/.claude-plugin/plugin.json
+                workspace-guide/.gitignore
+                workspace-guide/.symposium
+                workspace-guide/plugin.json
+                workspace-guide/skills/
+                workspace-guide/skills/workspace-guide/
+                workspace-guide/skills/workspace-guide/SKILL.md"#]]
+            .assert_eq(&tree(&project_skills(&ctx, ".claude")));
+            expect![[r#"
+                .gitignore
+                plugins/
+                plugins/.claude-plugin/
+                plugins/.claude-plugin/marketplace.json
+                plugins/always-guide/
+                plugins/always-guide/.claude-plugin/
+                plugins/always-guide/.claude-plugin/plugin.json
+                plugins/always-guide/.symposium
+                plugins/always-guide/plugin.json
+                plugins/always-guide/skills/
+                plugins/always-guide/skills/always-guide/
+                plugins/always-guide/skills/always-guide/SKILL.md
+                plugins/tool/
+                plugins/tool/.claude-plugin/
+                plugins/tool/.claude-plugin/plugin.json
+                plugins/tool/.symposium
+                plugins/tool/plugin.json
+                plugins/tool/skills/
+                plugins/tool/skills/plain-notes/
+                plugins/tool/skills/plain-notes/SKILL.md
+                plugins/tool/skills/tool-maintainer/
+                plugins/tool/skills/tool-maintainer/SKILL.md
+                plugins/workspace-guide/
+                plugins/workspace-guide/.claude-plugin/
+                plugins/workspace-guide/.claude-plugin/plugin.json
+                plugins/workspace-guide/.symposium
+                plugins/workspace-guide/plugin.json
+                plugins/workspace-guide/skills/
+                plugins/workspace-guide/skills/workspace-guide/
+                plugins/workspace-guide/skills/workspace-guide/SKILL.md"#]]
+            .assert_eq(&tree(&project_symposium_dir(&ctx)));
+            assert_eq!(
+                std::fs::read_to_string(project_symposium_dir(&ctx).join(".gitignore"))?,
+                "*\n"
+            );
+            Ok(())
+        },
+    )
     .await
     .unwrap();
 }
@@ -147,7 +245,7 @@ async fn hook_scope_does_not_decide_where_a_global_plugin_installs() {
         );
         assert_eq!(
             find_installed_skill(&claude_skill_dirs(&ctx), "workspace-guide"),
-            project_skills(&ctx, ".claude").join("workspace-guide")
+            project_plugin_skill(&ctx, "workspace-guide", "workspace-guide")
         );
         let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
             ctx.sym.home_dir().join(".claude/settings.json"),
@@ -171,6 +269,7 @@ async fn another_workspace_shares_the_global_plugin_and_gets_no_project_copy() {
         ctx.symposium(&["sync"]).await?;
         let staged = tree(&staging_root(&ctx));
         let delivered = tree(&user_skills(&ctx));
+        let first_project = tree(&project_skills(&ctx, ".claude"));
 
         let other = ctx.tempdir.join("other-workspace");
         write_workspace(&other);
@@ -183,6 +282,7 @@ async fn another_workspace_shares_the_global_plugin_and_gets_no_project_copy() {
 
         assert_eq!(tree(&staging_root(&ctx)), staged);
         assert_eq!(tree(&user_skills(&ctx)), delivered);
+        assert_eq!(tree(&project_skills(&ctx, ".claude")), first_project);
         let other_skills = other.join(".claude/skills");
         assert!(
             find_installed_skills(std::slice::from_ref(&other_skills), "global-guide").is_empty()
@@ -199,31 +299,45 @@ async fn another_workspace_shares_the_global_plugin_and_gets_no_project_copy() {
 }
 
 #[tokio::test]
-async fn dropping_the_global_use_removes_what_symposium_wrote_and_reports_it() {
+async fn dropping_a_use_removes_what_symposium_wrote_and_reports_it() {
     with_fixture(TestMode::SimulationOnly, SCOPES, async |mut ctx| {
         ctx.symposium(&["init", "--add-agent", "claude"]).await?;
 
         let installed = ctx.sync_with_report(tracing::Level::INFO).await?;
-        assert!(
-            installed.iter().any(|e| e["kind"] == "plugin_installed"
-                && e["plugin"] == "global-guide"
-                && e["agent"] == "claude"),
-            "{installed:#?}"
-        );
+        for plugin in ["global-guide", "workspace-guide"] {
+            assert!(
+                installed.iter().any(|e| e["kind"] == "plugin_installed"
+                    && e["plugin"] == plugin
+                    && e["agent"] == "claude"),
+                "{installed:#?}"
+            );
+        }
 
         drop_use(&mut ctx, "global-guide")?;
+        drop_use(&mut ctx, "workspace-guide")?;
         let removed = ctx.sync_with_report(tracing::Level::INFO).await?;
 
         for path in [
             staging_root(&ctx).join("global-guide"),
             user_skills(&ctx).join("global-guide"),
+            project_staging(&ctx).join("workspace-guide"),
+            project_skills(&ctx, ".claude").join("workspace-guide"),
         ] {
             assert!(!path.exists(), "{} is left behind", path.display());
-            let shown = ctx.normalize_paths(&symposium::output::display_path(&path));
+            let tail = format!(
+                "/{}",
+                path.strip_prefix(&ctx.tempdir)?
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            );
             assert!(
                 removed.iter().any(|e| e["kind"] == "skill_removed"
-                    && ctx.normalize_paths(e["path"].as_str().unwrap()) == shown),
-                "{shown} removal not reported: {removed:#?}"
+                    && e["path"]
+                        .as_str()
+                        .unwrap()
+                        .replace('\\', "/")
+                        .ends_with(&tail)),
+                "{tail} removal not reported: {removed:#?}"
             );
         }
         assert!(!staging_root(&ctx).join(".claude-plugin").exists());
@@ -234,10 +348,11 @@ async fn dropping_the_global_use_removes_what_symposium_wrote_and_reports_it() {
 }
 
 #[tokio::test]
-async fn a_global_use_turned_workspace_use_returns_to_per_skill_copies() {
+async fn moving_a_plugin_between_scopes_leaves_nothing_behind() {
     with_fixture(TestMode::SimulationOnly, SCOPES, async |mut ctx| {
         ctx.symposium(&["init", "--add-agent", "claude"]).await?;
         ctx.symposium(&["sync"]).await?;
+        let user_scope = tree(&user_skills(&ctx));
 
         ctx.symposium(&["use", "--remove", "--global", "global-guide"])
             .await?;
@@ -247,8 +362,19 @@ async fn a_global_use_turned_workspace_use_returns_to_per_skill_copies() {
         assert_eq!(tree(&user_skills(&ctx)), "");
         assert_eq!(
             find_installed_skill(&claude_skill_dirs(&ctx), "global-guide"),
-            project_skills(&ctx, ".claude").join("global-guide")
+            project_plugin_skill(&ctx, "global-guide", "global-guide")
         );
+
+        ctx.symposium(&["use", "--remove", "global-guide"]).await?;
+        ctx.symposium(&["use", "--global", "global-guide"]).await?;
+
+        assert_eq!(tree(&user_skills(&ctx)), user_scope);
+        for path in [
+            project_staging(&ctx).join("global-guide"),
+            project_skills(&ctx, ".claude").join("global-guide"),
+        ] {
+            assert!(!path.exists(), "{} is left behind", path.display());
+        }
         Ok(())
     })
     .await
@@ -256,16 +382,23 @@ async fn a_global_use_turned_workspace_use_returns_to_per_skill_copies() {
 }
 
 #[tokio::test]
-async fn removing_claude_removes_its_user_plugins() {
+async fn removing_claude_removes_its_plugins() {
     with_fixture(TestMode::SimulationOnly, SCOPES, async |mut ctx| {
         ctx.symposium(&["init", "--add-agent", "claude", "--add-agent", "codex"])
             .await?;
         ctx.symposium(&["sync"]).await?;
         assert!(user_skills(&ctx).join("global-guide").exists());
+        assert!(
+            project_skills(&ctx, ".claude")
+                .join("always-guide")
+                .exists()
+        );
 
         ctx.symposium(&["init", "--remove-agent", "claude"]).await?;
-
         assert!(!user_skills(&ctx).join("global-guide").exists());
+
+        ctx.symposium(&["sync"]).await?;
+        assert_eq!(tree(&project_skills(&ctx, ".claude")), "");
         Ok(())
     })
     .await

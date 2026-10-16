@@ -133,25 +133,30 @@ async fn agents_that_read_context_after_a_tool_call_get_the_notice() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_start_tells_claude_to_reload_the_plugins_its_sync_installed() {
-    with_fixture(
-        TestMode::SimulationOnly,
-        &["agent-plugin-scopes0"],
-        async |mut ctx| {
-            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+async fn session_start_tells_the_agent_to_reload_the_plugins_its_sync_installed() {
+    for (name, agent, reload) in [
+        ("claude", HookAgent::Claude, "/reload-plugins"),
+        ("antigravity", HookAgent::Antigravity, "/skills reload"),
+    ] {
+        with_fixture(
+            TestMode::SimulationOnly,
+            &["agent-plugin-scopes0"],
+            async |mut ctx| {
+                ctx.symposium(&["init", "--add-agent", name]).await?;
 
-            let installed = respond(&ctx, HookAgent::Claude, HookStep::session_start()).await;
-            serde_json::from_str::<Value>(&installed)?;
-            assert!(
-                installed.contains("global-guide") && installed.contains("/reload-plugins"),
-                "{installed}"
-            );
+                let installed = respond(&ctx, agent, HookStep::session_start()).await;
+                serde_json::from_str::<Value>(&installed)?;
+                assert!(
+                    installed.contains("global-guide") && installed.contains(reload),
+                    "{installed}"
+                );
 
-            let unchanged = respond(&ctx, HookAgent::Claude, HookStep::session_start()).await;
-            assert!(!unchanged.contains("/reload-plugins"), "{unchanged}");
-            Ok(())
-        },
-    )
-    .await
-    .unwrap();
+                let unchanged = respond(&ctx, agent, HookStep::session_start()).await;
+                assert!(!unchanged.contains(reload), "{unchanged}");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    }
 }

@@ -35,8 +35,10 @@ A plugin you enabled with [`cargo agents use --global`](./cargo-agents-use.md) i
 | Agent | Where the plugin goes |
 |-------|-----------------------|
 | Claude Code | `~/.claude/skills/<plugin>/` (or `$CLAUDE_CONFIG_DIR/skills/<plugin>/`) |
+| Antigravity CLI | `~/.gemini/config/plugins/<plugin>/` |
+| Goose | `~/.agents/plugins/<plugin>/` (or `$GOOSE_PATH_ROOT/.agents/plugins/<plugin>/`) |
 
-Such an agent gets no per-project copy of the plugin's skills, and copies an earlier sync left are cleaned up; every other agent keeps per-project copies. Agents load plugins when a session starts, so a plugin installed or updated by the automatic sync at session start appears in the next session; that sync also tells the agent which plugins changed and how to load them now (in Claude Code, `/reload-plugins`). Dropping the `--global` entry, or removing the agent with `cargo agents init --remove-agent`, removes what symposium installed.
+Such an agent gets no per-project copy of the plugin's skills, and copies an earlier sync left are cleaned up; every other agent keeps per-project copies. Agents load plugins when a session starts, so a plugin installed or updated by the automatic sync at session start appears in the next session; that sync also tells the agent which plugins changed and how to load them now (in Claude Code, `/reload-plugins`; in Antigravity CLI, `/skills reload`). Goose picks such a plugin up with the next message. Dropping the `--global` entry, or removing the agent with `cargo agents init --remove-agent`, removes what symposium installed.
 
 ## Consent prompt
 

@@ -207,7 +207,7 @@ impl Agent {
             }
             Agent::Codex => register_codex_hooks(&home.join(".codex").join("hooks.json"), out),
             Agent::Copilot => {
-                register_copilot_hooks_global(&home.join(".copilot").join("settings.json"), out)
+                register_copilot_hooks_global(&copilot_config_dir(sym).join("settings.json"), out)
             }
             Agent::Kiro => register_kiro_hooks(&home.join(".kiro").join("agents"), out),
             Agent::Goose => {
@@ -284,7 +284,7 @@ impl Agent {
             // scope therefore resolves to the same user-level file rather than
             // to a file nobody reads.
             (Agent::Codex, _) => home.join(".codex").join("config.toml"),
-            (Agent::Copilot, _) => home.join(".copilot").join("mcp-config.json"),
+            (Agent::Copilot, _) => copilot_config_dir(sym).join("mcp-config.json"),
             (Agent::Goose, _) => xdg_config().join("goose").join("config.yaml"),
         }
     }
@@ -426,7 +426,7 @@ impl Agent {
             }
             Agent::Codex => unregister_codex_hooks(&home.join(".codex").join("hooks.json"), out),
             Agent::Copilot => {
-                unregister_copilot_hooks_global(&home.join(".copilot").join("settings.json"), out)
+                unregister_copilot_hooks_global(&copilot_config_dir(sym).join("settings.json"), out)
             }
             Agent::Kiro => unregister_kiro_hooks(&home.join(".kiro").join("agents"), out),
             Agent::Goose => {}    // no hooks to unregister
@@ -610,18 +610,26 @@ fn unregister_codex_hooks(hooks_path: &Path, out: &Output) {
 // GitHub Copilot hook registration
 // ---------------------------------------------------------------------------
 
+fn copilot_config_dir(sym: &Symposium) -> PathBuf {
+    sym.env_dir("COPILOT_HOME")
+        .unwrap_or_else(|| sym.home_dir().join(".copilot"))
+}
+
 /// Register hooks in the global Copilot user settings file (`~/.copilot/settings.json`).
 fn register_copilot_hooks_global(config_path: &Path, out: &Output) -> Result<()> {
     let display = display_path(config_path);
     let mut config = load_json_or_empty(config_path)?;
 
-    let hooks = config
-        .as_object_mut()
-        .unwrap()
+    let Some(settings) = config.as_object_mut() else {
+        bail!("unexpected content in {display}: the settings are not a JSON object");
+    };
+    let Some(hooks_obj) = settings
         .entry("hooks")
-        .or_insert_with(|| json!({}));
-
-    let hooks_obj = hooks.as_object_mut().unwrap();
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    else {
+        bail!("unexpected content in {display}: `hooks` is not an object");
+    };
 
     // Check if already registered
     let already = hooks_obj.values().any(|arr| {
@@ -1353,6 +1361,120 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&hook_file).unwrap()).unwrap();
         assert_eq!(content["version"], 1);
         assert!(content["hooks"]["preToolUse"].is_array());
+    }
+
+    #[test]
+    fn copilot_user_files_follow_copilot_home() {
+        use sacp::schema::{McpServer, McpServerStdio};
+        use std::ffi::OsString;
+
+        let servers = [McpServer::Stdio(McpServerStdio::new(
+            "symposium",
+            "/usr/local/bin/cargo-agents",
+        ))];
+        let read = |path: &Path| -> serde_json::Value {
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let relocated = tmp.path().join("relocated");
+        let cases = [
+            ("unset", None, tmp.path().join("unset/.copilot")),
+            (
+                "empty",
+                Some(OsString::new()),
+                tmp.path().join("empty/.copilot"),
+            ),
+            (
+                "set",
+                Some(relocated.clone().into_os_string()),
+                relocated.clone(),
+            ),
+        ];
+        for (case, value, dir) in cases {
+            let mut sym = Symposium::from_dir(&tmp.path().join(case));
+            sym.set_env(move |name| value.clone().filter(|_| name == "COPILOT_HOME"));
+            let out = Output::quiet();
+            let project = Path::new("/project");
+            let root = sym.config_dir().join("installed");
+            let plugin = CompiledPlugin {
+                name: "probe".into(),
+                version: "0.0.0".into(),
+                dir: root.join("probe"),
+            };
+
+            Agent::Copilot
+                .register_hooks(sym.home_dir(), &sym, &out)
+                .unwrap();
+            Agent::Copilot
+                .register_mcp_servers(McpScope::User, project, &sym, &servers, &out)
+                .unwrap();
+            assert!(
+                Agent::Copilot
+                    .sync_user_plugins(&sym, &root, &[plugin], &out)
+                    .unwrap()
+            );
+
+            let settings = read(&dir.join("settings.json"));
+            assert_eq!(
+                settings["hooks"]["sessionStart"][0]["bash"],
+                "cargo-agents hook copilot session-start",
+                "{case}"
+            );
+            assert_eq!(
+                settings["enabledPlugins"]["probe@symposium"], true,
+                "{case}"
+            );
+            assert!(
+                read(&dir.join("mcp-config.json"))["mcpServers"]["symposium"].is_object(),
+                "{case}"
+            );
+            let default = sym.home_dir().join(".copilot");
+            assert!(
+                dir == default || !default.exists(),
+                "{case}: wrote under HOME"
+            );
+
+            Agent::Copilot.unregister_hooks(sym.home_dir(), &sym, &out);
+            Agent::Copilot
+                .unregister_mcp_servers(McpScope::User, project, &sym, &["symposium"], &out)
+                .unwrap();
+            Agent::Copilot
+                .sync_user_plugins(&sym, &root, &[], &out)
+                .unwrap();
+
+            let settings = fs::read_to_string(dir.join("settings.json")).unwrap();
+            assert!(
+                !settings.contains("cargo-agents hook"),
+                "{case}: {settings}"
+            );
+            assert!(!settings.contains("@symposium"), "{case}: {settings}");
+            assert_eq!(
+                read(&dir.join("mcp-config.json")),
+                json!({ "mcpServers": {} }),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn copilot_settings_symposium_cannot_read_are_an_error_and_stay_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        for contents in [
+            "{",
+            "// Copilot accepts comments here, symposium does not\n{}",
+            "[]",
+            r#""hooks""#,
+            r#"{"hooks": []}"#,
+            r#"{"hooks": "cargo-agents hook copilot session-start"}"#,
+        ] {
+            fs::write(&path, contents).unwrap();
+            assert!(
+                register_copilot_hooks_global(&path, &Output::quiet()).is_err(),
+                "{contents:?}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        }
     }
 
     #[test]

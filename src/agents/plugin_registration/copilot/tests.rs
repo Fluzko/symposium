@@ -185,27 +185,6 @@ fn settings_of_the_wrong_shape_are_an_error() {
 }
 
 #[test]
-fn the_settings_file_follows_copilot_home() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut sym = Symposium::from_dir(tmp.path());
-    let default = tmp.path().join(".copilot/settings.json");
-    assert_eq!(settings_path(&sym), default);
-
-    sym.set_env(|name| (name == "COPILOT_HOME").then(|| "/elsewhere/copilot".into()));
-    assert_eq!(
-        settings_path(&sym),
-        Path::new("/elsewhere/copilot/settings.json")
-    );
-
-    sym.set_env(|name| (name == "COPILOT_HOME").then(|| "".into()));
-    assert_eq!(
-        settings_path(&sym),
-        default,
-        "an empty value does not relocate"
-    );
-}
-
-#[test]
 fn the_registration_matches_what_copilot_plugin_install_writes() {
     let tmp = tempfile::tempdir().unwrap();
     let sym = Symposium::from_dir(tmp.path());

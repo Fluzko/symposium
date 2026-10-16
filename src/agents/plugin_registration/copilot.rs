@@ -58,9 +58,7 @@ pub(crate) fn sync_user_plugins(
 }
 
 fn settings_path(sym: &Symposium) -> PathBuf {
-    sym.env_dir("COPILOT_HOME")
-        .unwrap_or_else(|| sym.home_dir().join(".copilot"))
-        .join("settings.json")
+    crate::agents::copilot_config_dir(sym).join("settings.json")
 }
 
 #[derive(Default)]

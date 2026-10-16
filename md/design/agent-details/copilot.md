@@ -42,6 +42,8 @@ Hooks defined in **`.github/hooks/*.json`**. For the Cloud Agent, files must be 
 
 The CLI combines hooks from several places: repository `.github/hooks/*.json`, user-level `~/.copilot/hooks/*.json` or a `hooks` key in `~/.copilot/settings.json` (where symposium registers globally; `config.json` is managed by the CLI), and also `.claude/settings.json`. It loads a repository's hooks only once the folder is trusted: it asks interactively, or `COPILOT_ALLOW_ALL=true` trusts the working directory. Because it reads Claude's settings too, a project with both agents configured runs symposium's hook twice per Copilot event.
 
+`COPILOT_HOME` moves the user level as a whole: when it is set, the CLI reads `settings.json`, `mcp-config.json` and `skills/` from `$COPILOT_HOME` instead of `~/.copilot/`. Symposium writes its global hooks, MCP servers and plugins there too, and its hook inherits the variable, so a sync the hook runs writes there as well. Verified against the Copilot CLI 1.0.89 with the variable set: symposium's hooks and MCP server left in `~/.copilot/` were ignored (`copilot mcp list` reported no server and no hook ran), while with them under `$COPILOT_HOME` each event ran `cargo-agents hook copilot`, and `copilot mcp list` and the `/mcp` dashboard showed the server, which a session started and offered as a tool. The CLI still keeps its cache of each MCP server's tools in `~/Library/Caches/copilot/mcp-tools/` on macOS, which the variable does not move.
+
 ```json
 {
   "version": 1,
@@ -191,7 +193,7 @@ Symposium registers MCP servers in the Copilot config as top-level keys
 ```
 
 - **Project-level**: `.vscode/mcp.json`
-- **User-level**: `~/.copilot/mcp-config.json`
+- **User-level**: `~/.copilot/mcp-config.json` (`$COPILOT_HOME/mcp-config.json` when set)
 
 Registration is idempotent — if the entry already exists with the
 correct values, no changes are made. If the entry exists but has stale

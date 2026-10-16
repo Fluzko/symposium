@@ -131,7 +131,7 @@ Copilot hooks are defined in JSON files with a `version` field. Hook entries use
 
 | Scope | File |
 |-------|------|
-| Global | `~/.copilot/settings.json` (under `hooks` key) |
+| Global | `~/.copilot/settings.json` (`$COPILOT_HOME/settings.json` when set), under the `hooks` key |
 | Project | `.github/hooks/*.json` |
 
 Example hook registration:

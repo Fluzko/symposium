@@ -209,23 +209,65 @@ async fn removing_copilot_unregisters_its_plugins() {
     .unwrap();
 }
 
+const MCP_SERVER_PLUGIN: &str = r#"name = "mcp-server"
+depends-on = ["*"]
+
+[[mcp_servers]]
+name = "probe-server"
+command = "/usr/bin/true"
+args = ["--stdio"]
+env = []
+"#;
+
 #[tokio::test]
-async fn copilot_home_relocates_the_registration() {
+async fn copilot_home_relocates_hooks_mcp_servers_and_plugins() {
     with_fixture(TestMode::SimulationOnly, SCOPES, async |mut ctx| {
         let relocated = ctx.tempdir.join("relocated-copilot");
         let value = relocated.clone().into_os_string();
         ctx.sym
             .set_env(move |name| (name == "COPILOT_HOME").then(|| value.clone()));
+        let default = ctx.sym.home_dir().join(".copilot");
+        let plugin = ctx.sym.config_dir().join("plugins/mcp-server");
+        std::fs::create_dir_all(&plugin)?;
+        std::fs::write(
+            plugin.join(symposium::pm::layout::MANIFEST_FILE),
+            MCP_SERVER_PLUGIN,
+        )?;
 
-        ctx.symposium(&["init", "--add-agent", "copilot"]).await?;
+        ctx.symposium(&["init", "--hook-scope", "global", "--add-agent", "copilot"])
+            .await?;
         ctx.symposium(&["sync"]).await?;
 
         let registered = read_settings(&relocated.join("settings.json"));
         assert_eq!(
+            registered["hooks"]["sessionStart"][0]["bash"],
+            "cargo-agents hook copilot session-start"
+        );
+        assert_eq!(
             registered["enabledPlugins"]["global-guide@symposium"],
             serde_json::json!(true)
         );
-        assert!(!settings(&ctx).exists());
+        let servers = read_settings(&relocated.join("mcp-config.json"));
+        assert!(
+            servers["mcpServers"]["probe-server"].is_object(),
+            "{servers}"
+        );
+        assert!(!default.exists());
+
+        ctx.symposium(&["init", "--remove-agent", "copilot"])
+            .await?;
+
+        let unregistered = std::fs::read_to_string(relocated.join("settings.json"))?;
+        assert!(
+            !unregistered.contains("cargo-agents hook"),
+            "{unregistered}"
+        );
+        assert!(!unregistered.contains("@symposium"), "{unregistered}");
+        assert_eq!(
+            read_settings(&relocated.join("mcp-config.json")),
+            serde_json::json!({ "mcpServers": {} })
+        );
+        assert!(!default.exists());
         Ok(())
     })
     .await

@@ -32,7 +32,7 @@ Symposium creates a `symposium.json` file in the project hooks directory, and me
 | Scope | File |
 |-------|------|
 | Project | `.github/hooks/symposium.json` |
-| Global | `~/.copilot/settings.json` |
+| Global | `~/.copilot/settings.json` (`$COPILOT_HOME/settings.json` when set) |
 
 Events registered: `preToolUse`, `postToolUse`, `userPromptSubmitted`, `sessionStart` (camelCase).
 
@@ -46,6 +46,6 @@ Output format: JSON. Uses `"bash"` key instead of `"command"` for platform-speci
 
 | Scope | File | Key |
 |-------|------|-----|
-| Global | `~/.copilot/mcp-config.json` | `mcpServers.<name>` |
+| Global | `~/.copilot/mcp-config.json` (`$COPILOT_HOME/mcp-config.json` when set) | `mcpServers.<name>` |
 
 Copilot reads no project-level MCP file, so a project-scoped registration goes to the global file.

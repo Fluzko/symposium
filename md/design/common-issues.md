@@ -48,7 +48,7 @@ both, and the unit tests assert the shape per event for exactly this reason.
 
 `Path::is_dir()` *does* follow links, which is the other half of the trap: a walk written that way already descends into linked directories, so it can already loop on a link naming a directory it is inside. Guard any such walk with `dir_walk::Ancestors`.
 
-And when two walks over one tree feed each other — a copy, and the comparison that decides whether to copy — they have to be the same traversal. Fixing one and not the other does not show up as a wrong file; it shows up as a sync that reinstalls the same skill forever.
+And when two walks over one tree feed each other, a copy and the comparison that decides whether to copy, they have to be the same traversal with the same arguments, including the package root that keeps an Agent Plugins package's links inside it. Fixing one and not the other does not show up as a wrong file; it shows up as a sync that reinstalls the same skill forever.
 
 ## Plugin-supplied names are untrusted input
 

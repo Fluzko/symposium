@@ -113,11 +113,14 @@ Problems are contained to the smallest part affected, and reported rather than h
 | `extensions.dev.symposium` is not valid | That package is rejected. |
 | `skills` is not a folder | Reported. The package loads with no skills. |
 | One skill is broken | That skill is skipped. The others load. |
+| A file or folder in a skill resolves outside the package | That file or folder is skipped and reported. The rest of the skill installs. |
 | An `mcp.json` is present | Reported as unsupported. Skills still load. |
 
 ## Security
 
 Symposium reads a package's manifest and skills only from inside the package folder. A `plugin.json`, a `skills` folder, or a skill's `SKILL.md` that resolves outside it, for instance through a link, is refused at the smallest level that applies: the whole package, its skills, or that one skill.
+
+The same boundary holds for everything else in a skill. Installing a skill follows the links in it, as it does for [any skill](./skill-definition.md#symlinks-in-skill-content), but in a package only as far as the package folder: a file or folder that resolves outside it is left out of the installed copy and reported, and the rest of the skill installs.
 
 In a dependency, a package is offered for consent like any plugin a dependency carries; in a plugin source it is as trusted as the source you configured.
 

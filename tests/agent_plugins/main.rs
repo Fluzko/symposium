@@ -9,18 +9,34 @@ const SCOPES: &[&str] = &["agent-plugin-scopes0"];
 struct DeliveringAgent {
     name: &'static str,
     project_skills: &'static str,
-    relocation_var: &'static str,
+    relocation_var: Option<&'static str>,
     config_root: fn(&Path) -> PathBuf,
     plugin_dir: fn(&Path, &str) -> PathBuf,
 }
 
-const AGENTS: &[DeliveringAgent] = &[DeliveringAgent {
-    name: "claude",
-    project_skills: ".claude/skills",
-    relocation_var: "CLAUDE_CONFIG_DIR",
-    config_root: |home| home.join(".claude"),
-    plugin_dir: |root, plugin| root.join("skills").join(plugin),
-}];
+const AGENTS: &[DeliveringAgent] = &[
+    DeliveringAgent {
+        name: "claude",
+        project_skills: ".claude/skills",
+        relocation_var: Some("CLAUDE_CONFIG_DIR"),
+        config_root: |home| home.join(".claude"),
+        plugin_dir: |root, plugin| root.join("skills").join(plugin),
+    },
+    DeliveringAgent {
+        name: "antigravity",
+        project_skills: ".agents/skills",
+        relocation_var: None,
+        config_root: |home| home.join(".gemini/config"),
+        plugin_dir: |root, plugin| root.join("plugins").join(plugin),
+    },
+    DeliveringAgent {
+        name: "goose",
+        project_skills: ".agents/skills",
+        relocation_var: Some("GOOSE_PATH_ROOT"),
+        config_root: |home| home.to_path_buf(),
+        plugin_dir: |root, plugin| root.join(".agents/plugins").join(plugin),
+    },
+];
 
 fn write(path: &Path, contents: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -98,10 +114,12 @@ async fn every_delivering_agent_keeps_the_delivery_contracts() {
         .await
         .unwrap();
 
+        let Some(var) = agent.relocation_var else {
+            continue;
+        };
         with_fixture(TestMode::SimulationOnly, SCOPES, async |mut ctx| {
             let relocated = ctx.tempdir.join("relocated");
             let value = relocated.clone().into_os_string();
-            let var = agent.relocation_var;
             ctx.sym
                 .set_env(move |name| (name == var).then(|| value.clone()));
 
@@ -174,8 +192,18 @@ async fn a_skill_an_agent_takes_as_a_plugin_does_not_rename_its_namesake() {
             .push(UseEntry::Global("gp".into()));
         ctx.sym.save_config()?;
 
-        ctx.symposium(&["init", "--add-agent", "claude", "--add-agent", "kiro"])
-            .await?;
+        ctx.symposium(&[
+            "init",
+            "--add-agent",
+            "claude",
+            "--add-agent",
+            "kiro",
+            "--add-agent",
+            "antigravity",
+            "--add-agent",
+            "opencode",
+        ])
+        .await?;
         ctx.symposium(&["sync"]).await?;
 
         let workspace = ctx.workspace_root.clone().unwrap();
@@ -194,6 +222,11 @@ async fn a_skill_an_agent_takes_as_a_plugin_does_not_rename_its_namesake() {
             kiro.len() == 2 && kiro.iter().all(|name| name.starts_with("guide-")),
             "an agent copying both still needs the suffix: {kiro:?}"
         );
+        let shared = guides(".agents/skills");
+        assert!(
+            shared.len() == 2 && shared.iter().all(|name| name.starts_with("guide-")),
+            "agents sharing a directory agree on each name: {shared:?}"
+        );
         Ok(())
     })
     .await
@@ -202,49 +235,53 @@ async fn a_skill_an_agent_takes_as_a_plugin_does_not_rename_its_namesake() {
 
 #[tokio::test]
 async fn an_unreadable_registry_keeps_global_plugins_until_a_sync_can_read_it() {
-    with_fixture(TestMode::SimulationOnly, SCOPES, async |mut ctx| {
-        ctx.symposium(&["init", "--add-agent", "claude"]).await?;
-        ctx.symposium(&["sync"]).await?;
-        let staged = ctx.sym.config_dir().join("installed/global-guide");
-        let copy = ctx.sym.home_dir().join(".claude/skills/global-guide");
-        assert!(staged.is_dir() && copy.is_dir());
+    for agent in AGENTS {
+        with_fixture(TestMode::SimulationOnly, SCOPES, async |mut ctx| {
+            let name = agent.name;
+            ctx.symposium(&["init", "--add-agent", name]).await?;
+            ctx.symposium(&["sync"]).await?;
+            let staged = ctx.sym.config_dir().join("installed/global-guide");
+            let root = (agent.config_root)(ctx.sym.home_dir());
+            let copy = (agent.plugin_dir)(&root, "global-guide");
+            assert!(staged.is_dir() && copy.is_dir(), "{name}");
 
-        ctx.sym
-            .config
-            .plugins
-            .used
-            .retain(|entry| entry.name() != "global-guide");
-        ctx.sym.config.registries.push(RegistryConfig {
-            name: "gone".into(),
-            git: None,
-            path: Some(ctx.tempdir.join("gone").display().to_string()),
-            auto_update: false,
-        });
-        ctx.sym.save_config()?;
-        let events = ctx.sync_with_report(tracing::Level::INFO).await?;
-        assert!(
-            staged.is_dir() && copy.is_dir(),
-            "kept while `gone` cannot be read"
-        );
-        assert!(
-            events.iter().any(|e| e["kind"] == "warning"
-                && e["message"]
-                    .to_string()
-                    .contains("`gone` could not be read")),
-            "{events:#?}"
-        );
+            ctx.sym
+                .config
+                .plugins
+                .used
+                .retain(|entry| entry.name() != "global-guide");
+            ctx.sym.config.registries.push(RegistryConfig {
+                name: "gone".into(),
+                git: None,
+                path: Some(ctx.tempdir.join("gone").display().to_string()),
+                auto_update: false,
+            });
+            ctx.sym.save_config()?;
+            let events = ctx.sync_with_report(tracing::Level::INFO).await?;
+            assert!(
+                staged.is_dir() && copy.is_dir(),
+                "{name}: kept while `gone` cannot be read"
+            );
+            assert!(
+                events.iter().any(|e| e["kind"] == "warning"
+                    && e["message"]
+                        .to_string()
+                        .contains("`gone` could not be read")),
+                "{events:#?}"
+            );
 
-        ctx.sym
-            .config
-            .registries
-            .retain(|registry| registry.name != "gone");
-        ctx.sym.save_config()?;
-        ctx.symposium(&["sync"]).await?;
-        assert!(!staged.exists() && !copy.exists());
-        Ok(())
-    })
-    .await
-    .unwrap();
+            ctx.sym
+                .config
+                .registries
+                .retain(|registry| registry.name != "gone");
+            ctx.sym.save_config()?;
+            ctx.symposium(&["sync"]).await?;
+            assert!(!staged.exists() && !copy.exists(), "{name}");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
 }
 
 #[cfg(unix)]

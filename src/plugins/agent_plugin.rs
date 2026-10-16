@@ -6,6 +6,7 @@ use serde_json::Value;
 use symposium_sdk::manifest::RawPluginManifest;
 use symposium_sdk::predicate::{DependsOnList, PredicateSet};
 
+use crate::dir_walk::resolves_inside;
 use crate::pm::layout::{AGENT_PLUGIN_FILE, SKILL_FILE};
 
 const SUPPORTED_SCHEMAS: &[&str] = &["https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"];
@@ -230,10 +231,6 @@ fn skill_children(root: &Path, notices: &mut Vec<String>) -> Vec<String> {
         true
     });
     children
-}
-
-fn resolves_inside(root: &Path, path: &Path) -> bool {
-    fs::canonicalize(path).is_ok_and(|resolved| resolved.starts_with(root))
 }
 
 #[cfg(test)]

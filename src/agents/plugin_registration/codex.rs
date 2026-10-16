@@ -22,12 +22,7 @@ pub(crate) fn sync_user_plugins(
     _out: &Output,
 ) -> Result<bool> {
     let debounce = Duration::from_secs(sym.config.sync_debounce_secs);
-    sync_codex_plugins(&codex_dir(sym), root, plugins, debounce)
-}
-
-fn codex_dir(sym: &Symposium) -> PathBuf {
-    sym.env_dir("CODEX_HOME")
-        .unwrap_or_else(|| sym.home_dir().join(".codex"))
+    sync_codex_plugins(&crate::agents::codex_dir(sym), root, plugins, debounce)
 }
 
 fn sync_codex_plugins(

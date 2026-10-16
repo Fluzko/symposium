@@ -92,20 +92,6 @@ fn modified(path: &Path) -> SystemTime {
 }
 
 #[test]
-fn the_codex_directory_follows_codex_home() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut sym = Symposium::from_dir(tmp.path());
-    let default = tmp.path().join(".codex");
-    assert_eq!(codex_dir(&sym), default);
-
-    sym.set_env(|name| (name == "CODEX_HOME").then(|| "/elsewhere/codex".into()));
-    assert_eq!(codex_dir(&sym), Path::new("/elsewhere/codex"));
-
-    sym.set_env(|name| (name == "CODEX_HOME").then(|| "".into()));
-    assert_eq!(codex_dir(&sym), default, "an empty value does not relocate");
-}
-
-#[test]
 fn delivery_writes_what_codex_plugin_add_writes() {
     let codex = Codex::new();
     let fresh = codex.stage("fresh", "0.0.0", "v1");

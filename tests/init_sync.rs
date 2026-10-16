@@ -472,6 +472,38 @@ async fn add_agent_is_additive() {
     .unwrap();
 }
 
+#[tokio::test]
+async fn codex_hooks_and_mcp_servers_follow_codex_home() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["mcp-filtering0", "workspace0"],
+        async |mut ctx| {
+            let relocated = ctx.tempdir.join("relocated-codex");
+            let value = relocated.clone().into_os_string();
+            ctx.sym
+                .set_env(move |name| (name == "CODEX_HOME").then(|| value.clone()));
+
+            ctx.symposium(&["init", "--hook-scope", "global", "--add-agent", "codex"])
+                .await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let hooks = relocated.join("hooks.json");
+            let config = relocated.join("config.toml");
+            assert!(std::fs::read_to_string(&hooks)?.contains("cargo-agents hook codex"));
+            assert!(std::fs::read_to_string(&config)?.contains("[mcp_servers.always-server]"));
+            assert!(!ctx.sym.home_dir().join(".codex").exists());
+
+            ctx.symposium(&["init", "--remove-agent", "codex"]).await?;
+
+            assert!(!std::fs::read_to_string(&hooks)?.contains("cargo-agents hook"));
+            assert!(!std::fs::read_to_string(&config)?.contains("always-server"));
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// `sync` filters MCP servers by their `depends-on` predicates.
 #[tokio::test]
 async fn sync_filters_mcp_servers_by_crates() {

@@ -1,16 +1,24 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::agents::CompiledPlugin;
+use crate::agents::{Agent, CompiledPlugin};
 use crate::config::Symposium;
 use crate::output::Output;
 
 pub(crate) fn sync_user_plugins(
-    _sym: &Symposium,
+    sym: &Symposium,
     _root: &Path,
-    _plugins: &[CompiledPlugin],
+    plugins: &[CompiledPlugin],
     _out: &Output,
 ) -> Result<bool> {
-    Ok(false)
+    super::sync_plugin_copies(sym, Agent::Antigravity, &user_plugins_dir(sym), plugins);
+    Ok(true)
+}
+
+fn user_plugins_dir(sym: &Symposium) -> PathBuf {
+    sym.home_dir()
+        .join(".gemini")
+        .join("config")
+        .join("plugins")
 }

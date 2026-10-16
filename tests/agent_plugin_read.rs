@@ -191,6 +191,62 @@ async fn a_dependency_package_waits_for_consent_then_installs_its_top_level_skil
     .unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_package_skill_link_outside_the_package_is_skipped_and_reported() {
+    use std::os::unix::fs::symlink;
+
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["agent-plugin-links0"],
+        async |mut ctx| {
+            let root = ctx.workspace_root.clone().unwrap();
+            let plugins = ctx.sym.config_dir().join("plugins");
+            for skill in [
+                "linked-package/skills/package-guide",
+                "linked-manifest/skills/manifest-guide",
+            ] {
+                symlink(
+                    root.join("shared/notes.md"),
+                    plugins.join(skill).join("notes.md"),
+                )?;
+            }
+
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            let events = ctx.sync_with_report(tracing::Level::INFO).await?;
+
+            let skills = root.join(".claude/skills");
+            assert!(skills.join("package-guide/SKILL.md").is_file());
+            assert!(!skills.join("package-guide/notes.md").exists());
+            assert_eq!(
+                std::fs::read_to_string(skills.join("manifest-guide/notes.md"))?,
+                "Shared notes living outside both plugins.\n",
+                "a Symposium.toml plugin still follows links anywhere"
+            );
+            let outside: Vec<&str> = events
+                .iter()
+                .filter(|e| e["kind"] == "warning")
+                .filter_map(|e| e["message"].as_str())
+                .filter(|m| m.contains("resolves outside the package"))
+                .collect();
+            assert_eq!(outside.len(), 1, "{events:#?}");
+            assert!(
+                outside[0].ends_with("/package-guide/notes.md: resolves outside the package"),
+                "{outside:?}"
+            );
+
+            let events = ctx.sync_with_report(tracing::Level::INFO).await?;
+            assert!(
+                !events.iter().any(|e| e["kind"] == "skill_installed"),
+                "an unchanged package reinstalls nothing: {events:#?}"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 fn validate(ctx: &TestContext, path: &Path) -> String {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-agents"))
         .args(["plugin", "validate", "--no-check-crates"])

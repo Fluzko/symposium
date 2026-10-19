@@ -29,6 +29,8 @@ use std::sync::Arc;
 /// user-managed skill directories (which lack the marker) untouched.
 pub(crate) const MARKER_FILE: &str = ".symposium";
 
+const SYNC_LOCK_FILE: &str = "sync.lock";
+
 /// Create `path` and any missing ancestors up to `boundary`.
 ///
 /// `boundary` is the workspace root — we never walk above it.
@@ -411,6 +413,7 @@ async fn resolve_custom_predicate_entries(
 /// Run the full sync: discover applicable skills, install into agent dirs,
 /// clean up stale installations.
 pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLevel) -> Result<()> {
+    let _lock = lock(sym.config_dir())?;
     let out = &Output::quiet();
     let loaded = deps
         .load()
@@ -753,6 +756,20 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     }
 
     Ok(())
+}
+
+fn lock(dir: &Path) -> Result<fs::File> {
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(SYNC_LOCK_FILE);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("lock {}", path.display()))?;
+    Ok(file)
 }
 
 pub(crate) fn unregister_user_plugins(sym: &Symposium) {

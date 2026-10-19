@@ -391,7 +391,7 @@ OpenCode's plugin system supports these events, but Symposium does not currently
 
 ### Hook registration
 
-**Goose does not implement lifecycle hooks.** It uses MCP extensions for extensibility. `symposium` cannot register hooks for Goose.
+**Symposium registers no hooks for Goose.** Goose has lifecycle hooks of its own (a plugin can carry them in `hooks/hooks.json`), but symposium does not use them.
 
 Goose is supported as a **skills-only** agent — `cargo agents sync` will install skill files in the vendor-neutral `.agents/skills/` path.
 

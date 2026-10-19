@@ -781,11 +781,9 @@ pub struct LoadWarning {
     pub message: String,
 }
 
-/// Raw scan results from a plugin source directory. Bare `SKILL.md` entries
-/// are synthesized into default plugins, so this is just a plugin list.
 #[derive(Debug)]
 struct SourceDirContents {
-    plugins: Vec<Result<Plugin>>,
+    plugins: Vec<(PathBuf, Result<Plugin>)>,
 }
 
 /// Where a plugin manifest came from, for validation rules that differ by
@@ -1350,13 +1348,20 @@ fn scan_source_dir<P: AsRef<Path>>(dir: P, source_name: &str) -> Result<SourceDi
     let dir = dir.as_ref();
     let mut plugins = Vec::new();
 
-    for entry in crate::pm::layout::enumerate(dir)? {
-        let Some(plugin) = entry_plugin(dir, &entry.subpath, source_name) else {
+    let subpaths = match crate::pm::layout::classify(dir) {
+        Some(_) => vec![PathBuf::new()],
+        None => crate::pm::layout::enumerate(dir)?
+            .into_iter()
+            .map(|entry| entry.subpath)
+            .collect(),
+    };
+    for subpath in subpaths {
+        let Some(plugin) = entry_plugin(dir, &subpath, source_name) else {
             continue;
         };
         let plugin = plugin.and_then(|p| validate_plugin(p, PluginKind::Registry));
-        tracing::debug!(subpath = %entry.subpath.display(), ok = plugin.is_ok(), "loaded entry");
-        plugins.push(plugin);
+        tracing::debug!(subpath = %subpath.display(), ok = plugin.is_ok(), "loaded entry");
+        plugins.push((subpath, plugin));
     }
 
     Ok(SourceDirContents { plugins })
@@ -1365,8 +1370,6 @@ fn scan_source_dir<P: AsRef<Path>>(dir: P, source_name: &str) -> Result<SourceDi
 /// Result of validating a single item in a plugin source directory.
 #[derive(Debug)]
 pub struct ValidationResult {
-    /// Identifier for the validated item: the plugin/skill name (its id within
-    /// the source), or `<unknown>` when a load failed before a name was known.
     pub id: String,
     /// What kind of item was validated.
     pub kind: ValidationKind,
@@ -1394,20 +1397,14 @@ impl std::fmt::Display for ValidationKind {
     }
 }
 
-/// Validate a directory as a plugin source.
-///
-/// Scans for TOML plugin manifests and standalone SKILL.md files,
-/// attempts to load each, and returns validation results for all items found.
 pub fn validate_source_dir(dir: &Path) -> Result<Vec<ValidationResult>> {
     let contents = scan_source_dir(dir, "")?;
     let mut results = Vec::new();
 
-    for plugin_result in contents.plugins {
+    for (subpath, plugin_result) in contents.plugins {
         let (id, plugin, result) = match plugin_result {
-            // The plugin's own name is its id; the error names the directory it
-            // came from.
             Ok(parsed) => (parsed.canonical.name.clone(), Some(parsed), Ok(())),
-            Err(e) => ("<unknown>".to_string(), None, Err(e)),
+            Err(e) => (entry_location(dir, &subpath), None, Err(e)),
         };
 
         let mut children = Vec::new();
@@ -1476,6 +1473,14 @@ pub fn validate_source_dir(dir: &Path) -> Result<Vec<ValidationResult>> {
     Ok(results)
 }
 
+fn entry_location(dir: &Path, subpath: &Path) -> String {
+    if subpath.as_os_str().is_empty() {
+        dir.display().to_string()
+    } else {
+        crate::pm::layout::subpath_key(subpath)
+    }
+}
+
 /// Collect all crate names referenced in predicates across a plugin source directory.
 ///
 /// Scans TOML plugin manifests (skill group `depends-on`) and
@@ -1485,7 +1490,11 @@ pub fn collect_crate_names_in_source_dir(dir: &Path) -> Result<Vec<String>> {
     let contents = scan_source_dir(dir, "")?;
     let mut names = std::collections::BTreeSet::new();
 
-    for plugin_result in contents.plugins.into_iter().flatten() {
+    for plugin_result in contents
+        .plugins
+        .into_iter()
+        .filter_map(|(_, plugin)| plugin.ok())
+    {
         plugin_result
             .manifest
             .predicates
@@ -2461,7 +2470,7 @@ mod tests {
         let mut names: Vec<&str> = contents
             .plugins
             .iter()
-            .map(|p| p.as_ref().unwrap().manifest.name.as_str())
+            .map(|(_, p)| p.as_ref().unwrap().manifest.name.as_str())
             .collect();
         names.sort();
         assert_eq!(names, vec!["assert-struct", "my-plugin"]);
@@ -2470,7 +2479,7 @@ mod tests {
         let bare = contents
             .plugins
             .iter()
-            .map(|p| p.as_ref().unwrap())
+            .map(|(_, p)| p.as_ref().unwrap())
             .find(|p| p.manifest.name == "assert-struct")
             .unwrap();
         assert!(!bare.manifest.requires_use);
@@ -2527,45 +2536,29 @@ mod tests {
     }
 
     #[test]
-    fn scan_source_dir_rejects_root_level_skill() {
+    fn scan_source_dir_reads_a_root_entry_as_that_entry() {
         use crate::test_utils::{File, instantiate_fixture};
-        let tmp = instantiate_fixture(&[File(
-            "SKILL.md",
-            indoc! {"
-                ---
-                name: root-skill
-                depends-on: serde
-                ---
-
-                Root level skill.
-            "},
-        )]);
-
-        let err = scan_source_dir(tmp.path(), "").unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("plugin source root contains SKILL.md"),
-            "expected root SKILL.md error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn scan_source_dir_rejects_root_level_plugin() {
-        use crate::test_utils::{File, instantiate_fixture};
-        let tmp = instantiate_fixture(&[File(
-            "Symposium.toml",
-            indoc! {r#"
-                name = "root-plugin"
-                depends-on = ["*"]
-            "#},
-        )]);
-
-        let err = scan_source_dir(tmp.path(), "").unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("plugin source root contains Symposium.toml"),
-            "expected root Symposium.toml error, got: {err}"
-        );
+        for (file, content, name) in [
+            (
+                "SKILL.md",
+                "---\nname: root-skill\ndescription: d\ndepends-on: serde\n---\n",
+                "root-skill",
+            ),
+            (
+                "Symposium.toml",
+                "name = \"root-plugin\"\ndepends-on = [\"*\"]\n",
+                "root-plugin",
+            ),
+        ] {
+            let tmp = instantiate_fixture(&[File(file, content)]);
+            let contents = scan_source_dir(tmp.path(), "").unwrap();
+            let names: Vec<String> = contents
+                .plugins
+                .into_iter()
+                .map(|(_, plugin)| plugin.unwrap().manifest.name)
+                .collect();
+            assert_eq!(names, [name], "{file}");
+        }
     }
 
     #[test]
@@ -2597,7 +2590,7 @@ mod tests {
         let contents = scan_source_dir(tmp.path(), "").unwrap();
         assert_eq!(contents.plugins.len(), 1);
         expect_test::expect![[r#"mixed-plugin"#]]
-            .assert_eq(&contents.plugins[0].as_ref().unwrap().manifest.name);
+            .assert_eq(&contents.plugins[0].1.as_ref().unwrap().manifest.name);
     }
 
     #[test]
@@ -2622,7 +2615,7 @@ mod tests {
         let contents = scan_source_dir(tmp.path(), "").unwrap();
         assert_eq!(contents.plugins.len(), 1);
         expect_test::expect![[r#"preferred-plugin"#]]
-            .assert_eq(&contents.plugins[0].as_ref().unwrap().manifest.name);
+            .assert_eq(&contents.plugins[0].1.as_ref().unwrap().manifest.name);
     }
 
     #[test]
@@ -2685,7 +2678,7 @@ mod tests {
         let mut names: Vec<&str> = contents
             .plugins
             .iter()
-            .map(|p| p.as_ref().unwrap().manifest.name.as_str())
+            .map(|(_, p)| p.as_ref().unwrap().manifest.name.as_str())
             .collect();
         names.sort();
         assert_eq!(names, vec!["baz-skill", "foo-plugin"]);
@@ -2781,6 +2774,7 @@ mod tests {
 
         let results = validate_source_dir(tmp.path()).unwrap();
         assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "unnamed");
         let err = format!("{:#}", results[0].result.as_ref().unwrap_err());
         assert!(err.contains("unnamed"), "{err}");
     }
@@ -4549,7 +4543,7 @@ mod tests {
 
         let contents = scan_source_dir(tmp.path(), "").unwrap();
         assert_eq!(contents.plugins.len(), 1);
-        let parsed = contents.plugins[0].as_ref().unwrap();
+        let parsed = contents.plugins[0].1.as_ref().unwrap();
         let sub = &parsed.manifest.subcommands["demo"];
         assert_eq!(sub.description, "Run the demo tool");
         assert_eq!(sub.audience, Audience::Agents);

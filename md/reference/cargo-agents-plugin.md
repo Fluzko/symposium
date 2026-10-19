@@ -40,7 +40,7 @@ Show a plugin: its id and its effective configuration as TOML, after validation 
 cargo agents plugin validate <PATH> [--no-check-crates]
 ```
 
-Validate a plugin source directory or a single TOML manifest file. Useful when authoring plugins.
+Validate a plugin source directory, a single plugin or skill directory, or a single TOML manifest file. Useful when authoring plugins.
 
 | Flag | Description |
 |------|-------------|

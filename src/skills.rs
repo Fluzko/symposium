@@ -1146,6 +1146,8 @@ mod tests {
         // Create a plugin that only applies to "other-crate"
         let plugin = PluginManifest {
             name: "other-crate-plugin".to_string(),
+            version: None,
+            description: None,
             predicates: pred_set("other-crate"),
             hooks: vec![],
             skills: vec![SkillGroup {
@@ -1167,6 +1169,7 @@ mod tests {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
                 manifest: plugin,
                 workspace_member: false,
+                agent_plugin_root: None,
             }],
             warnings: vec![],
             unreadable_registries: vec![],
@@ -1206,6 +1209,8 @@ mod tests {
         // Create a plugin with wildcard that has a group targeting different crate
         let plugin = PluginManifest {
             name: "wildcard-plugin".to_string(),
+            version: None,
+            description: None,
             predicates: pred_set("*"), // Plugin applies to all
             hooks: vec![],
             skills: vec![SkillGroup {
@@ -1227,6 +1232,7 @@ mod tests {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
                 manifest: plugin,
                 workspace_member: false,
+                agent_plugin_root: None,
             }],
             warnings: vec![],
             unreadable_registries: vec![],
@@ -1284,6 +1290,8 @@ mod tests {
         // Create a plugin where all levels match serde
         let plugin = PluginManifest {
             name: "serde-plugin".to_string(),
+            version: None,
+            description: None,
             predicates: pred_set("serde"), // Plugin targets serde
             hooks: vec![],
             skills: vec![SkillGroup {
@@ -1305,6 +1313,7 @@ mod tests {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
                 manifest: plugin,
                 workspace_member: false,
+                agent_plugin_root: None,
             }],
             warnings: vec![],
             unreadable_registries: vec![],
@@ -1362,6 +1371,8 @@ mod tests {
         // Plugin matches by crates, but its shell predicate fails.
         let plugin = PluginManifest {
             name: "p".into(),
+            version: None,
+            description: None,
             predicates: PredicateSet {
                 predicates: vec![
                     Predicate::DependsOn("serde".into(), None),
@@ -1388,6 +1399,7 @@ mod tests {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
                 manifest: plugin,
                 workspace_member: false,
+                agent_plugin_root: None,
             }],
             warnings: vec![],
             unreadable_registries: vec![],
@@ -1441,6 +1453,8 @@ mod tests {
 
         let plugin = PluginManifest {
             name: "p".into(),
+            version: None,
+            description: None,
             predicates: PredicateSet {
                 predicates: vec![
                     Predicate::DependsOn("serde".into(), None),
@@ -1472,6 +1486,7 @@ mod tests {
                 canonical: PackageId::new("test", &plugin.name, ANY_VERSION),
                 manifest: plugin,
                 workspace_member: false,
+                agent_plugin_root: None,
             }],
             warnings: vec![],
             unreadable_registries: vec![],
@@ -1579,6 +1594,8 @@ mod tests {
 
         let plugin = PluginManifest {
             name: "my-skill".to_string(),
+            version: None,
+            description: None,
             predicates: pred_set("serde"),
             installations: vec![],
             hooks: vec![],
@@ -1601,6 +1618,7 @@ mod tests {
                 canonical: crate::pm::PackageId::any_version("recs", "my-skill"),
                 manifest: plugin,
                 workspace_member: false,
+                agent_plugin_root: None,
             }],
             warnings: vec![],
             unreadable_registries: vec![],

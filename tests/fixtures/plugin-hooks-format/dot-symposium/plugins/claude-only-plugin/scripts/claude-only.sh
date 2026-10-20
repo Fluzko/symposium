@@ -1,2 +1,2 @@
 #!/bin/sh
-echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"claude-only-fired"}}'
+echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"claude-only-fired from $CLAUDE_PLUGIN_ROOT\"}}"

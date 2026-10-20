@@ -312,6 +312,8 @@ pub struct Plugin {
 
     pub agent_plugin_root: Option<PathBuf>,
 
+    pub root: PathBuf,
+
     /// The plugin's canonical package identity. Set to the resolved crate id for
     /// a plugin loaded through a `[[plugins]] source.cargo` chained reference (a
     /// crate carrying its own manifest). Registry and workspace plugins have no
@@ -1017,7 +1019,8 @@ pub(crate) fn validate_plugin(plugin: UnvalidatedPlugin, kind: PluginKind) -> Re
         // Only the workspace-plugin loader stamps true; nothing a PM offers is
         // a workspace member.
         workspace_member: false,
-        agent_plugin_root: agent_plugin.then(|| fs::canonicalize(&root).unwrap_or(root)),
+        agent_plugin_root: agent_plugin.then(|| fs::canonicalize(&root).unwrap_or(root.clone())),
+        root,
     })
 }
 
@@ -1354,6 +1357,7 @@ fn workspace_plugin_for_dir(
         manifest: plugin,
         workspace_member: true,
         agent_plugin_root: agent_plugin.then(|| dir.to_path_buf()),
+        root: dir.to_path_buf(),
     }))
 }
 
@@ -1577,6 +1581,7 @@ fn load_plugin_as(
         // loader is the only place that stamps true.
         workspace_member: false,
         agent_plugin_root: None,
+        root: base.to_path_buf(),
     })
 }
 
@@ -3203,6 +3208,7 @@ mod tests {
             manifest: plugin,
             workspace_member: false,
             agent_plugin_root: None,
+            root: PathBuf::new(),
             canonical: PackageId::new("test", "test", ANY_VERSION),
         };
         let deps: Vec<crate::pm::PackageId> = Vec::new();
@@ -4655,6 +4661,7 @@ mod tests {
             },
             workspace_member: false,
             agent_plugin_root: None,
+            root: PathBuf::new(),
             canonical: PackageId::new("test", plugin_name, ANY_VERSION),
         }
     }

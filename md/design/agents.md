@@ -25,6 +25,8 @@ For each agent, `cargo agents` needs to know how to:
 
 Where these files go depends on whether the agent is configured at the user level or the project level (see [`sync --agent`](./sync-agent-flow.md)).
 
+Unregistering takes symposium's entries out of a hooks file it shares with the user, along with the event arrays and the `hooks` object that this leaves empty. Whatever else is in the file stays as it was.
+
 ## Extension locations
 
 When installing skills, `cargo agents` prefers vendor-neutral paths where possible:

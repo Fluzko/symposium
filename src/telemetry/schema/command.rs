@@ -34,6 +34,7 @@ pub(in crate::telemetry) enum BuiltinCommand {
     PluginList,
     PluginShow,
     PluginValidate,
+    PluginCompile,
     SelfUpdate,
     CrateInfo,
 }
@@ -66,6 +67,7 @@ impl BuiltinCommand {
             PluginCommand::List => Self::PluginList,
             PluginCommand::Show { .. } => Self::PluginShow,
             PluginCommand::Validate { .. } => Self::PluginValidate,
+            PluginCommand::Compile { .. } => Self::PluginCompile,
         }
     }
 
@@ -83,6 +85,7 @@ impl BuiltinCommand {
             Self::PluginList => "plugin_list",
             Self::PluginShow => "plugin_show",
             Self::PluginValidate => "plugin_validate",
+            Self::PluginCompile => "plugin_compile",
             Self::SelfUpdate => "self_update",
             Self::CrateInfo => "crate_info",
         }
@@ -385,6 +388,7 @@ mod tests {
             (BuiltinCommand::PluginList, "plugin_list"),
             (BuiltinCommand::PluginShow, "plugin_show"),
             (BuiltinCommand::PluginValidate, "plugin_validate"),
+            (BuiltinCommand::PluginCompile, "plugin_compile"),
             (BuiltinCommand::SelfUpdate, "self_update"),
             (BuiltinCommand::CrateInfo, "crate_info"),
         ];

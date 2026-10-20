@@ -203,6 +203,16 @@ pub enum PluginCommand {
         #[arg(long)]
         no_check_crates: bool,
     },
+
+    /// Compile a plugin into an Agent Plugins directory that agents load directly
+    Compile {
+        /// Path to the plugin or skill directory
+        path: std::path::PathBuf,
+
+        /// Directory to write the compiled plugin into, as <OUT>/<name>
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
 }
 
 /// Run a parsed CLI command.
@@ -333,6 +343,10 @@ pub async fn run(
                 code => bail!("subcommand exited with status: {code}"),
             }
         }
+        Commands::Plugin {
+            command: PluginCommand::Compile { path, out },
+        } => crate::compile::compile_local(sym, &path, &out, update).await,
+
         // These commands can't easily be extracted since they do I/O
         // (stdin/stdout for hooks). The binary handles them directly.
         Commands::Hook { .. } | Commands::Plugin { .. } => {

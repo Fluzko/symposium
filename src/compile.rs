@@ -93,6 +93,23 @@ pub(crate) fn compile(
     warned: &mut BTreeSet<String>,
     skip_cleanup: bool,
 ) -> Compiled {
+    let mut compiled = write_plugins(root, plugins, debounce, warned);
+    if skip_cleanup {
+        let staged = staged_plugins(root, &compiled.plugins);
+        compiled.plugins.extend(staged);
+    } else {
+        let keep: BTreeSet<&Path> = compiled.plugins.iter().map(|p| p.dir.as_path()).collect();
+        sync::reap_unlisted(root, |dir| keep.contains(dir));
+    }
+    compiled
+}
+
+fn write_plugins(
+    root: &Path,
+    plugins: &[GlobalPlugin],
+    debounce: Duration,
+    warned: &mut BTreeSet<String>,
+) -> Compiled {
     let mut compiled = Compiled::default();
     for (plugin, name) in plugins.iter().zip(plugin_dir_names(plugins)) {
         let Some(name) = name else {
@@ -113,14 +130,74 @@ pub(crate) fn compile(
             Err(e) => warn(format!("failed to compile plugin {name}: {e:#}")),
         }
     }
-    if skip_cleanup {
-        let staged = staged_plugins(root, &compiled.plugins);
-        compiled.plugins.extend(staged);
-    } else {
-        let keep: BTreeSet<&Path> = compiled.plugins.iter().map(|p| p.dir.as_path()).collect();
-        sync::reap_unlisted(root, |dir| keep.contains(dir));
-    }
     compiled
+}
+
+pub async fn compile_local(
+    sym: &Symposium,
+    path: &Path,
+    out: &Path,
+    update: UpdateLevel,
+) -> Result<()> {
+    let dir = path
+        .canonicalize()
+        .with_context(|| format!("cannot read `{}`", path.display()))?;
+    let unvalidated = crate::plugins::entry_plugin(&dir, Path::new(""), "local")
+        .with_context(|| format!("no Symposium.toml or SKILL.md in `{}`", dir.display()))??;
+    let plugin = crate::plugins::validate_plugin(unvalidated, crate::pm::PluginKind::Registry)
+        .with_context(|| format!("run `cargo agents plugin validate` on `{}`", dir.display()))?;
+
+    let manifest = &plugin.manifest;
+    let left_out: Vec<&str> = [
+        (!manifest.hooks.is_empty(), "hooks"),
+        (!manifest.mcp_servers.is_empty(), "MCP servers"),
+        (!manifest.subcommands.is_empty(), "subcommands"),
+        (!manifest.chained.is_empty(), "[[plugins]] references"),
+    ]
+    .into_iter()
+    .filter_map(|(present, part)| present.then_some(part))
+    .collect();
+    if !left_out.is_empty() {
+        warn(format!(
+            "`{}` also has {}; an Agent Plugins directory carries only skills, so they are left out",
+            manifest.name,
+            left_out.join(", ")
+        ));
+    }
+
+    let names = [plugin.manifest.name.clone()];
+    let mut ctx = PredicateContext::new(&[]).with_used_names(&names);
+    ctx.set_dependencies_satisfied(true);
+    let plugins = vec![plugin];
+    let skills = crate::skills::collect_skills(sym, &plugins, &mut ctx, update).await;
+    let grouped = group_skills(plugins, skills);
+    if grouped.is_empty() {
+        anyhow::bail!("`{}` offers no skills to compile", dir.display());
+    }
+
+    let out =
+        std::path::absolute(out).with_context(|| format!("cannot resolve `{}`", out.display()))?;
+    let compiled = write_plugins(&out, &grouped, Duration::ZERO, &mut BTreeSet::new());
+    let Some(plugin) = compiled.plugins.first() else {
+        anyhow::bail!("nothing was compiled into `{}`", out.display());
+    };
+    let dir = plugin.dir.display();
+    tracing::info!(
+        report = %ReportEvent::PluginCompiled {
+            name: plugin.name.clone(),
+            dir: dir.to_string(),
+        },
+    );
+    for message in [
+        format!("Claude Code: `claude --plugin-dir {dir}`"),
+        format!("GitHub Copilot: `copilot --plugin-dir {dir}`"),
+        "Antigravity CLI: copy it into `~/.gemini/config/plugins/`; Goose: copy it into `~/.agents/plugins/`"
+            .to_string(),
+        "Codex CLI reads plugins only from a marketplace".to_string(),
+    ] {
+        tracing::info!(report = %ReportEvent::Info { message });
+    }
+    Ok(())
 }
 
 fn staged_plugins(root: &Path, compiled: &[CompiledPlugin]) -> Vec<CompiledPlugin> {

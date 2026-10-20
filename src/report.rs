@@ -143,6 +143,9 @@ pub enum ReportEvent {
     /// A `[plugins] use` entry was dropped by `cargo agents use --remove`.
     PluginRemoved { name: String, global: bool },
 
+    /// A plugin was compiled by `cargo agents plugin compile`.
+    PluginCompiled { name: String, dir: String },
+
     /// One line of the `cargo agents status` enablement report.
     PluginStatus {
         name: String,
@@ -337,6 +340,9 @@ impl ReportEvent {
                     "this workspace"
                 };
                 format!("➖ removed the {name} enablement for {scope}")
+            }
+            Self::PluginCompiled { name, dir } => {
+                format!("compiled {name} into {dir}; load it with:")
             }
             Self::PluginStatus {
                 name,

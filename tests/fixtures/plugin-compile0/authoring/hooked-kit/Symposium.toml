@@ -1,0 +1,9 @@
+name = "hooked-kit"
+
+[[skills]]
+source.path = "skills"
+
+[[hooks]]
+name = "check"
+event = "PreToolUse"
+command = { script = "check.sh" }

@@ -1374,8 +1374,8 @@ fn scan_source_dir<P: AsRef<Path>>(dir: P, source_name: &str) -> Result<SourceDi
     let mut plugins = Vec::new();
 
     let subpaths = match crate::pm::layout::classify(dir) {
-        Some(crate::pm::layout::EntryKind::AgentPlugin(_)) => vec![PathBuf::new()],
-        _ => crate::pm::layout::enumerate(dir)?
+        Some(_) => vec![PathBuf::new()],
+        None => crate::pm::layout::enumerate(dir)?
             .into_iter()
             .map(|entry| entry.subpath)
             .collect(),
@@ -2558,45 +2558,29 @@ mod tests {
     }
 
     #[test]
-    fn scan_source_dir_rejects_root_level_skill() {
+    fn scan_source_dir_reads_a_root_entry_as_that_entry() {
         use crate::test_utils::{File, instantiate_fixture};
-        let tmp = instantiate_fixture(&[File(
-            "SKILL.md",
-            indoc! {"
-                ---
-                name: root-skill
-                depends-on: serde
-                ---
-
-                Root level skill.
-            "},
-        )]);
-
-        let err = scan_source_dir(tmp.path(), "").unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("plugin source root contains SKILL.md"),
-            "expected root SKILL.md error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn scan_source_dir_rejects_root_level_plugin() {
-        use crate::test_utils::{File, instantiate_fixture};
-        let tmp = instantiate_fixture(&[File(
-            "Symposium.toml",
-            indoc! {r#"
-                name = "root-plugin"
-                depends-on = ["*"]
-            "#},
-        )]);
-
-        let err = scan_source_dir(tmp.path(), "").unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("plugin source root contains Symposium.toml"),
-            "expected root Symposium.toml error, got: {err}"
-        );
+        for (file, content, name) in [
+            (
+                "SKILL.md",
+                "---\nname: root-skill\ndescription: d\ndepends-on: serde\n---\n",
+                "root-skill",
+            ),
+            (
+                "Symposium.toml",
+                "name = \"root-plugin\"\ndepends-on = [\"*\"]\n",
+                "root-plugin",
+            ),
+        ] {
+            let tmp = instantiate_fixture(&[File(file, content)]);
+            let contents = scan_source_dir(tmp.path(), "").unwrap();
+            let names: Vec<String> = contents
+                .plugins
+                .into_iter()
+                .map(|plugin| plugin.unwrap().manifest.name)
+                .collect();
+            assert_eq!(names, [name], "{file}");
+        }
     }
 
     #[test]

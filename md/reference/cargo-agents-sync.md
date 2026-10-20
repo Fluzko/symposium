@@ -18,7 +18,7 @@ Must be run from within a Rust workspace. Performs the following steps:
 
 2. **Scan dependencies**: reads the full dependency graph from the workspace.
 
-3. **Discover applicable skills**: loads plugin sources (from user config) and matches skill predicates against workspace dependencies.
+3. **Discover applicable skills**: loads plugin sources (from user config) and matches skill predicates against workspace dependencies. A `SKILL.md` that fails to load, such as one whose frontmatter is invalid or whose `name` is not a plain directory name, is skipped with a warning naming the file.
 
 4. **Install skills**: for each configured agent, copies applicable `SKILL.md` files into the agent's expected skill directory (e.g., `.claude/skills/` for Claude Code, `.agents/skills/` for Antigravity/Copilot/Codex). A `.gitignore` containing `*` is written into every new skill directory, and an empty `.symposium` marker file is dropped into each installed skill directory.
 

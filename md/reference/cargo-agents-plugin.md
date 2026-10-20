@@ -60,6 +60,17 @@ The plugin is linked into `~/.symposium/plugins/` under its name and enabled in 
 
 A plugin with its own `depends-on` or predicates still follows them: it is active only in workspaces where they hold.
 
+After syncing, `try` asks each configured agent what it loaded, using the agent's own listing command (none of them calls a model), and reports the plugin's skills it does not list:
+
+| Agent | Command |
+|-------|---------|
+| Codex CLI | `codex debug prompt-input hi` |
+| GitHub Copilot | `copilot skill list --json` |
+| Goose | `goose skills list` |
+| OpenCode | `opencode debug skill` |
+
+Claude Code, Antigravity CLI and Kiro have no such command: start a new session in the project and run `/skills`. An agent whose command is not on `PATH` is skipped.
+
 `--remove` discards the trial: it removes the link and the enablement, and syncs, which removes everything installed for the plugin in the current workspace. Other workspaces are cleaned on their next sync. A directory in `~/.symposium/plugins/` that `try` did not link is left alone.
 
 | Flag | Description |

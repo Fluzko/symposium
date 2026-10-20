@@ -96,7 +96,7 @@ cargo agents plugin validate .
 cargo agents plugin validate . --no-check-crates   # skip the crates.io name check
 ```
 
-To try the entry before opening the pull request, run `cargo agents plugin try widgetlib/` from the checkout: it links the directory into `~/.symposium/plugins/`, enables it in every workspace, and syncs the current one. Use it in a project that depends on the crate; Symposium reads the directory in place, so edits reach the agents on the next `cargo agents sync`. Afterwards, `cargo agents plugin try --remove widgetlib/` removes the link and the enablement and syncs; other projects are cleaned on their next sync. Once a shared entry is merged, remove any personal copy of the same skill, or both copies install.
+To try the entry before opening the pull request, run `cargo agents plugin try widgetlib/` from the checkout: it links the directory into `~/.symposium/plugins/`, enables it in every workspace, syncs the current one, and reports which configured agents list its skills (Claude Code, Antigravity and Kiro have no listing command; check with `/skills` in a new session). Use it in a project that depends on the crate; Symposium reads the directory in place, so edits reach the agents on the next `cargo agents sync`. Afterwards, `cargo agents plugin try --remove widgetlib/` removes the link and the enablement and syncs; other projects are cleaned on their next sync. Once a shared entry is merged, remove any personal copy of the same skill, or both copies install.
 
 Reference: https://symposium.dev/reference/plugin-source.html
 

@@ -312,3 +312,82 @@ async fn try_remove_cleans_other_workspaces_on_their_next_sync() {
     .await
     .unwrap();
 }
+
+fn fake_agent(ctx: &TestContext, program: &str, stdout: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = ctx.sym.config_dir().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = bin.join(program);
+    std::fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{stdout}'\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+async fn report_messages(ctx: &mut TestContext, args: &[&str]) -> Vec<String> {
+    use symposium::report::{ReportLayer, ReportMode};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    symposium_testlib::install_tracing_baseline();
+    let (layer, handle) = ReportLayer::new(ReportMode::Json, tracing::Level::INFO);
+    let guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+    ctx.symposium(args).await.unwrap();
+    drop(guard);
+    handle
+        .drain()
+        .iter()
+        .filter_map(|event| event["message"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test]
+async fn try_reports_what_each_agent_lists() {
+    with_fixture(TestMode::SimulationOnly, &["plugin-try0"], async |mut ctx| {
+        init(&mut ctx).await?;
+        fake_agent(
+            &ctx,
+            "codex",
+            r#"[{"content":[{"text":"<skills_instructions>\n### Available skills\n- kit-guidance: Guidance (file: r0/kit-guidance/SKILL.md)"}]}]"#,
+        );
+        fake_agent(&ctx, "copilot", "[]");
+        let kit = plugin_path(&ctx, "dormant-kit");
+
+        let messages = report_messages(&mut ctx, &["plugin", "try", &kit]).await;
+
+        for expected in [
+            "Codex CLI lists kit-guidance",
+            "GitHub Copilot does not list kit-guidance (checked with `copilot skill list --json`)",
+            "Claude Code has no listing command; start a new session here and run `/skills`",
+        ] {
+            assert!(
+                messages.iter().any(|m| m == expected),
+                "missing {expected:?} in {messages:#?}"
+            );
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn try_skips_agents_that_are_not_installed() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugin-try0"],
+        async |mut ctx| {
+            init(&mut ctx).await?;
+            let kit = plugin_path(&ctx, "dormant-kit");
+
+            let messages = report_messages(&mut ctx, &["plugin", "try", &kit]).await;
+
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m == "Codex CLI: `codex` is not on PATH, not checked"),
+                "{messages:#?}"
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}

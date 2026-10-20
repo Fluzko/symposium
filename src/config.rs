@@ -417,6 +417,7 @@ pub struct Symposium {
     pub config: Config,
     dirs: crate::dirs::SymposiumDirs,
     home_dir: PathBuf,
+    agent_path: Option<PathBuf>,
 }
 
 impl Symposium {
@@ -441,6 +442,7 @@ impl Symposium {
             config,
             dirs,
             home_dir,
+            agent_path: None,
         }
     }
 
@@ -466,6 +468,7 @@ impl Symposium {
             config,
             dirs,
             home_dir,
+            agent_path: Some(root.join("bin")),
         }
     }
 
@@ -493,6 +496,14 @@ impl Symposium {
             Some(path) => std::process::Command::new(path),
             None => std::process::Command::new("cargo"),
         }
+    }
+
+    pub fn agent_command(&self, program: &str) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new(program);
+        if let Some(path) = &self.agent_path {
+            cmd.env("PATH", path);
+        }
+        cmd
     }
 
     /// Create an [`InstallContext`] for use with `symposium-install` functions.

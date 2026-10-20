@@ -238,6 +238,7 @@ mod tests {
             workspace_member: false,
             canonical: PackageId::new("test", name, ANY_VERSION),
             agent_plugin_root: None,
+            root: std::path::PathBuf::new(),
         }
     }
 

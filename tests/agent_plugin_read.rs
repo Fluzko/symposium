@@ -273,7 +273,7 @@ async fn plugin_validate_reports_packages_and_fails_only_on_errors() {
                 exit: 1
                 ⚠️  $CONFIG_DIR/plugins/pdf-tools: unknown field `commands` ignored
                 ⚠️  $CONFIG_DIR/plugins/pdf-tools: `mcp.json` is not supported yet; its MCP servers are ignored
-                  ✅ gated-tools (agent plugin)
+                  ⚠️  gated-tools (agent plugin): `plugin.json` sets no `version`; agents that cache plugins by version, such as Codex, can keep an outdated copy
                   ✅ serde-tables (skill)
                   ⚠️  pdf-tools (agent plugin): plugin `pdf-tools` references no dependency; it stays dormant until enabled with `cargo agents use pdf-tools`
                   ✅ extract-tables (skill)

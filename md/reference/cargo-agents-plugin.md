@@ -46,3 +46,23 @@ Validate a plugin source directory or a single TOML manifest file. Useful when a
 |------|-------------|
 | `<PATH>` | Path to a directory or a single `.toml` file |
 | `--no-check-crates` | Skip checking that crate names in predicates exist on crates.io |
+
+### `cargo agents plugin try`
+
+```bash
+cargo agents plugin try <PATH>
+cargo agents plugin try --remove <PATH or NAME>
+```
+
+Install a plugin you are writing in your agents, the way a user would have it, so you can open an agent and use it. `<PATH>` is a plugin directory (with a `Symposium.toml`) or a skill directory (with a `SKILL.md`).
+
+The plugin is linked into `~/.symposium/plugins/` under its name and enabled in every workspace, then the current workspace is synced. Symposium reads your directory in place, so an edit reaches your agents on the next sync: `cargo agents sync`, or the automatic one when an agent starts a session. Most agents then need a new session (Claude Code also takes `/reload-plugins`, Copilot CLI `/restart`).
+
+A plugin with its own `depends-on` or predicates still follows them: it is active only in workspaces where they hold.
+
+`--remove` discards the trial: it removes the link and the enablement, and syncs, which removes everything installed for the plugin in the current workspace. Other workspaces are cleaned on their next sync. A directory in `~/.symposium/plugins/` that `try` did not link is left alone.
+
+| Flag | Description |
+|------|-------------|
+| `<PATH>` | Path to the plugin or skill directory; with `--remove`, its path or the plugin name |
+| `--remove` | Discard the trial |

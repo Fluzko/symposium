@@ -96,7 +96,7 @@ cargo agents plugin validate .
 cargo agents plugin validate . --no-check-crates   # skip the crates.io name check
 ```
 
-To try the entry before opening the pull request, copy its directory into `~/.symposium/plugins/`, a registry Symposium reads by default (`mkdir -p ~/.symposium/plugins && cp -R widgetlib ~/.symposium/plugins/`), and run `cargo agents sync` in a project that depends on the crate. Afterwards, delete the copy and run `cargo agents sync` again. Once a shared entry is merged, remove any personal copy of the same skill, or both copies install.
+To try the entry before opening the pull request, run `cargo agents plugin try widgetlib/` from the checkout: it links the directory into `~/.symposium/plugins/`, enables it in every workspace, and syncs the current one. Use it in a project that depends on the crate; Symposium reads the directory in place, so edits reach the agents on the next `cargo agents sync`. Afterwards, `cargo agents plugin try --remove widgetlib/` removes the link and the enablement and syncs; other projects are cleaned on their next sync. Once a shared entry is merged, remove any personal copy of the same skill, or both copies install.
 
 Reference: https://symposium.dev/reference/plugin-source.html
 

@@ -266,7 +266,7 @@ cargo agents plugin validate . --no-check-crates
 
 Pass the directory that contains your entry, not the entry's own directory: a directory holding a `Symposium.toml` or `SKILL.md` is an entry, not a registry.
 
-To try the entry before opening the pull request, copy its directory into `~/.symposium/plugins/` (a registry Symposium reads by default), run `cargo agents sync` in a project that depends on the crate, and delete the copy when you are done.
+To try the entry before opening the pull request, install it in your agents with `cargo agents plugin try my-crate/` and use it in a project that depends on the crate: edits reach your agents on the next sync. Discard the trial with `cargo agents plugin try --remove my-crate/`. See the [reference](../reference/cargo-agents-plugin.md#cargo-agents-plugin-try).
 
 ## Step 4. Try it in a project
 

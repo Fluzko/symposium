@@ -51,7 +51,7 @@ impl CargoPm {
         PackageId::new(CARGO_PM, name, version.unwrap_or(ANY_VERSION))
     }
 
-    fn plugin_from_fetched(&self, fetched: FetchedPackage) -> Option<UnvalidatedPlugin> {
+    pub(crate) fn plugin_from_fetched(fetched: FetchedPackage) -> Option<UnvalidatedPlugin> {
         let name = &fetched.id.name;
         let metadata = crate::crate_metadata::symposium_metadata(&fetched.root.join("Cargo.toml"))
             .unwrap_or_else(|e| {
@@ -106,7 +106,7 @@ impl CargoPm {
     }
 }
 
-fn embedded_plugin_kind(dir: &std::path::Path) -> Option<&'static str> {
+pub(crate) fn embedded_plugin_kind(dir: &std::path::Path) -> Option<&'static str> {
     if dir.join(crate::pm::layout::MANIFEST_FILE).is_file() {
         return Some("plugin manifest (Symposium.toml)");
     }
@@ -176,7 +176,7 @@ impl PackageManager for CargoPm {
             };
             // Only surface dependencies that actually embed plugin content.
             if embedded_plugin_kind(&fetched.root).is_some() {
-                out.extend(self.plugin_from_fetched(fetched));
+                out.extend(Self::plugin_from_fetched(fetched));
             }
         }
         out
@@ -190,7 +190,7 @@ impl PackageManager for CargoPm {
                 return Vec::new();
             }
         };
-        self.plugin_from_fetched(fetched).into_iter().collect()
+        Self::plugin_from_fetched(fetched).into_iter().collect()
     }
 
     /// Search crates.io for crates matching `query`.

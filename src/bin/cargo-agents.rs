@@ -233,6 +233,20 @@ async fn handle_plugin_command(sym: &config::Symposium, command: PluginCommand) 
             path,
             no_check_crates,
         } => {
+            let manifest_file = matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some(symposium::pm::layout::MANIFEST_FILE | "Cargo.toml")
+            );
+            let path = match path.parent() {
+                Some(parent) if manifest_file && path.is_file() => {
+                    if parent.as_os_str().is_empty() {
+                        std::path::PathBuf::from(".")
+                    } else {
+                        parent.to_path_buf()
+                    }
+                }
+                _ => path,
+            };
             if path.is_dir() {
                 let mut errors = 0;
 

@@ -57,7 +57,7 @@ impl CargoPm {
     /// A crate with no manifest sources still yields a plugin: an empty
     /// manifest, which validation turns into a plugin whose only content is the
     /// default `skills/` group.
-    fn plugin_from_fetched(&self, fetched: FetchedPackage) -> UnvalidatedPlugin {
+    pub(crate) fn plugin_from_fetched(fetched: FetchedPackage) -> UnvalidatedPlugin {
         let name = &fetched.id.name;
         let metadata = crate::crate_metadata::symposium_metadata(&fetched.root.join("Cargo.toml"))
             .unwrap_or_else(|e| {
@@ -95,7 +95,7 @@ impl CargoPm {
 /// human-readable phrase — or `None` when it embeds none. Mirrors what
 /// [`CargoPm::load_plugin`] would build a plugin from: a `Symposium.toml`,
 /// `[package.metadata.symposium]`, or the default `skills/` directory.
-fn embedded_plugin_kind(dir: &std::path::Path) -> Option<&'static str> {
+pub(crate) fn embedded_plugin_kind(dir: &std::path::Path) -> Option<&'static str> {
     if dir.join(crate::pm::layout::MANIFEST_FILE).is_file() {
         return Some("plugin manifest (Symposium.toml)");
     }
@@ -170,7 +170,7 @@ impl PackageManager for CargoPm {
             };
             // Only surface dependencies that actually embed plugin content.
             if embedded_plugin_kind(&fetched.root).is_some() {
-                out.push(self.plugin_from_fetched(fetched));
+                out.push(Self::plugin_from_fetched(fetched));
             }
         }
         out
@@ -188,7 +188,7 @@ impl PackageManager for CargoPm {
                 return Vec::new();
             }
         };
-        vec![self.plugin_from_fetched(fetched)]
+        vec![Self::plugin_from_fetched(fetched)]
     }
 
     /// Search crates.io for crates matching `query`.

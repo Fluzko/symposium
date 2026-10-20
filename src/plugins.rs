@@ -1346,6 +1346,11 @@ fn workspace_plugin_for_dir(
 /// canonical `pm` tag; callers that don't care pass `""`.
 fn scan_source_dir<P: AsRef<Path>>(dir: P, source_name: &str) -> Result<SourceDirContents> {
     let dir = dir.as_ref();
+    if let Some(plugin) = crate_entry(dir, source_name) {
+        return Ok(SourceDirContents {
+            plugins: vec![(PathBuf::new(), plugin)],
+        });
+    }
     let mut plugins = Vec::new();
 
     let subpaths = match crate::pm::layout::classify(dir) {
@@ -1365,6 +1370,54 @@ fn scan_source_dir<P: AsRef<Path>>(dir: P, source_name: &str) -> Result<SourceDi
     }
 
     Ok(SourceDirContents { plugins })
+}
+
+fn crate_entry(dir: &Path, source_name: &str) -> Option<Result<Plugin>> {
+    let cargo_toml = fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    match crate::crate_metadata::package_name_str(&cargo_toml) {
+        Ok(name) => Some(validate_crate_dir(dir, &name?, &cargo_toml, source_name)),
+        Err(e) => Some(Err(e.context("invalid `Cargo.toml`"))),
+    }
+}
+
+fn validate_crate_dir(
+    dir: &Path,
+    name: &str,
+    cargo_toml: &str,
+    source_name: &str,
+) -> Result<Plugin> {
+    if crate::pm::embedded_plugin_kind(dir).is_none() {
+        bail!(
+            "crate `{name}` has no plugin content: add a `skills/` directory, a `Symposium.toml` \
+             or `[package.metadata.symposium]`"
+        );
+    }
+    if let Some(table) = crate::crate_metadata::symposium_metadata_str(cargo_toml)? {
+        metadata_manifest(table)
+            .context("invalid `[package.metadata.symposium]` in `Cargo.toml`")?;
+    }
+    let manifest_path = dir.join(crate::pm::layout::MANIFEST_FILE);
+    if manifest_path.is_file() {
+        raw_crate_manifest(&fs::read_to_string(&manifest_path)?)
+            .with_context(|| format!("invalid `{}`", manifest_path.display()))?;
+    }
+    let root = fs::canonicalize(dir)?;
+    let fetched = crate::pm::FetchedPackage {
+        id: PackageId::new(source_name, name, ANY_VERSION),
+        root: root.clone(),
+    };
+    let unvalidated = crate::pm::CargoPm::plugin_from_fetched(fetched);
+    let default_group = unvalidated
+        .manifest
+        .defaults
+        .as_ref()
+        .is_none_or(|defaults| defaults.skills);
+    let mut plugin = validate_plugin(unvalidated, PluginKind::Package)?;
+    let default_dir = root.join(CRATE_DEFAULT_SKILLS_PATH);
+    if default_group && !default_dir.exists() {
+        plugin.manifest.skills.pop();
+    }
+    Ok(plugin)
 }
 
 /// Result of validating a single item in a plugin source directory.
@@ -1566,6 +1619,10 @@ fn raw_crate_manifest(content: &str) -> Result<RawPluginManifest> {
     Ok(toml::from_str(content)?)
 }
 
+fn metadata_manifest(table: toml::Table) -> Result<RawPluginManifest> {
+    Ok(toml::Value::Table(table).try_into()?)
+}
+
 /// Merge a crate's two manifest sources into one, for the cargo PM to offer.
 ///
 /// A crate can describe its plugin two ways, and this combines them (later
@@ -1587,19 +1644,17 @@ pub(crate) fn merge_crate_manifest(
     file: Option<&str>,
     crate_name: &str,
 ) -> RawPluginManifest {
-    let meta = metadata.and_then(
-        |t| match toml::Value::Table(t).try_into::<RawPluginManifest>() {
-            Ok(m) => Some(m),
-            Err(e) => {
-                tracing::warn!(
-                    crate_name = %crate_name,
-                    error = %e,
-                    "ignoring malformed [package.metadata.symposium]"
-                );
-                None
-            }
-        },
-    );
+    let meta = metadata.and_then(|t| match metadata_manifest(t) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            tracing::warn!(
+                crate_name = %crate_name,
+                error = %e,
+                "ignoring malformed [package.metadata.symposium]"
+            );
+            None
+        }
+    });
     let file = file.and_then(|c| match raw_crate_manifest(c) {
         Ok(m) => Some(m),
         Err(e) => {
@@ -2777,6 +2832,105 @@ mod tests {
         assert_eq!(results[0].id, "unnamed");
         let err = format!("{:#}", results[0].result.as_ref().unwrap_err());
         assert!(err.contains("unnamed"), "{err}");
+    }
+
+    const CRATE_TOML: &str = "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n";
+    const SKILL: &str = "---\nname: my-guide\ndescription: d\n---\n";
+
+    fn validate_crate(files: &[crate::test_utils::File]) -> Result<Plugin> {
+        let tmp = crate::test_utils::instantiate_fixture(files);
+        let mut contents = scan_source_dir(tmp.path(), "").unwrap();
+        assert_eq!(contents.plugins.len(), 1);
+        contents.plugins.pop().unwrap().1
+    }
+
+    #[test]
+    fn a_crate_folder_validates_as_its_users_get_it() {
+        use crate::test_utils::File;
+        let plugin = validate_crate(&[
+            File(
+                "Cargo.toml",
+                &format!("{CRATE_TOML}[package.metadata.symposium]\ndepends-on = [\"serde\"]\n"),
+            ),
+            File("Symposium.toml", "depends-on = [\"tokio\"]\n"),
+            File("skills/my-guide/SKILL.md", SKILL),
+        ])
+        .unwrap();
+        assert_eq!(plugin.manifest.name, "my-crate");
+        assert!(!plugin.manifest.requires_use);
+        let mut deps = std::collections::BTreeSet::new();
+        plugin.manifest.predicates.collect_dep_names(&mut deps);
+        assert_eq!(deps.into_iter().collect::<Vec<_>>(), ["serde", "tokio"]);
+        assert_eq!(plugin.manifest.skills.len(), 1);
+    }
+
+    #[test]
+    fn a_crate_without_a_skills_folder_has_no_default_group() {
+        use crate::test_utils::File;
+        let plugin = validate_crate(&[
+            File(
+                "Cargo.toml",
+                &format!(
+                    "{CRATE_TOML}[[package.metadata.symposium.skills]]\nsource.path = \"guides\"\n"
+                ),
+            ),
+            File("guides/my-guide/SKILL.md", SKILL),
+        ])
+        .unwrap();
+        let labels: Vec<_> = plugin
+            .manifest
+            .skills
+            .iter()
+            .filter_map(|group| group.source_label.as_deref())
+            .collect();
+        assert_eq!(labels, ["path:guides"]);
+    }
+
+    #[test]
+    fn a_crate_folder_reports_what_users_would_silently_lose() {
+        use crate::test_utils::File;
+        for (files, expected) in [
+            (
+                vec![File(
+                    "Cargo.toml",
+                    &format!("{CRATE_TOML}[package.metadata.symposium]\nskills = \"guides\"\n"),
+                )],
+                "invalid `[package.metadata.symposium]` in `Cargo.toml`",
+            ),
+            (
+                vec![
+                    File("Cargo.toml", CRATE_TOML),
+                    File("Symposium.toml", "skills = \"guides\"\n"),
+                ],
+                "Symposium.toml`",
+            ),
+            (
+                vec![File("Cargo.toml", CRATE_TOML)],
+                "crate `my-crate` has no plugin content",
+            ),
+            (
+                vec![File("Cargo.toml", "[package\n")],
+                "invalid `Cargo.toml`",
+            ),
+        ] {
+            let err = format!("{:#}", validate_crate(&files).unwrap_err());
+            assert!(err.contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_virtual_workspace_folder_validates_as_a_plugin_source() {
+        use crate::test_utils::{File, instantiate_fixture};
+        let tmp = instantiate_fixture(&[
+            File("Cargo.toml", "[workspace]\n"),
+            File(
+                "my-skill/SKILL.md",
+                "---\nname: my-skill\ndescription: d\ndepends-on: serde\n---\n",
+            ),
+        ]);
+        let results = validate_source_dir(tmp.path()).unwrap();
+        let ids: Vec<_> = results.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["my-skill"]);
     }
 
     #[test]

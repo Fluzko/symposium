@@ -33,7 +33,7 @@ fn group_source_label(group: &crate::plugins::SkillGroup) -> String {
 /// A parsed skill from a SKILL.md file.
 #[derive(Debug, Clone)]
 pub struct Skill {
-    /// Frontmatter fields as key-value pairs (name, description, license, etc.).
+    /// String-valued frontmatter fields (name, description, license, etc.).
     pub frontmatter: BTreeMap<String, String>,
     /// Skill-level activation predicates: the frontmatter `depends-on` (lowered to
     /// `any(depends-on(...))`) merged with `predicates`. ANDed with the plugin- and
@@ -649,15 +649,19 @@ fn parse_frontmatter(content: &str) -> Result<RawFrontmatter> {
             bail!("SKILL.md frontmatter keys must be strings");
         };
 
+        if key == "crates" {
+            bail!("the `crates` frontmatter field has been renamed; use `depends-on` instead");
+        }
+
         let Some(value) = value.as_str() else {
-            bail!("SKILL.md frontmatter field `{key}` must be a string");
+            if matches!(key, "name" | "description" | "depends-on" | "predicates") {
+                bail!("SKILL.md frontmatter field `{key}` must be a string");
+            }
+            continue;
         };
 
         match key {
             "depends-on" => depends_on = Some(value.to_string()),
-            "crates" => {
-                bail!("the `crates` frontmatter field has been renamed; use `depends-on` instead")
-            }
             "predicates" => predicates = Some(value.to_string()),
             _ => {
                 fields.insert(key.to_string(), value.to_string());
@@ -833,6 +837,29 @@ mod tests {
                 .contains("frontmatter field `description` must be a string"),
             "expected scalar string error, got: {err}"
         );
+    }
+
+    #[test]
+    fn parse_frontmatter_accepts_non_string_values_in_other_fields() {
+        let content = indoc! {"
+            ---
+            name: my-skill
+            description: A test skill
+            depends-on: serde
+            allowed-tools: [Read, Grep]
+            disable-model-invocation: true
+            metadata:
+              author: someone
+              tags: [a, b]
+            ---
+
+            Body.
+        "};
+
+        let fm = parse_frontmatter(content).unwrap();
+        assert_eq!(fm.fields.get("name").unwrap(), "my-skill");
+        assert_eq!(fm.fields.get("description").unwrap(), "A test skill");
+        assert_eq!(fm.depends_on.as_deref(), Some("serde"));
     }
 
     #[test]

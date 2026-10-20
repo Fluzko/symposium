@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use symposium_install::UpdateLevel;
 
 use crate::config::Symposium;
+use crate::output::display_path;
 use crate::plugins::{Plugin, PluginSource, SkillGroup};
 use crate::predicate::{PredicateContext, PredicateSet};
 
@@ -308,10 +309,10 @@ fn collect_skills_from_dirs(
                     let origin_hash = skill_origin_hash(&skill.path);
                     skills.push((skill, origin_hash));
                 }
-                Err(e) => tracing::warn!(
-                    source = %entry.source_label,
-                    error = %e,
-                    "failed to load skill",
+                Err(e) => tracing::info!(
+                    report = %crate::report::ReportEvent::Warning {
+                        message: format!("skipping {e:#}"),
+                    },
                 ),
             }
         }
@@ -365,7 +366,10 @@ pub(crate) fn discover_skills(
 
     skill_files
         .into_iter()
-        .map(|skill_md| load_skill(&skill_md, workspace_member, group_predicates))
+        .map(|skill_md| {
+            load_skill(&skill_md, workspace_member, group_predicates)
+                .with_context(|| display_path(&skill_md))
+        })
         .collect()
 }
 
@@ -479,8 +483,7 @@ fn load_skill(
     workspace_member: bool,
     group_predicates: &PredicateSet,
 ) -> Result<Skill> {
-    let content = std::fs::read_to_string(skill_md_path)
-        .with_context(|| format!("failed to read {}", skill_md_path.display()))?;
+    let content = std::fs::read_to_string(skill_md_path).context("failed to read")?;
 
     let fm = if workspace_member && !content.trim_start().starts_with("---") {
         RawFrontmatter {
@@ -489,9 +492,7 @@ fn load_skill(
             predicates: None,
         }
     } else {
-        parse_frontmatter(&content).with_context(|| {
-            format!("failed to parse frontmatter in {}", skill_md_path.display())
-        })?
+        parse_frontmatter(&content).context("failed to parse frontmatter")?
     };
 
     let mut frontmatter = fm.fields;

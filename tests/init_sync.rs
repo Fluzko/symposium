@@ -554,6 +554,61 @@ async fn removing_agent_removes_hooks() {
     .unwrap();
 }
 
+#[tokio::test]
+async fn removing_an_agent_reaps_its_skills_in_the_workspace() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugins0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude", "--add-agent", "codex"])
+                .await?;
+            ctx.symposium(&["sync"]).await?;
+            let root = ctx.workspace_root.clone().unwrap();
+            let claude_skills = root.join(".claude/skills");
+            let codex_skills = root.join(".agents/skills");
+            assert!(!find_installed_skills(&claude_skills, "serde-guidance").is_empty());
+            assert!(!find_installed_skills(&codex_skills, "serde-guidance").is_empty());
+
+            ctx.symposium(&["init", "--remove-agent", "claude"]).await?;
+            assert!(find_installed_skills(&claude_skills, "serde-guidance").is_empty());
+            assert!(!find_installed_skills(&codex_skills, "serde-guidance").is_empty());
+
+            ctx.symposium(&["init", "--remove-agent", "codex"]).await?;
+            assert!(find_installed_skills(&codex_skills, "serde-guidance").is_empty());
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn sync_without_agents_still_reaps_stale_skills() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugins0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["init", "--remove-agent", "claude"]).await?;
+
+            let stale = ctx
+                .workspace_root
+                .as_ref()
+                .unwrap()
+                .join(".claude/skills/left-behind");
+            std::fs::create_dir_all(&stale)?;
+            std::fs::write(stale.join("SKILL.md"), "old")?;
+            std::fs::write(stale.join(".symposium"), "")?;
+
+            ctx.symposium(&["sync"]).await?;
+            assert!(!stale.exists());
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// `--add-agent` is additive to existing agents.
 #[tokio::test]
 async fn add_agent_is_additive() {

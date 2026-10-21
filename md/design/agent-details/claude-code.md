@@ -218,6 +218,11 @@ shows nothing, and a session sees no tools). MCP has its own two files:
 Confirmed against the CLI: `claude mcp add -s project` writes the former,
 `-s user` the latter.
 
+A remote entry needs an explicit `type` (`"http"` or `"sse"`) next to its
+`url`. Without it Claude Code drops the entry at both scopes: `claude mcp get`
+reports no such server. A stdio entry is read without one. Confirmed against
+Claude Code 2.1.305.
+
 A server in a project `.mcp.json` starts out **pending approval** - Claude asks
 before trusting a server a repository supplies. Symposium deliberately does not
 pre-approve its own entries (that would mean overriding a trust prompt on the

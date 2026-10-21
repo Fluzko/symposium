@@ -109,13 +109,7 @@ pub struct Config {
     pub defaults: DefaultsConfig,
 
     /// User-defined registries (git repos or local paths).
-    /// `plugin-source` is the retired spelling, still accepted.
-    #[serde(
-        default,
-        rename = "registry",
-        alias = "plugin-source",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(default, rename = "registry", skip_serializing_if = "Vec::is_empty")]
     pub registries: Vec<RegistryConfig>,
 }
 
@@ -316,7 +310,7 @@ struct RawConfig {
     logging: LoggingConfig,
     #[serde(default)]
     defaults: DefaultsConfig,
-    #[serde(default, rename = "registry", alias = "plugin-source")]
+    #[serde(default, rename = "registry")]
     registries: Vec<RegistryConfig>,
 }
 
@@ -824,16 +818,19 @@ mod tests {
         assert!(!config.registries[0].auto_update);
     }
 
-    /// `[[plugin-source]]` is the retired spelling of `[[registry]]`.
     #[test]
-    fn parse_retired_plugin_source_spelling() {
+    fn plugin_source_table_does_not_break_registry() {
         let config = parse_config(indoc! {r#"
             [[plugin-source]]
-            name = "my-org"
-            git = "https://github.com/my-org/plugins"
+            name = "old"
+            path = "old"
+
+            [[registry]]
+            name = "new"
+            path = "new"
         "#});
-        assert_eq!(config.registries.len(), 1);
-        assert_eq!(config.registries[0].name, "my-org");
+        let names: Vec<_> = config.registries.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["new"]);
     }
 
     #[test]

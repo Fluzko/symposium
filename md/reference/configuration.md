@@ -113,7 +113,7 @@ Controls the two built-in registries. Both are enabled by default.
 
 ## `[[registry]]`
 
-Defines additional registries — directories or repositories offering plugins. Each entry must have exactly one of `git` or `path`. `[[plugin-source]]` is the retired spelling of this table and is still accepted.
+Defines additional registries: directories or repositories offering plugins. Each entry must have exactly one of `git` or `path`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

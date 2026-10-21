@@ -2,6 +2,8 @@
 
 `cargo agents` uses a single user-wide configuration file at `~/.symposium/config.toml`. Created by `cargo agents init`.
 
+If the file cannot be read or parsed, `cargo agents` prints a warning and runs with the defaults and `auto-update` off. Commands that would save the configuration, such as `init` or `use`, stop with an error instead of overwriting it, so fix or remove the file and run them again.
+
 ## Full example
 
 ```toml

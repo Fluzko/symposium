@@ -134,6 +134,35 @@ async fn init_creates_config() {
     .unwrap();
 }
 
+#[tokio::test]
+async fn init_does_not_overwrite_an_unparseable_config() {
+    with_fixture(TestMode::SimulationOnly, &[], async |mut ctx| {
+        let config_dir = ctx.sym.config_dir().to_path_buf();
+        let path = config_dir.join("config.toml");
+        let contents = indoc::indoc! {r#"
+            auto-update = "off"
+
+            [[agent]]
+            name = "claude"
+
+            [plugins]
+            auto_enable = ["x"]
+        "#};
+        std::fs::write(&path, contents)?;
+        ctx.sym = symposium::config::Symposium::from_dir(&config_dir);
+
+        let error = ctx
+            .symposium(&["init", "--add-agent", "claude"])
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not overwriting"));
+        assert_eq!(std::fs::read_to_string(&path)?, contents);
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
 /// A workspace with a bare `skills/` directory defines a workspace plugin;
 /// `sync` installs its skills without any configured plugin source or
 /// dependency gate.
@@ -2099,6 +2128,36 @@ async fn auto_update_re_execs_on_hook() {
         })
         .expect("failed to spawn");
     assert_surprise(&output);
+}
+
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "re_exec over a running binary + shebang mock/stand-in need a Windows port (follow-up)"
+)]
+async fn unparseable_config_never_auto_updates() {
+    let fix = setup_auto_update_fixture();
+    std::fs::write(
+        fix.config_dir.join("config.toml"),
+        indoc::indoc! {r#"
+            auto-update = false
+
+            [[agent]]
+            name = "claude"
+        "#},
+    )
+    .unwrap();
+    let output = fix
+        .command()
+        .args(["sync"])
+        .output()
+        .expect("failed to spawn");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!combined.contains("SURPRISE!"), "{combined}");
 }
 
 #[tokio::test]

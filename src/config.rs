@@ -315,12 +315,6 @@ struct RawConfig {
     registries: Vec<RegistryConfig>,
 }
 
-impl Default for RawConfig {
-    fn default() -> Self {
-        Config::default().into()
-    }
-}
-
 impl RawConfig {
     fn validate(self) -> Config {
         Config {
@@ -335,24 +329,6 @@ impl RawConfig {
             logging: self.logging,
             defaults: self.defaults,
             registries: self.registries,
-        }
-    }
-}
-
-impl From<Config> for RawConfig {
-    fn from(config: Config) -> Self {
-        Self {
-            auto_sync: config.auto_sync,
-            agents_syncing: config.agents_syncing,
-            sync_debounce_secs: config.sync_debounce_secs,
-            hook_scope: config.hook_scope,
-            auto_update: config.auto_update,
-            telemetry: config.telemetry,
-            plugins: config.plugins,
-            agents: config.agents,
-            logging: config.logging,
-            defaults: config.defaults,
-            registries: config.registries,
         }
     }
 }
@@ -415,6 +391,7 @@ const BUILTIN_RECOMMENDATIONS_URL: &str = "https://github.com/symposium-dev/reco
 #[derive(Clone)]
 pub struct Symposium {
     pub config: Config,
+    config_error: Option<String>,
     dirs: crate::dirs::SymposiumDirs,
     home_dir: PathBuf,
     env: EnvLookup,
@@ -435,13 +412,14 @@ impl Symposium {
         let _ = fs::create_dir_all(&dirs.config_dir);
         let _ = fs::create_dir_all(&dirs.cache_dir);
 
-        let config = load_config_from(&dirs.config_dir);
+        let (config, config_error) = load_config_from(&dirs.config_dir);
 
         // Note: can't use tracing here — logging isn't initialized yet.
         // init_logging() is called after construction.
 
         Self {
             config,
+            config_error,
             dirs,
             home_dir,
             env: Arc::new(|name| env::var_os(name)),
@@ -455,7 +433,7 @@ impl Symposium {
         let config_dir = root.to_path_buf();
         let _ = fs::create_dir_all(&config_dir);
 
-        let config = load_config_from(&config_dir);
+        let (config, config_error) = load_config_from(&config_dir);
 
         let cache_dir = config_dir.join("cache");
         let _ = fs::create_dir_all(&cache_dir);
@@ -468,6 +446,7 @@ impl Symposium {
 
         Self {
             config,
+            config_error,
             dirs,
             home_dir,
             env: Arc::new(|_| None),
@@ -700,6 +679,12 @@ impl Symposium {
     /// Write the user config to disk.
     pub fn save_config(&self) -> anyhow::Result<()> {
         let path = self.dirs.config_dir.join("config.toml");
+        if let Some(error) = &self.config_error {
+            anyhow::bail!(
+                "not overwriting {}: it could not be read; fix or remove it, then run the command again\n{error}",
+                path.display()
+            );
+        }
         let contents = toml::to_string_pretty(&self.config)?;
         fs::write(&path, contents)?;
         Ok(())
@@ -747,17 +732,25 @@ fn resolve_logs_dir(config_dir: &Path) -> PathBuf {
 }
 
 /// Load config from a config directory.
-fn load_config_from(config_dir: &Path) -> Config {
+fn load_config_from(config_dir: &Path) -> (Config, Option<String>) {
     let path = config_dir.join("config.toml");
-    match fs::read_to_string(&path) {
-        Ok(contents) => toml::from_str::<RawConfig>(&contents)
-            .unwrap_or_else(|e| {
-                eprintln!("warning: failed to parse {}: {e}", path.display());
-                RawConfig::default()
-            })
-            .validate(),
-        Err(_) => Config::default(),
-    }
+    let error = match fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Config::default(), None),
+        Err(e) => e.to_string(),
+        Ok(contents) => match toml::from_str::<RawConfig>(&contents) {
+            Ok(raw) => return (raw.validate(), None),
+            Err(e) => e.to_string(),
+        },
+    };
+    eprintln!(
+        "warning: failed to read {}, so this run uses the defaults with auto-update off and will not change the file\n{error}",
+        path.display()
+    );
+    let config = Config {
+        auto_update: AutoUpdate::Off,
+        ..Config::default()
+    };
+    (config, Some(error))
 }
 
 fn default_true() -> bool {
@@ -898,6 +891,54 @@ mod tests {
         .unwrap();
         let sym = Symposium::from_dir(tmp.path());
         assert!(!sym.config.defaults.symposium_recommendations);
+    }
+
+    #[test]
+    fn unparseable_config_is_never_saved() {
+        for contents in [
+            indoc! {r#"
+                auto-update = "off"
+
+                [[agent]]
+                name = "claude"
+
+                [plugins]
+                auto_enable = ["x"]
+            "#},
+            indoc! {r#"
+                auto-update = false
+
+                [[agent]]
+                name = "claude"
+            "#},
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("config.toml");
+            std::fs::write(&path, contents).unwrap();
+            let sym = Symposium::from_dir(tmp.path());
+            assert_eq!(sym.config.auto_update, AutoUpdate::Off);
+            assert!(sym.save_config().is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        }
+    }
+
+    #[test]
+    fn unreadable_config_is_never_saved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, b"\xff\xfe").unwrap();
+        let sym = Symposium::from_dir(tmp.path());
+        assert_eq!(sym.config.auto_update, AutoUpdate::Off);
+        assert!(sym.save_config().is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"\xff\xfe");
+    }
+
+    #[test]
+    fn missing_config_is_saved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sym = Symposium::from_dir(tmp.path());
+        sym.save_config().unwrap();
+        assert!(tmp.path().join("config.toml").is_file());
     }
 
     #[test]

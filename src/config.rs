@@ -98,7 +98,7 @@ pub struct Config {
     pub plugins: PluginsConfig,
 
     /// Agents configured for this user.
-    #[serde(default, rename = "agent")]
+    #[serde(default, rename = "agent", skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AgentEntry>,
 
     #[serde(default)]
@@ -110,7 +110,12 @@ pub struct Config {
 
     /// User-defined registries (git repos or local paths).
     /// `plugin-source` is the retired spelling, still accepted.
-    #[serde(default, rename = "registry", alias = "plugin-source")]
+    #[serde(
+        default,
+        rename = "registry",
+        alias = "plugin-source",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub registries: Vec<RegistryConfig>,
 }
 
@@ -989,6 +994,42 @@ mod tests {
             !serialized.contains("[telemetry]"),
             "default (off) telemetry should not be written to config.toml: {serialized}"
         );
+    }
+
+    #[test]
+    fn empty_agent_and_registry_lists_are_not_serialized() {
+        let serialized = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!serialized.contains("agent ="), "{serialized}");
+        assert!(!serialized.contains("registry ="), "{serialized}");
+    }
+
+    #[test]
+    fn saved_config_accepts_appended_tables() {
+        let tmp = tempfile::tempdir().unwrap();
+        Symposium::from_dir(tmp.path()).save_config().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut contents = std::fs::read_to_string(&path).unwrap();
+        contents.push_str(indoc! {r#"
+
+            [[agent]]
+            name = "claude"
+
+            [[registry]]
+            name = "local"
+            path = "p"
+        "#});
+        std::fs::write(&path, contents).unwrap();
+
+        let sym = Symposium::from_dir(tmp.path());
+        let agents: Vec<_> = sym.config.agents.iter().map(|a| a.name.as_str()).collect();
+        let registries: Vec<_> = sym
+            .config
+            .registries
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(agents, ["claude"]);
+        assert_eq!(registries, ["local"]);
     }
 
     #[test]

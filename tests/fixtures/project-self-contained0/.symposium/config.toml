@@ -5,6 +5,6 @@ self-contained = true
 symposium-recommendations = false
 user-plugins = false
 
-[[plugin-source]]
+[[registry]]
 name = "project-only"
 path = "project-plugins"

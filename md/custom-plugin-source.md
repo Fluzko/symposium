@@ -15,7 +15,7 @@ Custom plugin sources are useful for:
 
 ## Adding your own custom sources
 
-You can also define a custom plugin source in a git repository or at another path on your system. Each one is a `[[registry]]` entry (`[[plugin-source]]` is the retired spelling of the same table, still accepted).
+You can also define a custom plugin source in a git repository or at another path on your system. Each one is a `[[registry]]` entry.
 
 ### Git repository
 

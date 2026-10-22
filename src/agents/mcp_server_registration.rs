@@ -82,6 +82,18 @@ fn copilot_server_to_json(server: &McpServer) -> serde_json::Value {
     v
 }
 
+/// [`server_to_json`] plus the `type` Claude Code needs on a remote entry.
+/// Without it a `url` entry is not picked up at all; a stdio entry needs none.
+fn claude_server_to_json(server: &McpServer) -> serde_json::Value {
+    let mut v = server_to_json(server);
+    match server {
+        McpServer::Http(_) => v["type"] = json!("http"),
+        McpServer::Sse(_) => v["type"] = json!("sse"),
+        _ => {}
+    }
+    v
+}
+
 fn pairs_to_object<'a>(pairs: impl Iterator<Item = (&'a String, &'a String)>) -> serde_json::Value {
     serde_json::Value::Object(
         pairs
@@ -283,7 +295,13 @@ pub(super) fn register_claude_mcp_servers(
     servers: &[McpServer],
     out: &Output,
 ) -> Result<()> {
-    register_json_mcp_servers(path, servers, Some("mcpServers"), out)
+    register_json_mcp_servers_with(
+        path,
+        servers,
+        Some("mcpServers"),
+        claude_server_to_json,
+        out,
+    )
 }
 
 pub(super) fn unregister_claude_mcp_servers(
@@ -811,6 +829,20 @@ mod tests {
         assert_eq!(config["mcpServers"]["withenv"]["type"], "local");
         assert_eq!(config["mcpServers"]["remote"]["type"], "http");
         assert_eq!(config["mcpServers"]["withenv"]["env"]["TOKEN"], "abc");
+    }
+
+    /// Claude Code drops a remote entry without a `type`, but reads a stdio
+    /// entry without one.
+    #[test]
+    fn claude_remote_entries_carry_a_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".claude.json");
+        register_claude_mcp_servers(&path, &env_and_remote_servers(), &Output::quiet()).unwrap();
+
+        let config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"]["remote"]["type"], "http");
+        assert!(config["mcpServers"]["withenv"].get("type").is_none());
     }
 
     /// Codex takes env as a TOML table and a remote server as a bare `url`,

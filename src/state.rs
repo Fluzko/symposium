@@ -1,7 +1,8 @@
 //! Persistent state: `state.toml` in the config directory.
 //!
 //! Tracks the version of the binary that last touched the config/cache
-//! directories and the last time an update check was performed.
+//! directories, the last time an update check was performed, and the MCP
+//! server entries Symposium wrote into agent configs.
 //! Future versions can use a version mismatch to trigger migrations.
 
 use std::fs;
@@ -25,6 +26,18 @@ pub struct State {
     /// Last time we checked crates.io for a newer version.
     #[serde(default, rename = "last-update-check")]
     pub last_update_check: Option<DateTime<Utc>>,
+
+    /// MCP server entries Symposium wrote. Removal is limited to these, since
+    /// a server name alone may also belong to an entry the user wrote.
+    #[serde(rename = "mcp-server")]
+    pub mcp_servers: Vec<McpRegistration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpRegistration {
+    pub agent: String,
+    pub file: PathBuf,
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +45,8 @@ struct RawState {
     version: String,
     #[serde(default, rename = "last-update-check")]
     last_update_check: Option<DateTime<Utc>>,
+    #[serde(default, rename = "mcp-server")]
+    mcp_servers: Vec<McpRegistration>,
 }
 
 impl RawState {
@@ -39,6 +54,7 @@ impl RawState {
         State {
             version: self.version,
             last_update_check: self.last_update_check,
+            mcp_servers: self.mcp_servers,
         }
     }
 }
@@ -48,6 +64,7 @@ impl Default for State {
         Self {
             version: CURRENT_VERSION.to_string(),
             last_update_check: None,
+            mcp_servers: Vec::new(),
         }
     }
 }
@@ -114,6 +131,34 @@ pub fn record_update_check(config_dir: &Path) {
     save(config_dir, &state);
 }
 
+pub fn mcp_registrations(config_dir: &Path) -> Vec<McpRegistration> {
+    load(config_dir)
+        .map(|state| state.mcp_servers)
+        .unwrap_or_default()
+}
+
+pub fn record_mcp_registrations(config_dir: &Path, registrations: Vec<McpRegistration>) {
+    let mut state = load(config_dir).unwrap_or_default();
+    let before = state.mcp_servers.len();
+    for registration in registrations {
+        if !state.mcp_servers.contains(&registration) {
+            state.mcp_servers.push(registration);
+        }
+    }
+    if state.mcp_servers.len() != before {
+        save(config_dir, &state);
+    }
+}
+
+pub fn forget_mcp_registrations(config_dir: &Path, removed: &[McpRegistration]) {
+    if removed.is_empty() {
+        return;
+    }
+    let mut state = load(config_dir).unwrap_or_default();
+    state.mcp_servers.retain(|r| !removed.contains(r));
+    save(config_dir, &state);
+}
+
 fn state_path(config_dir: &Path) -> PathBuf {
     config_dir.join(STATE_FILE)
 }
@@ -145,7 +190,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let old = State {
             version: "0.1.0".to_string(),
-            last_update_check: None,
+            ..State::default()
         };
         fs::write(
             tmp.path().join(STATE_FILE),
@@ -200,5 +245,38 @@ mod tests {
         stamp(tmp.path());
         let after = load(tmp.path()).unwrap().last_update_check;
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn mcp_registrations_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registrations = vec![
+            McpRegistration {
+                agent: "claude".to_string(),
+                file: PathBuf::from("/home/me/.claude.json"),
+                name: "demo".to_string(),
+            },
+            McpRegistration {
+                agent: "codex".to_string(),
+                file: PathBuf::from("/home/me/.codex/config.toml"),
+                name: "other".to_string(),
+            },
+        ];
+        let state = State {
+            mcp_servers: registrations.clone(),
+            ..State::default()
+        };
+        save(tmp.path(), &state);
+        assert_eq!(load(tmp.path()).unwrap().mcp_servers, registrations);
+
+        forget_mcp_registrations(tmp.path(), &registrations[..1]);
+        assert_eq!(mcp_registrations(tmp.path()), registrations[1..]);
+    }
+
+    #[test]
+    fn state_without_mcp_registrations_loads_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join(STATE_FILE), "version = \"0.1.0\"\n").unwrap();
+        assert!(load(tmp.path()).unwrap().mcp_servers.is_empty());
     }
 }

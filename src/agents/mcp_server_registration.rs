@@ -193,7 +193,7 @@ fn register_json_mcp_servers(
     servers: &[McpServer],
     container_key: Option<&str>,
     out: &Output,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     register_json_mcp_servers_with(config_path, servers, container_key, server_to_json, out)
 }
 
@@ -205,7 +205,7 @@ fn register_json_mcp_servers_with(
     container_key: Option<&str>,
     to_json: fn(&McpServer) -> serde_json::Value,
     out: &Output,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let display = display_path(config_path);
     let mut config = load_json_or_empty(config_path)?;
 
@@ -223,8 +223,10 @@ fn register_json_mcp_servers_with(
     };
 
     let mut changed = false;
+    let mut registered = Vec::new();
     for server in servers {
         let name = server_name(server);
+        registered.push(name.to_string());
         let expected = to_json(server);
         match upsert_json_mcp_entry(container, name, &expected) {
             UpsertResult::AlreadyCorrect => {
@@ -244,7 +246,7 @@ fn register_json_mcp_servers_with(
     if changed {
         save_json(config_path, &config)?;
     }
-    Ok(())
+    Ok(registered)
 }
 
 /// Remove MCP server entries from a JSON config file.
@@ -294,7 +296,7 @@ pub(super) fn register_claude_mcp_servers(
     path: &Path,
     servers: &[McpServer],
     out: &Output,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     register_json_mcp_servers_with(
         path,
         servers,
@@ -320,7 +322,7 @@ pub(super) fn register_antigravity_mcp_servers(
     path: &Path,
     servers: &[McpServer],
     out: &Output,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     register_json_mcp_servers(path, servers, Some("mcpServers"), out)
 }
 
@@ -337,7 +339,7 @@ pub(super) fn register_codex_mcp_servers(
     config_path: &Path,
     servers: &[McpServer],
     out: &Output,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let display = display_path(config_path);
 
     let content = if config_path.exists() {
@@ -358,6 +360,7 @@ pub(super) fn register_codex_mcp_servers(
     }
 
     let mut changed = false;
+    let mut registered = Vec::new();
     for server in servers {
         let name = server_name(server);
 
@@ -407,6 +410,7 @@ pub(super) fn register_codex_mcp_servers(
             }
         }
 
+        registered.push(name.to_string());
         let rendered = render_toml_entry(&server_table);
         let already_correct = doc["mcp_servers"]
             .get(name)
@@ -430,7 +434,7 @@ pub(super) fn register_codex_mcp_servers(
         }
         fs::write(config_path, doc.to_string())?;
     }
-    Ok(())
+    Ok(registered)
 }
 
 pub(super) fn unregister_codex_mcp_servers(
@@ -472,7 +476,7 @@ pub(super) fn register_copilot_mcp_servers(
     path: &Path,
     servers: &[McpServer],
     out: &Output,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     register_json_mcp_servers_with(
         path,
         servers,
@@ -495,7 +499,7 @@ pub(super) fn register_kiro_mcp_servers(
     path: &Path,
     servers: &[McpServer],
     out: &Output,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     register_claude_mcp_servers(path, servers, out)
 }
 
@@ -611,7 +615,7 @@ pub(super) fn register_goose_mcp_servers(
     config_path: &Path,
     servers: &[McpServer],
     out: &Output,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let display = display_path(config_path);
 
     let mut content = if config_path.exists() {
@@ -621,6 +625,7 @@ pub(super) fn register_goose_mcp_servers(
     };
 
     let mut changed = false;
+    let mut registered = Vec::new();
     for server in servers {
         let name = server_name(server);
         let snippet = match goose_extension_yaml(server) {
@@ -630,6 +635,7 @@ pub(super) fn register_goose_mcp_servers(
                 continue;
             }
         };
+        registered.push(name.to_string());
 
         // Keep a user's `enabled: false`; sync runs per hook event.
         let snippet = if goose_extension_disabled(&content, name) {
@@ -704,7 +710,7 @@ pub(super) fn register_goose_mcp_servers(
         }
         fs::write(config_path, content)?;
     }
-    Ok(())
+    Ok(registered)
 }
 
 pub(super) fn unregister_goose_mcp_servers(
@@ -756,7 +762,7 @@ pub(super) fn register_opencode_mcp_servers(
     path: &Path,
     servers: &[McpServer],
     out: &Output,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     register_json_mcp_servers_with(path, servers, Some("mcp"), opencode_server_to_json, out)
 }
 

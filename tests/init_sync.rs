@@ -630,6 +630,82 @@ async fn sync_filters_mcp_servers_by_crates() {
     .unwrap();
 }
 
+/// An MCP server Symposium did not write stays put, even when it shares a name
+/// with a plugin's server and sits in an agent that is not configured.
+#[tokio::test]
+async fn sync_leaves_mcp_servers_symposium_did_not_write() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["mcp-filtering0", "workspace0"],
+        async |mut ctx| {
+            let workspace_root = ctx.workspace_root.clone().unwrap();
+            let codex = ctx.sym.home_dir().join(".codex/config.toml");
+            let kiro = workspace_root.join(".kiro/settings/mcp.json");
+            std::fs::create_dir_all(codex.parent().unwrap())?;
+            std::fs::create_dir_all(kiro.parent().unwrap())?;
+            std::fs::write(
+                &codex,
+                "[mcp_servers.always-server]\ncommand = \"/home/me/own\"\n",
+            )?;
+            std::fs::write(
+                &kiro,
+                r#"{"mcpServers": {"always-server": {"command": "team"}}}"#,
+            )?;
+
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            assert!(std::fs::read_to_string(&codex)?.contains("/home/me/own"));
+            assert!(std::fs::read_to_string(&kiro)?.contains("team"));
+
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Removing an agent takes out the MCP servers Symposium registered for it
+/// and nothing else.
+#[tokio::test]
+async fn removing_an_agent_removes_only_its_registered_mcp_servers() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["mcp-filtering0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&[
+                "init",
+                "--add-agent",
+                "claude",
+                "--add-agent",
+                "codex",
+                "--hook-scope",
+                "global",
+            ])
+            .await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let codex = ctx.sym.home_dir().join(".codex/config.toml");
+            let registered = std::fs::read_to_string(&codex)?;
+            assert!(registered.contains("always-server"));
+            std::fs::write(
+                &codex,
+                format!("{registered}\n[mcp_servers.mine]\ncommand = \"/home/me/mine\"\n"),
+            )?;
+
+            ctx.symposium(&["init", "--remove-agent", "codex"]).await?;
+
+            let after = std::fs::read_to_string(&codex)?;
+            assert!(!after.contains("always-server"), "{after}");
+            assert!(after.contains("[mcp_servers.mine]"), "{after}");
+
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// `sync` does not install skills targeting transitive dependencies.
 /// workspace0 has tokio as a direct dep; mio is a transitive dep of tokio.
 #[tokio::test]

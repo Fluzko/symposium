@@ -428,16 +428,6 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
         );
     }
 
-    let server_names: Vec<&str> = mcp_servers
-        .iter()
-        .map(|s| match s {
-            sacp::schema::McpServer::Stdio(s) => s.name.as_str(),
-            sacp::schema::McpServer::Http(s) => s.name.as_str(),
-            sacp::schema::McpServer::Sse(s) => s.name.as_str(),
-            _ => panic!("unsupported McpServer variant"),
-        })
-        .collect();
-
     // Sync each configured agent
     let agent_names: Vec<String> = sym.config.agents.iter().map(|a| a.name.clone()).collect();
 
@@ -504,13 +494,20 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                 },
             );
         }
-        if let Err(e) = agent.register_mcp_servers(mcp_scope, &project_root, sym, &mcp_servers, out)
-        {
-            tracing::info!(
-                report = %crate::report::ReportEvent::Warning {
-                    message: format!("failed to register MCP servers for {agent_name}: {e:#}"),
-                },
-            );
+        match agent.register_mcp_servers(mcp_scope, &project_root, sym, &mcp_servers, out) {
+            Ok(names) => record_mcp_registrations(
+                sym,
+                agent,
+                &agent.mcp_config_path(mcp_scope, &project_root, sym),
+                names,
+            ),
+            Err(e) => {
+                tracing::info!(
+                    report = %crate::report::ReportEvent::Warning {
+                        message: format!("failed to register MCP servers for {agent_name}: {e:#}"),
+                    },
+                );
+            }
         }
 
         for (skill_name, origin_hash, skill_source) in &to_install {
@@ -644,9 +641,9 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
         );
     }
 
-    // Hooks come off at whichever scope they would have been written to; MCP
-    // entries come off at both, since a leftover one keeps pointing the agent
-    // at a server this workspace no longer offers.
+    // Hooks come off at whichever scope they would have been written to. MCP
+    // entries come off the user-level file and this workspace's files; another
+    // workspace's project file waits for a sync there.
     for &agent in Agent::all() {
         if !agent_names.contains(&agent.config_name().to_string()) {
             match sym.config.hook_scope {
@@ -657,14 +654,17 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
                     agent.unregister_project_hooks(&project_root, sym, out)
                 }
             }
-            for scope in [
-                crate::agents::McpScope::Project,
-                crate::agents::McpScope::User,
-            ] {
-                let _ = agent.unregister_mcp_servers(scope, &project_root, sym, &server_names, out);
-            }
         }
     }
+    unregister_unconfigured_mcp_servers(
+        sym,
+        &agent_names,
+        |agent, file| {
+            file.starts_with(&project_root)
+                || file == agent.mcp_config_path(crate::agents::McpScope::User, &project_root, sym)
+        },
+        out,
+    );
 
     if to_install.is_empty() {
         tracing::info!(
@@ -688,16 +688,6 @@ pub async fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
         .flat_map(|p| p.manifest.mcp_servers.iter().map(|s| s.server.clone()))
         .collect();
 
-    let server_names: Vec<&str> = mcp_servers
-        .iter()
-        .map(|s| match s {
-            sacp::schema::McpServer::Stdio(s) => s.name.as_str(),
-            sacp::schema::McpServer::Http(s) => s.name.as_str(),
-            sacp::schema::McpServer::Sse(s) => s.name.as_str(),
-            _ => panic!("unsupported McpServer variant"),
-        })
-        .collect();
-
     let agent_names: Vec<String> = sym.config.agents.iter().map(|a| a.name.clone()).collect();
 
     // `init` has no workspace in hand, so this is the user-level pass only;
@@ -706,24 +696,77 @@ pub async fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
     for agent_name in &agent_names {
         let agent = Agent::from_config_name(agent_name)?;
         agent.register_hooks(home, sym, out)?;
-        agent.register_mcp_servers(crate::agents::McpScope::User, home, sym, &mcp_servers, out)?;
+        let names = agent.register_mcp_servers(
+            crate::agents::McpScope::User,
+            home,
+            sym,
+            &mcp_servers,
+            out,
+        )?;
+        record_mcp_registrations(
+            sym,
+            agent,
+            &agent.mcp_config_path(crate::agents::McpScope::User, home, sym),
+            names,
+        );
     }
 
     // Unregister hooks for agents no longer configured
     for &agent in Agent::all() {
         if !agent_names.contains(&agent.config_name().to_string()) {
             agent.unregister_hooks(home, sym, out);
-            let _ = agent.unregister_mcp_servers(
-                crate::agents::McpScope::User,
-                home,
-                sym,
-                &server_names,
-                out,
-            );
         }
     }
+    unregister_unconfigured_mcp_servers(
+        sym,
+        &agent_names,
+        |agent, file| file == agent.mcp_config_path(crate::agents::McpScope::User, home, sym),
+        out,
+    );
 
     Ok(())
+}
+
+fn record_mcp_registrations(sym: &Symposium, agent: Agent, file: &Path, names: Vec<String>) {
+    crate::state::record_mcp_registrations(
+        sym.config_dir(),
+        names
+            .into_iter()
+            .map(|name| crate::state::McpRegistration {
+                agent: agent.config_name().to_string(),
+                file: file.to_path_buf(),
+                name,
+            })
+            .collect(),
+    );
+}
+
+/// Remove the MCP entries Symposium wrote for agents that are not configured,
+/// in the files `in_reach` accepts. An entry whose removal fails stays
+/// recorded, so the next run retries it.
+fn unregister_unconfigured_mcp_servers(
+    sym: &Symposium,
+    agent_names: &[String],
+    in_reach: impl Fn(Agent, &Path) -> bool,
+    out: &Output,
+) {
+    let mut removed = Vec::new();
+    for registration in crate::state::mcp_registrations(sym.config_dir()) {
+        if agent_names.contains(&registration.agent) {
+            continue;
+        }
+        let Ok(agent) = Agent::from_config_name(&registration.agent) else {
+            continue;
+        };
+        if in_reach(agent, &registration.file)
+            && agent
+                .unregister_mcp_servers(&registration.file, &[&registration.name], out)
+                .is_ok()
+        {
+            removed.push(registration);
+        }
+    }
+    crate::state::forget_mcp_registrations(sym.config_dir(), &removed);
 }
 
 #[cfg(test)]

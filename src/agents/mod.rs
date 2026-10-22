@@ -291,7 +291,8 @@ impl Agent {
         )
     }
 
-    /// Register MCP servers in the agent's config for `scope`.
+    /// Register MCP servers in the agent's config for `scope`, returning the
+    /// names of the servers now present there (skipped ones left out).
     pub fn register_mcp_servers(
         &self,
         scope: McpScope,
@@ -299,7 +300,7 @@ impl Agent {
         sym: &Symposium,
         servers: &[sacp::schema::McpServer],
         out: &Output,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         tracing::debug!(agent = %self.config_name(), count = servers.len(), ?scope, "registering MCP servers");
         let path = self.mcp_config_path(scope, project_root, sym);
         match self {
@@ -325,35 +326,23 @@ impl Agent {
         }
     }
 
-    /// Remove MCP servers from the agent's config for `scope`.
-    pub fn unregister_mcp_servers(
-        &self,
-        scope: McpScope,
-        project_root: &Path,
-        sym: &Symposium,
-        names: &[&str],
-        out: &Output,
-    ) -> Result<()> {
-        let path = self.mcp_config_path(scope, project_root, sym);
+    /// Remove MCP servers from `path`, an MCP config file of this agent.
+    pub fn unregister_mcp_servers(&self, path: &Path, names: &[&str], out: &Output) -> Result<()> {
         match self {
             Agent::Claude => {
-                mcp_server_registration::unregister_claude_mcp_servers(&path, names, out)
+                mcp_server_registration::unregister_claude_mcp_servers(path, names, out)
             }
-            Agent::Codex => {
-                mcp_server_registration::unregister_codex_mcp_servers(&path, names, out)
-            }
+            Agent::Codex => mcp_server_registration::unregister_codex_mcp_servers(path, names, out),
             Agent::Copilot => {
-                mcp_server_registration::unregister_copilot_mcp_servers(&path, names, out)
+                mcp_server_registration::unregister_copilot_mcp_servers(path, names, out)
             }
             Agent::Antigravity => {
-                mcp_server_registration::unregister_antigravity_mcp_servers(&path, names, out)
+                mcp_server_registration::unregister_antigravity_mcp_servers(path, names, out)
             }
-            Agent::Kiro => mcp_server_registration::unregister_kiro_mcp_servers(&path, names, out),
-            Agent::Goose => {
-                mcp_server_registration::unregister_goose_mcp_servers(&path, names, out)
-            }
+            Agent::Kiro => mcp_server_registration::unregister_kiro_mcp_servers(path, names, out),
+            Agent::Goose => mcp_server_registration::unregister_goose_mcp_servers(path, names, out),
             Agent::OpenCode => {
-                mcp_server_registration::unregister_opencode_mcp_servers(&path, names, out)
+                mcp_server_registration::unregister_opencode_mcp_servers(path, names, out)
             }
         }
     }
@@ -1177,7 +1166,11 @@ mod tests {
 
             agent.unregister_hooks(sym.home_dir(), &sym, &out);
             agent
-                .unregister_mcp_servers(McpScope::User, project, &sym, &["symposium"], &out)
+                .unregister_mcp_servers(
+                    &agent.mcp_config_path(McpScope::User, project, &sym),
+                    &["symposium"],
+                    &out,
+                )
                 .unwrap();
             if let Some(hooks) = hooks {
                 assert!(
@@ -1240,6 +1233,7 @@ mod tests {
                 "config.toml",
                 &|path: &Path| {
                     mcp_server_registration::register_codex_mcp_servers(path, &servers, &out)
+                        .map(drop)
                 },
                 &["[[[", "mcp_servers = 3"],
             ),

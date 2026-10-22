@@ -25,7 +25,7 @@ Scans workspace dependencies, installs applicable skills into agent directories,
 
    While a registry cannot be read, this step is skipped and a warning names the registry: it offered nothing this time, so everything it installed would look stale.
 
-8. **Register hooks** — ensure symposium's global hook handler and MCP servers are registered for all configured agents. Unregister hooks for agents no longer in the config. Only symposium's own handler is registered (e.g., `cargo-agents hook claude pre-tool-use`) — individual plugin hooks are never written into agent configs. See [Hooks](./hooks.md) for the dispatch model.
+8. **Register hooks**: ensure symposium's global hook handler and MCP servers are registered for all configured agents. Unregister hooks for agents no longer in the config, and remove the MCP entries symposium recorded for them in the [MCP ledger](./state.md#mcp-server-ledger), limited to the agent's user-level file and files inside this workspace (another workspace's project file waits for a sync there). Only symposium's own handler is registered (e.g., `cargo-agents hook claude pre-tool-use`); individual plugin hooks are never written into agent configs. See [Hooks](./hooks.md) for the dispatch model.
 
 ## Marker file
 

@@ -430,6 +430,65 @@ async fn sync_preserves_user_managed_skills() {
     .unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn sync_keeps_skills_seen_through_a_linked_skills_dir() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugins0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "codex"]).await?;
+
+            let workspace_root = ctx.workspace_root.clone().unwrap();
+            std::fs::create_dir_all(workspace_root.join(".agents/skills")).unwrap();
+            std::fs::create_dir_all(workspace_root.join(".claude")).unwrap();
+            std::os::unix::fs::symlink("../.agents/skills", workspace_root.join(".claude/skills"))
+                .unwrap();
+
+            ctx.symposium(&["sync"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let installed =
+                find_installed_skill(&workspace_root.join(".agents/skills"), "serde-guidance");
+            assert!(installed.join(".symposium").exists());
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sync_leaves_user_symlinks_in_a_skills_dir() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugins0", "workspace0"],
+        async |mut ctx| {
+            ctx.symposium(&["init", "--add-agent", "claude"]).await?;
+            ctx.symposium(&["sync"]).await?;
+
+            let skills_dir = ctx.workspace_root.as_ref().unwrap().join(".claude/skills");
+            let installed = find_installed_skill(&skills_dir, "serde-guidance");
+            let alias = skills_dir.join("serde-alias");
+            std::os::unix::fs::symlink(installed.file_name().unwrap(), &alias).unwrap();
+
+            ctx.symposium(&["sync"]).await?;
+
+            assert!(
+                std::fs::symlink_metadata(&alias)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(installed.join("SKILL.md").exists());
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn sync_keeps_skills_of_a_registry_it_cannot_read() {
     let breakages: [fn(&Path); 2] = [

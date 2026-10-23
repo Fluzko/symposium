@@ -598,10 +598,18 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
     // Stale-skill cleanup: scan every agent's skills parent directory (across
     // all known agents, so we also clean up after agents removed from config)
     // and remove subdirs containing the marker that we didn't just install.
+    // Compared by resolved path, since one agent's skills dir can be a symlink
+    // to another's. A symlink entry is user content and is never followed.
     let skip_cleanup = !registry.unreadable_registries.is_empty();
+    let installed: BTreeSet<PathBuf> = installed_dirs
+        .iter()
+        .filter_map(|dir| dir.canonicalize().ok())
+        .collect();
     let mut scanned: BTreeSet<PathBuf> = BTreeSet::new();
     for &agent in Agent::all() {
-        let parent = skills_parent_dir(agent, &project_root);
+        let Ok(parent) = skills_parent_dir(agent, &project_root).canonicalize() else {
+            continue;
+        };
         if skip_cleanup || !scanned.insert(parent.clone()) {
             continue;
         }
@@ -609,8 +617,11 @@ pub async fn sync(sym: &Symposium, deps: &Arc<WorkspaceDeps>, update: UpdateLeve
             continue;
         };
         for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
             let path = entry.path();
-            if !path.is_dir() || installed_dirs.contains(&path) {
+            if installed.contains(&path) {
                 continue;
             }
             if !has_symposium_marker(&path) {
